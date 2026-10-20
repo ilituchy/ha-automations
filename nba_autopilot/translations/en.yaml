@@ -1,0 +1,107 @@
+---
+configuration:
+  espn_league_id:
+    name: ESPN league ID
+    description: >-
+      The numeric ID of your ESPN fantasy basketball league. Open your league
+      in a browser and copy the number after "leagueId=" in the URL.
+  espn_team_id:
+    name: ESPN team ID
+    description: >-
+      The numeric ID of your team within that league. Open your own team page
+      and copy the number after "teamId=" in the URL. It is usually a small
+      number such as 1-12.
+  espn_s2:
+    name: ESPN espn_s2 cookie
+    description: >-
+      The "espn_s2" cookie from a logged-in ESPN session, required for private
+      leagues. SECURITY: this value is stored in PLAINTEXT on disk in the
+      Supervisor add-on options and will be INCLUDED IN YOUR HOME ASSISTANT
+      BACKUPS. Please enable backup encryption (Settings > System > Backups >
+      three-dot menu > Encryption) and do not share backups or logs. The cookie
+      grants full access to your ESPN account; rotate it by logging out of ESPN
+      if it ever leaks. See the Documentation tab for how to extract it.
+  espn_swid:
+    name: ESPN SWID cookie
+    description: >-
+      The "SWID" cookie from the same logged-in ESPN session, including the
+      surrounding curly braces. SECURITY: like espn_s2 this is stored in
+      PLAINTEXT on disk and will be INCLUDED IN YOUR HOME ASSISTANT BACKUPS, so
+      enable backup encryption and treat backups as secrets. Logging out of
+      ESPN invalidates it.
+  ha_notify_device:
+    name: Notification target
+    description: >-
+      The notify service suffix for the phone that should receive approval
+      prompts, without the "notify." prefix - for example
+      "mobile_app_ians_iphone". See the Documentation tab for how to find it in
+      Developer tools > Actions.
+  ha_owner_user_id:
+    name: Owner user ID
+    description: >-
+      Your Home Assistant user ID (a 32-character hex string). Only action taps
+      coming from this user are allowed to approve moves, so that someone else
+      on your network cannot approve a trade or a drop. Find it under Settings >
+      People > your user, in the browser URL.
+  ha_todo_entity:
+    name: To-do list entity
+    description: >-
+      The to-do list entity where pending manual tasks are written, such as
+      "waiver claim needs your approval". Create the list first under Settings >
+      Devices & services > Helpers > To-do list.
+  timezone:
+    name: Time zone
+    description: >-
+      IANA time zone name used to interpret the daily run times and to decide
+      which NBA game day it is - for example "America/Los_Angeles".
+  run_times:
+    name: Daily run times
+    description: >-
+      Local times of day (24-hour "HH:MM") at which the autopilot evaluates
+      your lineup. Add more entries to run several times a day; a morning run
+      plus one shortly before the first tip-off is a common setup.
+  autonomy_lineup:
+    name: Set lineup automatically
+    description: >-
+      When enabled, the autopilot starts and benches players on its own without
+      asking. This is reversible and low risk, so it is on by default.
+  autonomy_ir:
+    name: Move IR-eligible players automatically
+    description: >-
+      When enabled, players who become IR-eligible are moved into your injured
+      reserve slots, and players who lose eligibility are moved out, without
+      asking. Also reversible, so on by default.
+  autonomy_add_drop:
+    name: Add and drop players automatically
+    description: >-
+      When enabled, the autopilot may add and drop players without asking.
+      OFF by default and recommended to stay off: dropping a player is
+      IRREVERSIBLE and another manager can claim them immediately. With this
+      off you still get a notification with an Approve button for every
+      suggested add/drop.
+  never_drop:
+    name: Never-drop list
+    description: >-
+      Player names that must never be dropped, regardless of projections. Use
+      the full name as it appears on ESPN, for example "Victor Wembanyama".
+      Acts as a safety net even when add/drop autonomy is enabled.
+  max_faab_bid:
+    name: Maximum FAAB bid
+    description: >-
+      The largest free-agent-acquisition-budget bid the autopilot may place, in
+      whole dollars (0-1000). Leave at 0 to never bid, which is also correct for
+      leagues that use a waiver priority order instead of FAAB.
+  shadow_mode:
+    name: Shadow mode
+    description: >-
+      When enabled, the autopilot computes every decision and notifies you, but
+      never sends anything to ESPN. ON by default so you can watch it for a few
+      days and confirm you agree with its choices before letting it touch your
+      real team. Turn this off to go live.
+  log_level:
+    name: Log level
+    description: >-
+      Verbosity of the app log. Use "debug" when diagnosing a problem and
+      "info" for normal operation. Note that "debug" and "trace" are more
+      verbose but still redact your ESPN cookies.
+network: {}

@@ -1,0 +1,29 @@
+# Pinned, wheel-only dependency set.
+#
+# Every pin below was verified against the PyPI JSON API and resolved as a
+# complete transitive closure with:
+#
+#   pip download -r requirements.txt --only-binary=:all: \
+#       --python-version 313 --implementation cp --abi cp313 \
+#       --platform musllinux_1_2_aarch64 --platform musllinux_1_1_aarch64
+#
+# (and the same for *_x86_64). No sdists, so no compiler is needed in the image.
+#
+# Only two packages in the closure are compiled; everything else is py3-none-any:
+#   websockets    -> cp313-cp313-musllinux_1_2_aarch64 / _x86_64
+#   pydantic-core -> cp313-cp313-musllinux_1_1_aarch64 / _x86_64  (via fastapi)
+#
+# NOTE: pydantic-core publishes musllinux_1_1 wheels, not musllinux_1_2.
+# That is fine -- musl is forward compatible and Alpine 3.24 (musl 1.2.x)
+# installs _1_1 wheels -- but `--platform musllinux_1_2_aarch64` alone will
+# NOT match them, which is why the pip invocation above passes both tags.
+#
+# By design there is no numpy/scipy here; the solver is pure Python.
+
+httpx==0.28.1
+websockets==17.3
+APScheduler==3.11.3
+fastapi==0.156.1
+uvicorn==0.54.0
+python-ulid==4.0.1
+pypdf==6.21.1

@@ -1,0 +1,43 @@
+#!/command/with-contenv bashio
+# ==============================================================================
+# NBA Fantasy Autopilot -- main service
+# Reads the app options via bashio and execs the Python app in the foreground
+# so s6 supervises the interpreter itself rather than a shell wrapper.
+# ==============================================================================
+
+declare log_level
+declare timezone
+
+log_level=$(bashio::config 'log_level' 'info')
+timezone=$(bashio::config 'timezone' 'America/Los_Angeles')
+
+# Fail fast with a clear message if a required option is missing, instead of
+# letting the Python app crash on a null.
+for key in espn_league_id espn_team_id espn_s2 espn_swid \
+           ha_notify_device ha_owner_user_id; do
+    if ! bashio::config.has_value "${key}"; then
+        bashio::exit.nok "Required option '${key}' is not set. Open the app's Configuration tab and set it."
+    fi
+done
+
+bashio::log.level "${log_level}"
+bashio::log.info "Starting NBA Fantasy Autopilot..."
+
+if bashio::config.true 'shadow_mode'; then
+    bashio::log.notice "SHADOW MODE is enabled: moves are computed and notified but never POSTed to ESPN."
+fi
+
+if ! bashio::config.true 'autonomy_add_drop'; then
+    bashio::log.info "Add/drop autonomy is off: waiver and drop moves will ask for approval."
+fi
+
+# The Supervisor token is what authenticates us to the Core API proxy.
+export SUPERVISOR_TOKEN="${SUPERVISOR_TOKEN}"
+export TZ="${timezone}"
+export AUTOPILOT_DB="/data/autopilot.db"
+export AUTOPILOT_LOG_LEVEL="${log_level}"
+export AUTOPILOT_INGRESS_PORT="8099"
+
+cd /app || bashio::exit.nok "Could not change to /app"
+
+exec python3 /app/main.py

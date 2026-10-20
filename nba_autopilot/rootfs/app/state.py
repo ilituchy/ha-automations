@@ -1,0 +1,423 @@
+"""Approval state machine and write journal. SQLite at ``/data/autopilot.db``.
+
+Two concerns, one file because they share a transaction boundary:
+
+* **Proposals** -- what we want to do and whether a human has blessed it.
+* **Journal** -- what we actually sent to ESPN and what came back.
+
+``PROPOSED -> APPROVED -> EXECUTING -> DONE | FAILED | EXPIRED | REJECTED``
+
+The one transition that matters is ``APPROVED -> EXECUTING``. It is a single
+guarded ``UPDATE`` and ``rowcount == 0`` means someone else already claimed it.
+That is the entire defence against a double-tap on a push notification, and it
+has to be done in the database rather than in Python because the notification
+handler and the scheduler are different coroutines racing on the same row.
+
+Approval never carries over: a proposal is scoped to a ``run_id`` and expires.
+Yesterday's blessing cannot authorize today's move.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sqlite3
+import threading
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+
+log = logging.getLogger(__name__)
+
+PROPOSED = "PROPOSED"
+APPROVED = "APPROVED"
+EXECUTING = "EXECUTING"
+DONE = "DONE"
+FAILED = "FAILED"
+EXPIRED = "EXPIRED"
+REJECTED = "REJECTED"
+
+TERMINAL = frozenset({DONE, FAILED, EXPIRED, REJECTED})
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS runs (
+    run_id            TEXT PRIMARY KEY,
+    started_at        TEXT NOT NULL,
+    finished_at       TEXT,
+    scoring_period    INTEGER,
+    shadow_mode       INTEGER NOT NULL DEFAULT 1,
+    sources_used      TEXT NOT NULL DEFAULT '{}',
+    sources_missing   TEXT NOT NULL DEFAULT '{}',
+    shadow_prices     TEXT NOT NULL DEFAULT '{}',
+    category_weights  TEXT NOT NULL DEFAULT '{}',
+    notes             TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE TABLE IF NOT EXISTS proposals (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id        TEXT NOT NULL REFERENCES runs(run_id),
+    action_id     TEXT NOT NULL UNIQUE,
+    kind          TEXT NOT NULL,
+    state         TEXT NOT NULL,
+    payload       TEXT NOT NULL,
+    rationale     TEXT NOT NULL DEFAULT '',
+    value_delta   REAL NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL,
+    expires_at    TEXT NOT NULL,
+    decided_at    TEXT,
+    decided_by    TEXT,
+    finished_at   TEXT,
+    error         TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_proposals_state ON proposals(state);
+CREATE INDEX IF NOT EXISTS idx_proposals_run   ON proposals(run_id);
+
+CREATE TABLE IF NOT EXISTS journal (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          TEXT,
+    proposal_id     INTEGER REFERENCES proposals(id),
+    kind            TEXT NOT NULL,
+    request         TEXT NOT NULL,
+    sent_at         TEXT NOT NULL,
+    outcome         TEXT NOT NULL,
+    http_status     INTEGER,
+    transaction_id  TEXT,
+    proposed_date   INTEGER,
+    response        TEXT,
+    error           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_journal_outcome ON journal(outcome);
+"""
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@dataclass(frozen=True)
+class Proposal:
+    id: int
+    run_id: str
+    action_id: str
+    kind: str
+    state: str
+    payload: Mapping[str, Any]
+    rationale: str
+    value_delta: float
+    expires_at: datetime
+
+    @property
+    def requires_approval(self) -> bool:
+        return self.kind in ("ADD", "DROP", "ADD_DROP")
+
+
+class Store:
+    def __init__(self, path: Optional[str] = None) -> None:
+        self.path = path or os.environ.get("AUTOPILOT_DB", "/data/autopilot.db")
+        parent = os.path.dirname(self.path)
+        if parent and parent != ":memory:":
+            os.makedirs(parent, exist_ok=True)
+        self._lock = threading.RLock()
+        self.db = sqlite3.connect(self.path, check_same_thread=False)
+        self.db.row_factory = sqlite3.Row
+        # WAL so the ingress status page can read while a run writes.
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA foreign_keys=ON")
+        self.db.execute("PRAGMA synchronous=FULL")
+        self.db.executescript(SCHEMA)
+        self.db.commit()
+
+    def close(self) -> None:
+        with self._lock:
+            self.db.close()
+
+    # -- runs --------------------------------------------------------------
+
+    def start_run(
+        self, run_id: str, scoring_period: int, shadow_mode: bool
+    ) -> None:
+        with self._lock, self.db:
+            self.db.execute(
+                "INSERT INTO runs (run_id, started_at, scoring_period, shadow_mode) "
+                "VALUES (?,?,?,?)",
+                (run_id, _now(), int(scoring_period), 1 if shadow_mode else 0),
+            )
+
+    def finish_run(
+        self,
+        run_id: str,
+        *,
+        sources_used: Mapping[str, str],
+        sources_missing: Mapping[str, str],
+        shadow_prices: Mapping[int, float],
+        category_weights: Mapping[int, float],
+        notes: Sequence[str] = (),
+    ) -> None:
+        """Persist the duals, not just the decisions.
+
+        When a move looks wrong the question is always "what did it think the
+        margin was". Storing ``lambda_s`` and ``w_k`` is what makes that
+        answerable a week later instead of unreproducible.
+        """
+        with self._lock, self.db:
+            self.db.execute(
+                "UPDATE runs SET finished_at=?, sources_used=?, sources_missing=?, "
+                "shadow_prices=?, category_weights=?, notes=? WHERE run_id=?",
+                (
+                    _now(),
+                    json.dumps(dict(sources_used)),
+                    json.dumps(dict(sources_missing)),
+                    json.dumps({str(k): v for k, v in shadow_prices.items()}),
+                    json.dumps({str(k): v for k, v in category_weights.items()}),
+                    json.dumps(list(notes)),
+                    run_id,
+                ),
+            )
+
+    # -- proposals ---------------------------------------------------------
+
+    def propose(
+        self,
+        run_id: str,
+        kind: str,
+        payload: Mapping[str, Any],
+        *,
+        rationale: str = "",
+        value_delta: float = 0.0,
+        ttl: timedelta = timedelta(hours=6),
+        auto_approve: bool = False,
+    ) -> Proposal:
+        """Record an intended move.
+
+        ``auto_approve`` is for the autonomous classes (lineup, IR). It still
+        creates a row -- autonomy changes who approves, never whether there is
+        an audit trail.
+        """
+        action_id = "%s:%s:%d" % (run_id, kind, _next_seq(self.db, run_id, kind))
+        expires = datetime.now(timezone.utc) + ttl
+        state = APPROVED if auto_approve else PROPOSED
+        with self._lock, self.db:
+            cur = self.db.execute(
+                "INSERT INTO proposals (run_id, action_id, kind, state, payload, "
+                "rationale, value_delta, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    run_id,
+                    action_id,
+                    kind,
+                    state,
+                    json.dumps(dict(payload)),
+                    rationale,
+                    float(value_delta),
+                    _now(),
+                    expires.isoformat(),
+                ),
+            )
+            pid = int(cur.lastrowid)
+        return Proposal(
+            id=pid,
+            run_id=run_id,
+            action_id=action_id,
+            kind=kind,
+            state=state,
+            payload=dict(payload),
+            rationale=rationale,
+            value_delta=value_delta,
+            expires_at=expires,
+        )
+
+    def decide(self, action_id: str, approve: bool, user_id: str) -> Optional[Proposal]:
+        """Apply a human decision from a notification tap.
+
+        Guarded on ``state=PROPOSED``, so a tap on a *stale* notification --
+        one whose proposal already ran, expired, or was rejected -- is a no-op
+        returning ``None`` rather than a resurrection. HA registers notification
+        action ids globally, which is precisely why ``action_id`` embeds the
+        ``run_id`` and why this check cannot be skipped.
+        """
+        new_state = APPROVED if approve else REJECTED
+        with self._lock, self.db:
+            cur = self.db.execute(
+                "UPDATE proposals SET state=?, decided_at=?, decided_by=? "
+                "WHERE action_id=? AND state=?",
+                (new_state, _now(), user_id, action_id, PROPOSED),
+            )
+            if cur.rowcount == 0:
+                log.warning(
+                    "ignoring decision on %s: not in %s state (stale notification?)",
+                    action_id,
+                    PROPOSED,
+                )
+                return None
+        return self.get(action_id)
+
+    def claim_for_execution(self, proposal_id: int) -> bool:
+        """``APPROVED -> EXECUTING``, atomically. The double-tap guard.
+
+        Returns True if *this* caller won the race. Must be the only path to
+        executing a proposal: any code that checks state and then executes in
+        two steps has a window in which both the notification handler and the
+        scheduler can pass the check.
+        """
+        with self._lock, self.db:
+            cur = self.db.execute(
+                "UPDATE proposals SET state=? WHERE id=? AND state=?",
+                (EXECUTING, int(proposal_id), APPROVED),
+            )
+            return cur.rowcount == 1
+
+    def complete(self, proposal_id: int, ok: bool, error: str = "") -> None:
+        with self._lock, self.db:
+            self.db.execute(
+                "UPDATE proposals SET state=?, finished_at=?, error=? WHERE id=?",
+                (DONE if ok else FAILED, _now(), error, int(proposal_id)),
+            )
+
+    def expire_stale(self) -> int:
+        """Sweep. Run on a 15-minute timer.
+
+        Only ``PROPOSED`` rows expire. An ``EXECUTING`` row that outlives its
+        TTL is a stuck write, not an expired approval, and silently expiring it
+        would hide exactly the failure we most want to see.
+        """
+        with self._lock, self.db:
+            cur = self.db.execute(
+                "UPDATE proposals SET state=?, finished_at=? "
+                "WHERE state=? AND expires_at < ?",
+                (EXPIRED, _now(), PROPOSED, _now()),
+            )
+            return cur.rowcount
+
+    def get(self, action_id: str) -> Optional[Proposal]:
+        with self._lock:
+            row = self.db.execute(
+                "SELECT * FROM proposals WHERE action_id=?", (action_id,)
+            ).fetchone()
+        return _row_to_proposal(row) if row else None
+
+    def pending(self, run_id: Optional[str] = None) -> List[Proposal]:
+        q = "SELECT * FROM proposals WHERE state=?"
+        args: List[Any] = [PROPOSED]
+        if run_id:
+            q += " AND run_id=?"
+            args.append(run_id)
+        with self._lock:
+            rows = self.db.execute(q + " ORDER BY id", args).fetchall()
+        return [_row_to_proposal(r) for r in rows]
+
+    def approved(self, run_id: Optional[str] = None) -> List[Proposal]:
+        q = "SELECT * FROM proposals WHERE state=?"
+        args: List[Any] = [APPROVED]
+        if run_id:
+            q += " AND run_id=?"
+            args.append(run_id)
+        with self._lock:
+            rows = self.db.execute(q + " ORDER BY id", args).fetchall()
+        return [_row_to_proposal(r) for r in rows]
+
+    def stuck_writes(self) -> List[Mapping[str, Any]]:
+        """Indeterminate journal entries awaiting reconciliation.
+
+        Anything here means a POST timed out and we do not know whether ESPN
+        applied it. Must be resolved by reading ESPN before the next write of
+        the same kind.
+        """
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT * FROM journal WHERE outcome='INDETERMINATE' ORDER BY id"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- journal (the interface espn/write.py depends on) ------------------
+
+    def record_attempt(
+        self, kind: str, body: Mapping[str, Any], *, run_id: Optional[str] = None,
+        proposal_id: Optional[int] = None
+    ) -> int:
+        """Insert *before* the request. Returns the journal id.
+
+        Ordering is the point: the row exists before the socket is written, so
+        a crash mid-POST still leaves evidence. A write with no journal row is
+        not a thing that can happen.
+        """
+        with self._lock, self.db:
+            cur = self.db.execute(
+                "INSERT INTO journal (run_id, proposal_id, kind, request, sent_at, outcome) "
+                "VALUES (?,?,?,?,?,?)",
+                (run_id, proposal_id, kind, json.dumps(dict(body)), _now(), "SENT"),
+            )
+            return int(cur.lastrowid)
+
+    def record_success(self, journal_id: Optional[int], result: Any) -> None:
+        if journal_id is None:
+            return
+        with self._lock, self.db:
+            self.db.execute(
+                "UPDATE journal SET outcome='OK', transaction_id=?, proposed_date=?, "
+                "response=? WHERE id=?",
+                (
+                    getattr(result, "transaction_id", None),
+                    getattr(result, "proposed_date", None),
+                    json.dumps(getattr(result, "raw", None) or {}),
+                    int(journal_id),
+                ),
+            )
+
+    def record_failure(
+        self, journal_id: Optional[int], status: int, text: str
+    ) -> None:
+        if journal_id is None:
+            return
+        with self._lock, self.db:
+            self.db.execute(
+                "UPDATE journal SET outcome='REJECTED', http_status=?, response=? "
+                "WHERE id=?",
+                (int(status), text, int(journal_id)),
+            )
+
+    def record_indeterminate(self, journal_id: Optional[int], error: str) -> None:
+        if journal_id is None:
+            return
+        with self._lock, self.db:
+            self.db.execute(
+                "UPDATE journal SET outcome='INDETERMINATE', error=? WHERE id=?",
+                (error, int(journal_id)),
+            )
+
+    def resolve_indeterminate(self, journal_id: int, applied: bool, note: str) -> None:
+        with self._lock, self.db:
+            self.db.execute(
+                "UPDATE journal SET outcome=?, error=? WHERE id=?",
+                ("OK" if applied else "NOT_APPLIED", note, int(journal_id)),
+            )
+
+    def record_shadow(self, kind: str, body: Mapping[str, Any]) -> None:
+        with self._lock, self.db:
+            self.db.execute(
+                "INSERT INTO journal (kind, request, sent_at, outcome) VALUES (?,?,?,?)",
+                (kind, json.dumps(dict(body)), _now(), "SHADOW"),
+            )
+
+
+def _next_seq(db: sqlite3.Connection, run_id: str, kind: str) -> int:
+    row = db.execute(
+        "SELECT COUNT(*) AS n FROM proposals WHERE run_id=? AND kind=?",
+        (run_id, kind),
+    ).fetchone()
+    return int(row["n"]) + 1
+
+
+def _row_to_proposal(row: sqlite3.Row) -> Proposal:
+    return Proposal(
+        id=int(row["id"]),
+        run_id=str(row["run_id"]),
+        action_id=str(row["action_id"]),
+        kind=str(row["kind"]),
+        state=str(row["state"]),
+        payload=json.loads(row["payload"]),
+        rationale=str(row["rationale"] or ""),
+        value_delta=float(row["value_delta"] or 0.0),
+        expires_at=datetime.fromisoformat(row["expires_at"]),
+    )
