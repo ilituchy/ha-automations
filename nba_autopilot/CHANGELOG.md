@@ -10,7 +10,7 @@ All notable changes to this app are documented here. The format follows
 
 - **Multiple leagues.** The `leagues` option takes one entry per team you
   manage (`league_id`, `team_id`, optional `label`). Each league is optimized
-  independently — roster, category weights and games-played budget are
+  independently — roster, player values and games-played budget are
   league-local — and only the ESPN cookie and the notification channel are
   shared. A league that errors is skipped for that run; the others continue.
   Notifications name their league.
@@ -18,8 +18,35 @@ All notable changes to this app are documented here. The format follows
   journal can be read per league. Added by an additive `ALTER TABLE` migration
   that is safe to replay, since `CREATE TABLE IF NOT EXISTS` cannot widen a
   database that already exists.
+- **Points-league scoring.** A player-game is now valued as the dot product of
+  his projected line against the league's `scoringItems`. The categories model
+  is unchanged and still present; the league type is read from ESPN's own
+  `scoringType` rather than configured. See ADR-010.
+- Per-league `season` in the `leagues` option, and a validity check on it. A
+  wrong season is the one setting that fails *silently* — ESPN serves a
+  finished season happily, with final standings — so the season in use for each
+  league is now reported in the run record. Leave it at `0` to derive it from
+  the date. Note that ESPN labels a season by the year it ends in: 2026-27 is
+  `2027`.
+- `tools/espn_probe.py`, read-only league reconnaissance. It builds the read
+  client, so it physically cannot write, and it takes cookies from a `0600`
+  file rather than from `argv`.
 
 ### Changed
+
+- **The games-played cap is modelled as one pooled weekly budget** rather than
+  a per-slot season-long one, which is what two live leagues actually report:
+  a single entry whose value scales with starter count (40 and 44 per matchup
+  period against 10 and 11 starting slots). One shadow price instead of one per
+  slot. The cap binds harder than the old reading implied — a deep-bench league
+  has roughly twice as many startable player-games in a week as it has budget —
+  so `utilization_ratio` is surfaced to explain deliberate benching. See
+  ADR-011.
+- Under a binding cap, the start/bench threshold now compares the value
+  **conditional on the player playing** rather than the availability-weighted
+  value. The cap counts games *played*, so availability cancels out of the
+  comparison: a questionable star and a healthy role player with the same
+  expected line are not the same bet, and the star is the better one.
 
 - The app now lives in the [`ha-automations`][repo] repository alongside other
   Home Assistant automations, at `nba_autopilot/`. The store entry, slug and
@@ -33,6 +60,24 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **Four league-settings fields were parsed wrongly**, all found by the first
+  read of a real league:
+  - `lineupSlotStatLimits` is `{slot: {statId, limitValue}}`, not
+    `{slot: int}`. Reading it as an int raised `TypeError`.
+  - the waiver mode was read from `waiverProcessDays`, which is a *list* of
+    weekday names, so both leagues reported their mode as `['SUNDAY']`.
+  - the FAAB budget was taken from `acquisitionBudget` without checking
+    `isUsingAcquisitionBudget`. Both leagues send a budget of 100 while running
+    traditional waiver priority, so the app would have tried to bid FAAB in a
+    league that has none.
+  - the roster lock mode was read from `lineupLockTimeType`; ESPN spells it
+    `lineupLocktimeType`, so every league reported `UNKNOWN`. Both leagues are
+    `INDIVIDUAL_GAME` — the strictest mode, where each player locks at his own
+    tip-off rather than at the day's first game.
+- Named the last two unmapped scoring stats (quadruple-double and team win), so
+  no live scoring item is unknown. A league that scores on a *non-additive*
+  stat — a percentage or a per-game average — is now refused outright instead
+  of being valued by a sum that does not apply to it.
 - **Approval taps were recorded as rejections and matched no proposal.** The
   tapped action id (`<run>:<kind>:<seq>:<VERB>`) was passed verbatim to the
   database lookup, which stores `<run>:<kind>:<seq>`, so it never matched; and
