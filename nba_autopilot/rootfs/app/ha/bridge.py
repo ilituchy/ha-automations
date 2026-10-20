@@ -45,6 +45,83 @@ SUPERVISOR_WS = "ws://supervisor/core/websocket"
 NOTIFICATION_TIMEOUT = 21600
 
 
+#: Tap verbs. These are the only four strings that may terminate an action id.
+APPROVE = "APPROVE"
+REJECT = "REJECT"
+APPROVE_ALL = "APPROVE_ALL"
+REJECT_ALL = "REJECT_ALL"
+
+_ITEM_VERBS = (APPROVE, REJECT)
+_BULK_VERBS = (APPROVE_ALL, REJECT_ALL)
+
+
+@dataclass(frozen=True)
+class ParsedAction:
+    """A structurally valid tap.
+
+    ``proposal_action_id`` is the id as ``state.py`` stores it -- the verb
+    stripped off. That distinction is the whole point of this type: the verb
+    belongs to the button, not to the proposal, and conflating them means the
+    database lookup silently matches nothing.
+    """
+
+    run_id: str
+    verb: str
+    proposal_action_id: Optional[str]  # None for bulk taps
+
+    @property
+    def approve(self) -> bool:
+        return self.verb in (APPROVE, APPROVE_ALL)
+
+    @property
+    def is_bulk(self) -> bool:
+        return self.proposal_action_id is None
+
+
+def item_action_id(proposal_action_id: str, verb: str) -> str:
+    """``<run>:<kind>:<seq>`` + verb. The only place item ids are built."""
+    if verb not in _ITEM_VERBS:
+        raise ValueError("bad item verb %r" % verb)
+    return "%s:%s" % (proposal_action_id, verb)
+
+
+def bulk_action_id(run_id: str, verb: str) -> str:
+    if verb not in _BULK_VERBS:
+        raise ValueError("bad bulk verb %r" % verb)
+    return "%s:%s" % (run_id, verb)
+
+
+def parse_action_id(action_id: str) -> Optional[ParsedAction]:
+    """Inverse of the two builders. ``None`` if the id is not ours.
+
+    Shape is enforced rather than assumed. HA registers notification actions
+    globally and delivers them to every listener, so this function sees ids
+    belonging to unrelated automations and must reject them without guessing.
+    """
+    parts = str(action_id).split(":")
+    verb = parts[-1]
+
+    if verb in _BULK_VERBS:
+        # <run_id>:<VERB>
+        if len(parts) != 2 or not parts[0]:
+            return None
+        return ParsedAction(run_id=parts[0], verb=verb, proposal_action_id=None)
+
+    if verb in _ITEM_VERBS:
+        # <run_id>:<kind>:<seq>:<VERB>
+        if len(parts) != 4 or not parts[0] or not parts[1]:
+            return None
+        if not parts[2].isdigit():
+            return None
+        return ParsedAction(
+            run_id=parts[0],
+            verb=verb,
+            proposal_action_id=":".join(parts[:3]),
+        )
+
+    return None
+
+
 @dataclass(frozen=True)
 class Action:
     action_id: str
@@ -64,6 +141,7 @@ class ActionEvent:
     action_id: str
     user_id: Optional[str]
     raw: Mapping[str, Any]
+    parsed: Optional[ParsedAction] = None
 
 
 class HaBridge:
@@ -115,9 +193,17 @@ class HaBridge:
     def check_external_url(self) -> Optional[str]:
         """Confirm HA is reachable from outside before relying on taps.
 
-        Returns the external URL, or ``None`` with a loud log line. A local-only
-        install still receives notifications but can never receive an approval,
-        so this is a startup-time check, not a runtime surprise.
+        Returns a usable external URL, or ``None`` with a loud log line. A
+        local-only install still receives notifications but can never receive an
+        approval, so this is a startup-time check, not a runtime surprise.
+
+        The presence of the ``cloud`` component proves nothing. Verified against
+        a live Nabu Casa instance: ``external_url`` is ``None`` and ``cloud`` is
+        in ``components`` whether or not the remote connection is actually up or
+        the subscription is current. Only ``cloud/status`` distinguishes
+        "approvals will work" from "approvals will silently do nothing", so this
+        asks for the connection state rather than inferring it from a feature
+        list.
         """
         try:
             r = self.http.get("%s/config" % self.base_url)
@@ -125,16 +211,82 @@ class HaBridge:
         except Exception as exc:  # noqa: BLE001 - startup diagnostic only
             log.error("could not read HA config: %s", exc)
             return None
+
         ext = cfg.get("external_url")
-        cloud = "cloud" in (cfg.get("components") or [])
-        if not ext and not cloud:
+        if ext:
+            # An explicit external_url is the user's own statement of intent;
+            # take it over anything inferred.
+            return ext
+
+        if "cloud" not in (cfg.get("components") or []):
             log.error(
                 "HA reports no external_url and no cloud component. Push "
                 "notifications will arrive but APPROVAL TAPS WILL SILENTLY DO "
                 "NOTHING. Enable Nabu Casa / HA Cloud or set an external URL."
             )
             return None
-        return ext or "cloud"
+
+        status = self.cloud_status()
+        if status is None:
+            log.error(
+                "The cloud component is loaded but cloud/status did not answer. "
+                "Treating remote access as unavailable rather than assuming it "
+                "works, because assuming it works fails silently at approval."
+            )
+            return None
+
+        if not status.get("logged_in"):
+            log.error("Not signed in to HA Cloud. Approval taps will not arrive.")
+            return None
+        if not status.get("active_subscription"):
+            log.error(
+                "HA Cloud subscription is not active. Remote access is down, so "
+                "approval taps will not arrive."
+            )
+            return None
+        if not status.get("remote_connected"):
+            log.error(
+                "HA Cloud remote access is not connected (certificate status: "
+                "%s). Approval taps will not arrive until it reconnects. Enable "
+                "Remote Control in Settings -> Home Assistant Cloud.",
+                status.get("remote_certificate_status"),
+            )
+            return None
+
+        domain = status.get("remote_domain")
+        if not domain:
+            log.error("HA Cloud reports connected but exposes no remote domain.")
+            return None
+        return "https://%s" % domain
+
+    def cloud_status(self) -> Optional[Dict[str, Any]]:
+        """One-shot ``cloud/status``. Returns ``None`` on any failure.
+
+        Synchronous on purpose: this runs from ``startup_checks`` before the
+        event loop exists, so it owns a short-lived loop of its own.
+        """
+        try:
+            return asyncio.run(self._ws_command({"type": "cloud/status"}))
+        except Exception as exc:  # noqa: BLE001 - startup diagnostic only
+            log.warning("cloud/status failed: %s", exc)
+            return None
+
+    async def _ws_command(self, msg: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+        """Send one command on a throwaway socket and return its result."""
+        import websockets  # imported late so the rest of the module is testable
+
+        async with websockets.connect(self.ws_url, max_size=8 * 1024 * 1024) as ws:
+            await self._ws_handshake(ws)
+            await ws.send(json.dumps(dict(msg, id=1)))
+            while True:
+                reply = json.loads(await ws.recv())
+                if reply.get("id") != 1 or reply.get("type") != "result":
+                    continue
+                if not reply.get("success"):
+                    log.warning("HA ws command %s failed: %s",
+                                msg.get("type"), reply.get("error"))
+                    return None
+                return reply.get("result")
 
     # -- outbound notification --------------------------------------------
 
@@ -289,6 +441,14 @@ class HaBridge:
         action_id = data.get("action")
         if not action_id:
             return None
+
+        parsed = parse_action_id(action_id)
+        if parsed is None:
+            # Not ours. Every HA notification action on the instance arrives
+            # here, so this is the common case and not worth a warning.
+            log.debug("ignoring foreign action %r", action_id)
+            return None
+
         user_id = ((event.get("context") or {}).get("user_id"))
         if self.owner_user_id and user_id != self.owner_user_id:
             log.warning(
@@ -296,7 +456,9 @@ class HaBridge:
                 action_id, user_id, self.owner_user_id,
             )
             return None
-        return ActionEvent(action_id=str(action_id), user_id=user_id, raw=data)
+        return ActionEvent(
+            action_id=str(action_id), user_id=user_id, raw=data, parsed=parsed
+        )
 
 
 def _extract_todo_items(resp: Any, entity_id: str) -> List[str]:

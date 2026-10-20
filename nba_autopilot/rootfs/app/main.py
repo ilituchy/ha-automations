@@ -26,6 +26,7 @@ import config as appconfig
 import discover as discovery
 from espn.read import EspnAuthError, EspnError, EspnRead, make_client
 from espn.write import EspnWrite
+import ha.bridge as bridge_mod
 from ha.bridge import Action, ActionEvent, HaBridge
 from state import Store
 
@@ -47,27 +48,75 @@ def _ulid() -> str:
         return datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
 
 
+class League:
+    """One league's read/write pair, plus the label used in notifications.
+
+    Leagues share the HTTP client (same cookie, same hosts, and httpx pools
+    connections), the store and the HA bridge. They share nothing else: the
+    optimizer, the games-played budget and the roster are all league-local,
+    and every proposal names its league because a notification reading only
+    "drop Smith" is unactionable when two teams are in play.
+    """
+
+    def __init__(self, ref: appconfig.LeagueRef, cfg: appconfig.Config,
+                 http: Any, store: Store) -> None:
+        self.ref = ref
+        self.name = ref.display()
+        self.espn = cfg.espn(ref)
+        self.read = EspnRead(self.espn, http)
+        self.write = EspnWrite(
+            self.espn,
+            http,
+            self.read,
+            journal=store,
+            shadow_mode=cfg.shadow_mode,
+            never_drop=cfg.never_drop,
+            max_faab_bid=cfg.max_faab_bid,
+        )
+
+    def __repr__(self) -> str:
+        return "<League %d team=%d>" % (self.ref.league_id, self.ref.team_id)
+
+
 class Autopilot:
     def __init__(self, cfg: appconfig.Config) -> None:
         self.cfg = cfg
         self.tz = ZoneInfo(cfg.timezone)
         self.store = Store(cfg.db_path)
-        self.http = make_client(cfg.espn())
-        self.read = EspnRead(cfg.espn(), self.http)
-        self.write = EspnWrite(
-            cfg.espn(),
-            self.http,
-            self.read,
-            journal=self.store,
-            shadow_mode=cfg.shadow_mode,
-            never_drop=cfg.never_drop,
-            max_faab_bid=cfg.max_faab_bid,
-        )
+        # One client across leagues: identical credentials and hosts, so a
+        # second client would buy nothing but a second connection pool.
+        self.http = make_client(cfg.espn(cfg.leagues[0]))
+        self.leagues = [League(ref, cfg, self.http, self.store)
+                        for ref in cfg.leagues]
         self.ha = HaBridge(
             notify_device=cfg.ha_notify_device,
             owner_user_id=cfg.ha_owner_user_id,
             todo_entity=cfg.ha_todo_entity,
         )
+
+    def league_for_run(self, run_id: str) -> Optional[League]:
+        """Map a stored run back to its league, to execute an approved tap.
+
+        A tap carries only a run id, so this is the step that decides whose
+        roster a move lands on. It returns ``None`` rather than defaulting to
+        the first league: writing to the wrong league is precisely what the
+        ownership check exists to prevent, and a silent fallback would route
+        around that check instead of tripping it.
+        """
+        row = self.store.db.execute(
+            "SELECT league_id FROM runs WHERE run_id=?", (run_id,)
+        ).fetchone()
+        if row is None or row["league_id"] is None:
+            log.error("run %s has no league recorded; refusing to execute", run_id)
+            return None
+        for lg in self.leagues:
+            if lg.ref.league_id == int(row["league_id"]):
+                return lg
+        log.error(
+            "run %s belongs to league %s, which is no longer configured; "
+            "refusing to execute", run_id, row["league_id"],
+        )
+        return None
 
     # -- preflight at boot -------------------------------------------------
 
@@ -75,36 +124,43 @@ class Autopilot:
         ok = True
         log.info("config: %s", json.dumps(self.cfg.redacted(), default=str))
 
-        try:
-            settings = self.read.league_settings()
-            log.info(
-                "ESPN OK: %s, %s, scoring period %d",
-                settings.name,
-                settings.scoring_type,
-                settings.current_scoring_period,
-            )
-        except EspnAuthError as exc:
-            log.error("ESPN auth failed: %s", exc)
-            self._notify_problem(
-                "ESPN cookie expired",
-                "Autopilot cannot reach your league. Re-copy espn_s2 from your "
-                "browser and update the app configuration.",
-            )
-            return False
-        except EspnError as exc:
-            log.error("ESPN unreachable: %s", exc)
-            return False
+        for lg in self.leagues:
+            try:
+                settings = lg.read.league_settings()
+                log.info(
+                    "ESPN OK: [%d] %s, %s, scoring period %d",
+                    lg.ref.league_id,
+                    settings.name,
+                    settings.scoring_type,
+                    settings.current_scoring_period,
+                )
+            except EspnAuthError as exc:
+                # One cookie serves every league, so an auth failure is global.
+                # Say it once and stop rather than repeating it per league.
+                log.error("ESPN auth failed: %s", exc)
+                self._notify_problem(
+                    "ESPN cookie expired",
+                    "Autopilot cannot reach your leagues. Re-copy espn_s2 from "
+                    "your browser and update the app configuration.",
+                )
+                return False
+            except EspnError as exc:
+                log.error("league %d unreachable: %s", lg.ref.league_id, exc)
+                ok = False
+                continue
 
-        mine = self.read.my_team_ids()
-        if self.cfg.espn_team_id not in mine:
-            log.error(
-                "team_id %d is not owned by this SWID (owned: %s). Refusing to "
-                "run -- writing to a team you do not own is permitted by ESPN "
-                "and would be publicly attributed to you.",
-                self.cfg.espn_team_id,
-                sorted(mine),
-            )
-            ok = False
+            mine = lg.read.my_team_ids()
+            if lg.ref.team_id not in mine:
+                log.error(
+                    "league %d: team_id %d is not owned by this SWID (owned: "
+                    "%s). Refusing to run -- writing to a team you do not own "
+                    "is permitted by ESPN and would be publicly attributed to "
+                    "you.",
+                    lg.ref.league_id,
+                    lg.ref.team_id,
+                    sorted(mine),
+                )
+                ok = False
 
         ext = self.ha.check_external_url()
         if ext is None:
@@ -144,23 +200,45 @@ class Autopilot:
 
     # -- the daily run -----------------------------------------------------
 
-    def run_once(self) -> str:
+    def run_once(self) -> List[str]:
+        """Run every configured league. Returns the run ids.
+
+        A league that throws does not stop the others. They are independent
+        problems that happen to share a cookie, and skipping today's lineup in
+        league B because league A's roster fetch timed out would be a cost with
+        no corresponding benefit.
+        """
+        run_ids: List[str] = []
+        for lg in self.leagues:
+            try:
+                run_ids.append(self.run_league(lg))
+            except EspnError as exc:
+                log.error("league %s failed: %s", lg.name, exc)
+            except Exception:  # noqa: BLE001 - one league must not kill the rest
+                log.exception("league %s raised", lg.name)
+        return run_ids
+
+    def run_league(self, lg: "League") -> str:
         run_id = _ulid()
-        settings = self.read.league_settings()
-        self.store.start_run(run_id, settings.current_scoring_period,
-                             self.cfg.shadow_mode)
-        log.info("=== run %s, scoring period %d ===", run_id,
-                 settings.current_scoring_period)
+        settings = lg.read.league_settings()
+        self.store.start_run(
+            run_id,
+            settings.current_scoring_period,
+            self.cfg.shadow_mode,
+            league_id=lg.ref.league_id,
+        )
+        log.info("=== run %s | %s | scoring period %d ===", run_id,
+                 settings.name, settings.current_scoring_period)
 
         # NOTE: the projection + solve + propose pipeline is wired in the next
         # phase. Until it is, a run performs the read-only half -- which is
         # exactly what shadow mode is for, and what validates the ESPN read
-        # layer against the real league before anything can write.
-        roster = self.read.roster()
+        # layer against the real leagues before anything can write.
+        roster = lg.read.roster()
         log.info("roster: %d players, %d locked", len(roster),
                  sum(1 for p in roster if p.lineup_locked))
         if settings.has_gp_cap:
-            log.info("games used: %s", self.read.games_used())
+            log.info("games used: %s", lg.read.games_used())
 
         self.store.finish_run(
             run_id,
@@ -175,23 +253,31 @@ class Autopilot:
     # -- approval loop -----------------------------------------------------
 
     async def handle_action(self, ev: ActionEvent) -> None:
-        """Apply a tap. Already authorized by the bridge."""
-        parts = ev.action_id.split(":")
-        if len(parts) < 2:
+        """Apply a tap. Already authorized and shape-checked by the bridge.
+
+        The verb is carried by the button, not by the proposal, so it must be
+        stripped before any database lookup -- ``parsed.proposal_action_id`` is
+        the id as ``state.py`` stores it. Passing the raw tapped id here matches
+        no row and fails silently, which is the failure this whole module is
+        built to prevent.
+        """
+        parsed = ev.parsed or bridge_mod.parse_action_id(ev.action_id)
+        if parsed is None:
             log.warning("unrecognized action id %r", ev.action_id)
             return
-        verb = parts[-1]
-        if verb in ("APPROVE_ALL", "REJECT_ALL"):
-            approve = verb == "APPROVE_ALL"
-            run_id = parts[0]
-            for p in self.store.pending(run_id):
-                self.store.decide(p.action_id, approve, ev.user_id or "?")
-            log.info("%s for run %s", verb, run_id)
+
+        if parsed.is_bulk:
+            for p in self.store.pending(parsed.run_id):
+                self.store.decide(p.action_id, parsed.approve, ev.user_id or "?")
+            log.info("%s for run %s", parsed.verb, parsed.run_id)
         else:
             decided = self.store.decide(
-                ev.action_id, verb == "APPROVE", ev.user_id or "?"
+                parsed.proposal_action_id, parsed.approve, ev.user_id or "?"
             )
             if decided is None:
+                # Already decided, expired, or never existed. A stale tap on an
+                # old notification lands here and correctly does nothing.
+                log.info("tap on %r changed nothing", parsed.proposal_action_id)
                 return
         await self.execute_approved()
 
@@ -216,14 +302,19 @@ class Autopilot:
                 self._notify_problem("Autopilot: move failed", str(exc)[:400])
 
     def _execute(self, proposal: Any) -> Any:
+        lg = self.league_for_run(proposal.run_id)
+        if lg is None:
+            raise ValueError(
+                "cannot route %s to a league; not executing" % proposal.action_id
+            )
         kind = proposal.kind
         payload = proposal.payload
         if kind == "LINEUP":
-            return self.write.set_lineup(
+            return lg.write.set_lineup(
                 {int(k): int(v) for k, v in payload["target"].items()}
             )
         if kind in ("ADD", "DROP", "ADD_DROP"):
-            return self.write.add_drop(
+            return lg.write.add_drop(
                 add=payload.get("add"),
                 drop=payload.get("drop"),
                 bid=payload.get("bid"),
@@ -296,13 +387,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     bot = Autopilot(cfg)
 
     if args.discover:
-        try:
-            report = discovery.report(bot.read)
-        except EspnError as exc:
-            log.error("discovery failed: %s", exc)
-            return 1
-        log.info("discovery complete; %d facts collected", len(report))
-        return 0
+        failures = 0
+        for lg in bot.leagues:
+            log.info("")
+            log.info("################ league %d (team %d) ################",
+                     lg.ref.league_id, lg.ref.team_id)
+            try:
+                report = discovery.report(lg.read)
+            except EspnError as exc:
+                log.error("discovery failed for league %d: %s",
+                          lg.ref.league_id, exc)
+                failures += 1
+                continue
+            log.info("discovery complete; %d facts collected", len(report))
+        return 1 if failures else 0
 
     if not bot.startup_checks():
         log.error("startup checks failed; not scheduling runs")

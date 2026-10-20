@@ -1,58 +1,74 @@
-# NBA Fantasy Autopilot — Home Assistant app repository
+# ha-automations
 
-A Home Assistant app that manages an ESPN fantasy basketball team: it sets your
-lineup, handles IR slots, and asks before doing anything irreversible.
+A personal Home Assistant app repository. Each app here is a self-contained
+automation that was too stateful, too scheduled, or too safety-critical to
+express as a YAML automation.
 
 ## Installation
 
 Add this repository under **Settings → Apps → Repositories**:
 
 ```
-https://github.com/ianlituchy/ha-nba-autopilot
+https://github.com/ilituchy/ha-automations
 ```
 
-Then install **NBA Fantasy Autopilot** from the store.
+[![Open your Home Assistant instance and show the add app repository dialog with a specific repository URL pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Filituchy%2Fha-automations)
 
-[![Open your Home Assistant instance and show the add app repository dialog with a specific repository URL pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fianlituchy%2Fha-nba-autopilot)
+Then install the app you want from the store. Apps are independent: installing
+one does not pull in the others.
 
-## Apps in this repository
+## Apps
 
 | App | Version | Description |
 | --- | --- | --- |
-| [NBA Fantasy Autopilot](./nba_autopilot/) | 0.1.0 | Automated ESPN fantasy basketball lineup management |
+| [NBA Fantasy Autopilot](./nba_autopilot/) | 0.1.0 | Manages one or more ESPN fantasy basketball teams: sets lineups, handles IR, asks before anything irreversible |
 
-Full setup instructions, including how to extract your ESPN session cookies and
-find your notification target and user ID, are in
-[`nba_autopilot/DOCS.md`](./nba_autopilot/DOCS.md).
+Per-app setup lives in that app's `DOCS.md` — for the autopilot, that includes
+extracting ESPN session cookies and finding your notification target and user
+ID: [`nba_autopilot/DOCS.md`](./nba_autopilot/DOCS.md).
 
-## Safety defaults
+## Layout
 
-This app ships deliberately conservative:
-
-- **Shadow mode is ON.** Decisions are computed and reported but never sent to
-  ESPN until you turn it off. Watch it for a few days first.
-- **Add/drop autonomy is OFF.** Lineup and IR changes are reversible, so they're
-  automatic; dropping a player is not, so it always asks.
-- **Approval taps are authorized** against a single configured Home Assistant
-  user ID, so another household member can't approve a move.
-
-## Repository layout
+Standard HA app-repository shape: `repository.yaml` at the root, one directory
+per app, each directory self-contained.
 
 ```
 .
 ├── repository.yaml                      # Repository metadata for the HA store
-├── nba_autopilot/
-│   ├── config.yaml                      # App manifest (options + schema)
-│   ├── Dockerfile                       # Pinned base image, manual io.hass.* labels
-│   ├── requirements.txt                 # Pinned, wheel-only dependencies
-│   ├── DOCS.md                          # User-facing setup guide
-│   ├── CHANGELOG.md
-│   ├── translations/en.yaml             # Option labels and descriptions
-│   └── rootfs/
-│       ├── app/                         # Python application (entrypoint /app/main.py)
-│       └── etc/s6-overlay/s6-rc.d/      # s6-overlay v3 service definitions
-├── docs/
-└── tests/
+├── tools/                               # Shared dev tooling (not shipped in any image)
+│   ├── hactl.py                         # Stdlib-only HA REST + WebSocket client
+│   └── verify_approval.py               # End-to-end check of the approval round-trip
+└── nba_autopilot/
+    ├── config.yaml                      # App manifest (options + schema)
+    ├── Dockerfile                       # Pinned base image, manual io.hass.* labels
+    ├── requirements.txt                 # Pinned, wheel-only dependencies
+    ├── DOCS.md                          # User-facing setup guide
+    ├── CHANGELOG.md
+    ├── docs/                            # Design docs and ADRs
+    ├── tests/
+    ├── translations/en.yaml             # Option labels and descriptions
+    └── rootfs/
+        ├── app/                         # Python application (entrypoint /app/main.py)
+        └── etc/s6-overlay/s6-rc.d/      # s6-overlay v3 service definitions
+```
+
+### `tools/`
+
+Repository-level, not app-level, because they talk to Home Assistant rather
+than to any one app. Both are stdlib-only — `hactl.py` includes a small RFC 6455
+WebSocket client, because the Supervisor API is only reachable over WebSocket
+with a long-lived token and because verifying an approval tap requires receiving
+a live event.
+
+Instance details stay out of the repository: the token is read from
+`~/.ha_token` (mode `600`, never from argv — argv is visible in `ps`), and the
+base URL comes from `$HA_URL`, then `~/.ha_url`, then `homeassistant.local:8123`.
+
+```sh
+tools/hactl.py ping                      # version, user id, admin status
+tools/hactl.py states todo               # filter entities by substring
+tools/hactl.py ws '{"type":"cloud/status"}'
+tools/hactl.py listen mobile_app_notification_action 120
 ```
 
 ## Packaging notes
@@ -69,6 +85,8 @@ out of date:
   but logs a warning. Base image, build args and labels live in the `Dockerfile`.
 - **`io.hass.*` labels are written by hand**, because the legacy builder used to
   inject `io.hass.type`, `name`, `description` and `url` and no longer does.
+  (`io.hass.version`, `io.hass.arch` and `io.hass.type` *are* still passed by
+  Supervisor; the hand-written ones are additive and harmless.)
 - Multi-arch works through the base image's OCI manifest list (amd64 + arm64)
   plus `docker buildx --platform`; no per-architecture Dockerfiles are needed.
 - Local development copies of an app go in the **`local_apps`** folder (mounted
@@ -83,4 +101,4 @@ compatibility.
 
 ## License
 
-MIT
+MIT — see [LICENSE](./LICENSE).

@@ -43,6 +43,7 @@ TERMINAL = frozenset({DONE, FAILED, EXPIRED, REJECTED})
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     run_id            TEXT PRIMARY KEY,
+    league_id         INTEGER,
     started_at        TEXT NOT NULL,
     finished_at       TEXT,
     scoring_period    INTEGER,
@@ -77,6 +78,7 @@ CREATE INDEX IF NOT EXISTS idx_proposals_run   ON proposals(run_id);
 CREATE TABLE IF NOT EXISTS journal (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id          TEXT,
+    league_id       INTEGER,
     proposal_id     INTEGER REFERENCES proposals(id),
     kind            TEXT NOT NULL,
     request         TEXT NOT NULL,
@@ -128,7 +130,32 @@ class Store:
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript(SCHEMA)
+        self._migrate()
         self.db.commit()
+
+    def _migrate(self) -> None:
+        """Add columns that ``CREATE TABLE IF NOT EXISTS`` cannot add.
+
+        An existing database keeps its original shape forever under that DDL,
+        so a new column is silently absent and every write naming it fails at
+        runtime instead of at boot. Each step is additive and nullable, which
+        is what makes replaying them unconditionally safe.
+        """
+        wanted = {
+            "runs": [("league_id", "INTEGER")],
+            "journal": [("league_id", "INTEGER")],
+        }
+        for table, columns in wanted.items():
+            have = {
+                r["name"]
+                for r in self.db.execute("PRAGMA table_info(%s)" % table)
+            }
+            for name, decl in columns:
+                if name not in have:
+                    log.info("migrating: adding %s.%s", table, name)
+                    self.db.execute(
+                        "ALTER TABLE %s ADD COLUMN %s %s" % (table, name, decl)
+                    )
 
     def close(self) -> None:
         with self._lock:
@@ -137,13 +164,23 @@ class Store:
     # -- runs --------------------------------------------------------------
 
     def start_run(
-        self, run_id: str, scoring_period: int, shadow_mode: bool
+        self,
+        run_id: str,
+        scoring_period: int,
+        shadow_mode: bool,
+        league_id: Optional[int] = None,
     ) -> None:
         with self._lock, self.db:
             self.db.execute(
-                "INSERT INTO runs (run_id, started_at, scoring_period, shadow_mode) "
-                "VALUES (?,?,?,?)",
-                (run_id, _now(), int(scoring_period), 1 if shadow_mode else 0),
+                "INSERT INTO runs (run_id, league_id, started_at, scoring_period, "
+                "shadow_mode) VALUES (?,?,?,?,?)",
+                (
+                    run_id,
+                    None if league_id is None else int(league_id),
+                    _now(),
+                    int(scoring_period),
+                    1 if shadow_mode else 0,
+                ),
             )
 
     def finish_run(

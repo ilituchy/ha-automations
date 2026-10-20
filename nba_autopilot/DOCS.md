@@ -9,7 +9,7 @@ anything irreversible.
 
 1. In Home Assistant, go to **Settings → Apps → Repositories** (the three-dot
    menu in the top right → **Repositories**).
-2. Add `https://github.com/ianlituchy/ha-nba-autopilot` and close the dialog.
+2. Add `https://github.com/ilituchy/ha-automations` and close the dialog.
 3. Find **NBA Fantasy Autopilot** in the store and click **Install**.
 4. Fill in the **Configuration** tab (see below) and **Save**.
 5. Start the app, then open it from the sidebar to see the status UI.
@@ -21,8 +21,7 @@ what it *would* have done without touching your ESPN team.
 
 | Option | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `espn_league_id` | yes | — | Numeric league ID |
-| `espn_team_id` | yes | — | Your team's ID within the league |
+| `leagues` | yes | — | One entry per team you manage, see below |
 | `espn_s2` | yes | — | Session cookie, see below |
 | `espn_swid` | yes | — | Session cookie, see below |
 | `ha_notify_device` | yes | — | e.g. `mobile_app_ians_iphone` |
@@ -49,17 +48,45 @@ can claim them within seconds. With it off you still get every suggested
 add/drop as a notification with an **Approve** button, so nothing is lost except
 the few seconds it takes you to tap.
 
-## Finding your league and team IDs
+## Configuring your leagues
 
-Open your league on `fantasy.espn.com` in a desktop browser and look at the URL:
+Open each league on `fantasy.espn.com` in a desktop browser, click through to
+**your own team**, and look at the URL:
 
 ```
 https://fantasy.espn.com/basketball/team?leagueId=123456789&teamId=4
-                                                   ^^^^^^^^^        ^
-                                                   league ID        team ID
+                                                  ^^^^^^^^^        ^
+                                                  league_id        team_id
 ```
 
-`espn_league_id` is `123456789` and `espn_team_id` is `4` in that example.
+One `leagues` entry per team. In YAML mode the Configuration tab looks like:
+
+```yaml
+leagues:
+  - league_id: 123456789
+    team_id: 4
+    label: Dynasty
+  - league_id: 987654321
+    team_id: 7
+    label: Work league
+```
+
+`label` is optional and is only used in notification text. Set it anyway if you
+manage more than one team — a prompt that reads *"drop Smith"* is unactionable
+when two rosters are in play, whereas *"Dynasty: drop Smith"* is not.
+
+**Each league is optimized on its own.** Category weights, the games-played
+budget and the roster are league-local; nothing is pooled across leagues except
+the ESPN cookie and the notification channel. A league whose roster fetch fails
+is skipped for that run and the others still go ahead.
+
+**Make sure `team_id` is the team you own, in that league.** The app verifies
+ownership against your `SWID` before every write and refuses to proceed if it
+doesn't match, because ESPN will otherwise honour an edit to a leaguemate's
+roster with a cheerful `200 EXECUTED` and attribute it to you in the public
+activity feed. For the same reason, listing one league twice is rejected
+outright rather than deduplicated: one of the two `team_id` values would be a
+team you don't own, and the app will not guess which.
 
 ## Extracting the `espn_s2` and `SWID` cookies
 
@@ -153,19 +180,32 @@ something like `person.ian`.
 
 ## How a run works
 
-1. At each time in `run_times`, the app pulls your roster plus projections.
+At each time in `run_times`, the app works through your `leagues` one at a time.
+For each one:
+
+1. It pulls that team's roster plus projections.
 2. It computes an optimal lineup and a list of candidate moves.
 3. Moves allowed by your autonomy settings are applied directly (unless
    `shadow_mode` is on).
 4. Anything else becomes a notification with **Approve** / **Dismiss** buttons,
-   and a task on `ha_todo_entity`.
-5. Results are written to the status UI and to SQLite at `/data/autopilot.db`,
-   which is private to the app and included in backups.
+   naming the league, plus a task on `ha_todo_entity`.
+
+A league that errors out is logged and skipped; the remaining leagues still run.
+Results are written to the status UI and to SQLite at `/data/autopilot.db`,
+which is private to the app and included in backups. Every run row and journal
+row records which league it belonged to.
 
 ## Troubleshooting
 
-**App won't start, log says a required option is not set.** One of the six
-required options is empty. Open the Configuration tab and fill it in.
+**App won't start, log says a required option is not set.** One of the required
+options is empty. Open the Configuration tab and fill it in. The default
+`leagues` entry ships as `league_id: 0, team_id: 0` as a placeholder and is
+rejected on purpose — replace both numbers with your own.
+
+**App won't start, log says a league is configured twice.** You have two
+`leagues` entries with the same `league_id`. Delete the one whose `team_id`
+isn't your team. See *Configuring your leagues* above for why this isn't
+silently merged.
 
 **`401` or `403` from ESPN.** The cookies are wrong or expired. Re-extract both
 `espn_s2` and `SWID`. The most common mistakes are omitting the braces around

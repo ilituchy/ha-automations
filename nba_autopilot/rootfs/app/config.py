@@ -32,9 +32,26 @@ class ConfigError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class LeagueRef:
+    """One team in one league.
+
+    A league is the unit of optimization, not the account: category weights,
+    the games-played budget and the roster are all league-local, and a move
+    that is right in one league is unrelated to the other. Nothing is ever
+    pooled across leagues except the ESPN cookie and the notification channel.
+    """
+
+    league_id: int
+    team_id: int
+    label: str
+
+    def display(self) -> str:
+        return self.label or ("league %d" % self.league_id)
+
+
+@dataclass(frozen=True)
 class Config:
-    espn_league_id: int
-    espn_team_id: int
+    leagues: Sequence[LeagueRef]
     espn_s2: str
     espn_swid: str
     ha_notify_device: str
@@ -53,10 +70,11 @@ class Config:
     db_path: str
     ingress_port: int
 
-    def espn(self) -> EspnConfig:
+    def espn(self, league: LeagueRef) -> EspnConfig:
+        """Per-league client config. The credentials are the only shared part."""
         return EspnConfig(
-            league_id=self.espn_league_id,
-            team_id=self.espn_team_id,
+            league_id=league.league_id,
+            team_id=league.team_id,
             espn_s2=self.espn_s2,
             swid=self.espn_swid,
             season=self.season,
@@ -67,8 +85,12 @@ class Config:
         out = {
             k: v
             for k, v in self.__dict__.items()
-            if k not in ("espn_s2", "espn_swid")
+            if k not in ("espn_s2", "espn_swid", "leagues")
         }
+        out["leagues"] = [
+            {"league_id": l.league_id, "team_id": l.team_id, "label": l.display()}
+            for l in self.leagues
+        ]
         out["espn_s2"] = "<set:%d chars>" % len(self.espn_s2) if self.espn_s2 else "<unset>"
         out["espn_swid"] = "<set>" if self.espn_swid else "<unset>"
         return out
@@ -84,6 +106,76 @@ def _normalize_swid(raw: str) -> str:
     if not s.endswith("}"):
         s = s + "}"
     return s
+
+
+def _parse_leagues(opt: Any, req: Any) -> List[LeagueRef]:
+    """Build the league list from options, or from flat env vars in dev.
+
+    Duplicate ``league_id`` is rejected rather than deduplicated. Two entries
+    for one league means two different ``team_id`` values were configured for
+    it, and exactly one of them is a team the user does not own -- the single
+    most dangerous misconfiguration available, because ESPN will honour a write
+    to a leaguemate's roster with ``200 EXECUTED``. Guessing which entry was
+    intended is not a thing this function should do.
+    """
+    raw = opt("leagues")
+
+    # Dev/CI escape hatch: AUTOPILOT_ESPN_LEAGUE_ID + AUTOPILOT_ESPN_TEAM_ID
+    # describe a single league without needing JSON in an env var.
+    if not raw:
+        flat_league = opt("espn_league_id")
+        flat_team = opt("espn_team_id")
+        if flat_league and flat_team:
+            raw = [{"league_id": flat_league, "team_id": flat_team}]
+
+    if isinstance(raw, str):
+        # An env var carrying the whole list.
+        try:
+            raw = json.loads(raw)
+        except ValueError as exc:
+            raise ConfigError("leagues is not valid JSON: %s" % exc)
+
+    if not raw:
+        raise ConfigError(
+            "no leagues configured. Add at least one entry with league_id and "
+            "team_id in the app's Configuration tab."
+        )
+    if isinstance(raw, Mapping):
+        raw = [raw]
+
+    out: List[LeagueRef] = []
+    seen: Dict[int, int] = {}
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, Mapping):
+            raise ConfigError("leagues[%d] is not a mapping: %r" % (i, entry))
+        try:
+            league_id = int(entry["league_id"])
+            team_id = int(entry["team_id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ConfigError(
+                "leagues[%d] needs integer league_id and team_id (%s)" % (i, exc)
+            )
+        if league_id <= 0 or team_id <= 0:
+            raise ConfigError(
+                "leagues[%d]: league_id and team_id must be positive" % i
+            )
+        if league_id in seen:
+            raise ConfigError(
+                "league %d is configured twice (entries %d and %d) with "
+                "team_id %d and %d. Exactly one of those is a team you do not "
+                "own; remove the wrong one rather than letting this be guessed."
+                % (league_id, seen[league_id], i, out[seen[league_id]].team_id,
+                   team_id)
+            )
+        seen[league_id] = i
+        out.append(
+            LeagueRef(
+                league_id=league_id,
+                team_id=team_id,
+                label=str(entry.get("label") or "").strip(),
+            )
+        )
+    return out
 
 
 def load(path: Optional[str] = None) -> Config:
@@ -133,8 +225,7 @@ def load(path: Optional[str] = None) -> Config:
             raise ConfigError("run_times entry %r is out of range" % t)
 
     cfg = Config(
-        espn_league_id=int(req("espn_league_id")),
-        espn_team_id=int(req("espn_team_id")),
+        leagues=_parse_leagues(opt, req),
         espn_s2=str(req("espn_s2")).strip(),
         espn_swid=_normalize_swid(str(req("espn_swid"))),
         ha_notify_device=str(req("ha_notify_device")).strip(),

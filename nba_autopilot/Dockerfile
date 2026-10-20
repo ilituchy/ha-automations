@@ -41,13 +41,13 @@ LABEL \
     io.hass.type="app" \
     io.hass.name="NBA Fantasy Autopilot" \
     io.hass.description="Automated ESPN fantasy basketball lineup management for Home Assistant." \
-    io.hass.url="https://github.com/ianlituchy/ha-nba-autopilot" \
+    io.hass.url="https://github.com/ilituchy/ha-automations/tree/main/nba_autopilot" \
     io.hass.version="${BUILD_VERSION}" \
     io.hass.arch="${BUILD_ARCH}" \
     org.opencontainers.image.title="NBA Fantasy Autopilot" \
     org.opencontainers.image.description="Automated ESPN fantasy basketball lineup management for Home Assistant." \
-    org.opencontainers.image.source="https://github.com/ianlituchy/ha-nba-autopilot" \
-    org.opencontainers.image.documentation="https://github.com/ianlituchy/ha-nba-autopilot/blob/main/nba_autopilot/DOCS.md" \
+    org.opencontainers.image.source="https://github.com/ilituchy/ha-automations" \
+    org.opencontainers.image.documentation="https://github.com/ilituchy/ha-automations/blob/main/nba_autopilot/DOCS.md" \
     org.opencontainers.image.authors="ian@vibrantpractice.com" \
     org.opencontainers.image.licenses="MIT" \
     org.opencontainers.image.version="${BUILD_VERSION}"

@@ -5,7 +5,7 @@ version: "0.1.0"
 description: >-
   Automated ESPN fantasy basketball lineup management with Home Assistant
   notifications and approval taps.
-url: https://github.com/ianlituchy/ha-nba-autopilot
+url: https://github.com/ilituchy/ha-automations/tree/main/nba_autopilot
 
 arch:
   - aarch64
@@ -33,11 +33,16 @@ map:
     read_only: true
 
 options:
-  espn_league_id: null
-  espn_team_id: null
+  # One entry per team you manage. Leagues are optimized independently --
+  # rosters, category weights and the games-played budget never pool across
+  # them. `label` is what notifications say, so make it recognisable.
+  leagues:
+    - league_id: 0
+      team_id: 0
+      label: ""
   espn_s2: null
   espn_swid: null
-  ha_notify_device: null
+  ha_notify_device: mobile_app_iphone
   ha_owner_user_id: null
   ha_todo_entity: todo.fantasy_autopilot
   timezone: America/Los_Angeles
@@ -52,8 +57,10 @@ options:
   log_level: info
 
 schema:
-  espn_league_id: int
-  espn_team_id: int
+  leagues:
+    - league_id: int(1,)
+      team_id: int(1,)
+      label: str?
   espn_s2: password
   espn_swid: password
   ha_notify_device: str

@@ -75,7 +75,7 @@ Host `lm-api-writes.fantasy.espn.com`. Single `/transactions/` POST.
 **Invariants enforced in code, not by convention:**
 1. Accepts a *target state*, computes a **diff**, and POSTs only the diff.
    An empty diff is a no-op that never touches the network.
-2. Runs `preflight()` (10 checks, `docs/PREFLIGHT.md`) and raises on any failure.
+2. Runs `preflight()` (10 checks, [`PREFLIGHT.md`](./PREFLIGHT.md)) and raises on any failure.
 3. `team_id` must be in `EspnRead.my_team_ids()`. Checked every call.
 4. Never serializes `isLeagueManager`. Never sends `SWID` as a write credential.
 5. Every call is journaled to SQLite **before** the request and updated after,

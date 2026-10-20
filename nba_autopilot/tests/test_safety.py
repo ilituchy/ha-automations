@@ -9,8 +9,10 @@ one asserts no HTTP request was attempted.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+import tempfile
 import unittest
 from datetime import timedelta
 
@@ -18,13 +20,14 @@ sys.path.insert(
     0,
     os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "nba_autopilot",
         "rootfs",
         "app",
     ),
 )
 
+import config as appconfig  # noqa: E402
 from espn import ids  # noqa: E402
+from ha import bridge  # noqa: E402
 from espn.read import EspnConfig  # noqa: E402
 from espn.write import EspnWrite, PreflightError  # noqa: E402
 from models import LeagueSettings, RosterEntry  # noqa: E402
@@ -418,6 +421,189 @@ class TestStateMachine(unittest.TestCase):
         ).fetchone()
         self.assertIn("3.25", row["shadow_prices"])
         self.assertIn("darko", row["sources_missing"])
+
+
+class TestLeagueConfig(unittest.TestCase):
+    """Multi-league parsing. Two teams, one cookie, zero pooling."""
+
+    BASE = {
+        "espn_s2": "cookievalue",
+        "espn_swid": "ABC-123",
+        "ha_notify_device": "mobile_app_iphone",
+        "ha_owner_user_id": "owner-1",
+    }
+
+    def _load(self, **over):
+        raw = dict(self.BASE)
+        raw.update(over)
+        fd, path = tempfile.mkstemp(suffix=".json")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                json.dump(raw, fh)
+            return appconfig.load(path)
+        finally:
+            os.unlink(path)
+
+    def test_two_leagues_stay_separate(self):
+        cfg = self._load(leagues=[
+            {"league_id": 111111111, "team_id": 2, "label": "Main"},
+            {"league_id": 222222222, "team_id": 7},
+        ])
+        self.assertEqual(len(cfg.leagues), 2)
+        self.assertEqual(cfg.leagues[0].display(), "Main")
+        self.assertEqual(cfg.leagues[1].display(), "league 222222222")
+
+        a, b = (cfg.espn(l) for l in cfg.leagues)
+        self.assertEqual((a.league_id, a.team_id), (111111111, 2))
+        self.assertEqual((b.league_id, b.team_id), (222222222, 7))
+        # One credential, two leagues.
+        self.assertEqual(a.espn_s2, b.espn_s2)
+        self.assertEqual(a.swid, b.swid)
+        self.assertEqual(a.season, b.season)
+
+    def test_duplicate_league_is_refused_not_deduplicated(self):
+        """Two team_ids for one league means one of them is not yours."""
+        with self.assertRaises(appconfig.ConfigError) as ctx:
+            self._load(leagues=[
+                {"league_id": 111111111, "team_id": 2},
+                {"league_id": 111111111, "team_id": 9},
+            ])
+        msg = str(ctx.exception)
+        self.assertIn("configured twice", msg)
+        self.assertIn("do not own", msg)
+
+    def test_no_leagues_is_a_config_error(self):
+        with self.assertRaises(appconfig.ConfigError):
+            self._load(leagues=[])
+
+    def test_malformed_entries_are_refused(self):
+        for bad in (
+            [{"league_id": 1}],                # no team_id
+            [{"team_id": 1}],                  # no league_id
+            [{"league_id": 0, "team_id": 2}],  # the config.yaml placeholder
+            [{"league_id": 5, "team_id": 0}],
+            [{"league_id": "abc", "team_id": 2}],
+            ["111111111:2"],
+        ):
+            with self.assertRaises(appconfig.ConfigError, msg="accepted %r" % bad):
+                self._load(leagues=bad)
+
+    def test_credentials_never_reach_the_log(self):
+        cfg = self._load(leagues=[{"league_id": 111111111, "team_id": 2}])
+        blob = json.dumps(cfg.redacted())
+        self.assertNotIn("cookievalue", blob)
+        self.assertNotIn("ABC-123", blob)
+        self.assertIn("<set:", blob)
+        # The league list still has to be legible, or the log is useless.
+        self.assertIn("111111111", blob)
+
+    def test_swid_braces_are_normalized(self):
+        cfg = self._load(leagues=[{"league_id": 1, "team_id": 2}])
+        self.assertEqual(cfg.espn(cfg.leagues[0]).swid, "{ABC-123}")
+
+
+class TestActionIdRoundTrip(unittest.TestCase):
+    """The tapped id and the stored id are deliberately different strings.
+
+    The notification button carries a verb; the proposal row does not. These
+    tests exist because that difference was once implicit and split across two
+    modules, so every per-item tap looked up an id that could not match and did
+    nothing -- silently, which is the one failure mode the approval path must
+    never have.
+    """
+
+    def setUp(self):
+        self.store = Store(":memory:")
+        self.store.start_run("RUN1", 42, True)
+
+    def tearDown(self):
+        self.store.close()
+
+    def test_stored_id_is_recovered_from_the_tapped_id(self):
+        p = self.store.propose("RUN1", "ADD_DROP", {"add": 1, "drop": 2})
+        tapped = bridge.item_action_id(p.action_id, bridge.APPROVE)
+
+        self.assertNotEqual(tapped, p.action_id)  # the bug, in one line
+        parsed = bridge.parse_action_id(tapped)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.proposal_action_id, p.action_id)
+        self.assertTrue(parsed.approve)
+
+        decided = self.store.decide(parsed.proposal_action_id, parsed.approve, "u")
+        self.assertIsNotNone(decided)
+        self.assertEqual(decided.state, APPROVED)
+
+    def test_raw_tapped_id_matches_nothing(self):
+        """Regression: the old code passed this straight to decide()."""
+        p = self.store.propose("RUN1", "ADD_DROP", {})
+        tapped = bridge.item_action_id(p.action_id, bridge.APPROVE)
+        self.assertIsNone(self.store.decide(tapped, True, "u"))
+        self.assertEqual(self.store.get(p.action_id).state, PROPOSED)
+
+    def test_reject_verb_is_not_silently_an_approval(self):
+        p = self.store.propose("RUN1", "ADD_DROP", {})
+        parsed = bridge.parse_action_id(
+            bridge.item_action_id(p.action_id, bridge.REJECT)
+        )
+        self.assertFalse(parsed.approve)
+        self.store.decide(parsed.proposal_action_id, parsed.approve, "u")
+        self.assertEqual(self.store.get(p.action_id).state, REJECTED)
+
+    def test_bulk_ids_carry_the_run_and_no_proposal(self):
+        parsed = bridge.parse_action_id(
+            bridge.bulk_action_id("RUN1", bridge.APPROVE_ALL)
+        )
+        self.assertTrue(parsed.is_bulk)
+        self.assertEqual(parsed.run_id, "RUN1")
+        self.assertTrue(parsed.approve)
+        self.assertIsNone(parsed.proposal_action_id)
+
+    def test_foreign_and_malformed_ids_are_rejected(self):
+        # HA delivers every notification action on the instance to every
+        # listener, so parse must reject rather than guess.
+        for bad in (
+            "garage_door_open",             # another automation entirely
+            "RUN1:ADD_DROP:1",              # no verb: a seq is not a verb
+            "RUN1:ADD_DROP:APPROVE",        # missing seq
+            "RUN1:ADD_DROP:x:APPROVE",      # non-numeric seq
+            "RUN1:ADD_DROP:1:MAYBE",        # unknown verb
+            ":ADD_DROP:1:APPROVE",          # empty run id
+            "RUN1:ADD_DROP:1:APPROVE_ALL",  # bulk verb in item position
+            "RUN1:APPROVE",                 # item verb in bulk position
+            "APPROVE",
+            "",
+        ):
+            self.assertIsNone(bridge.parse_action_id(bad), "accepted %r" % bad)
+
+    def test_builders_refuse_the_wrong_verb_class(self):
+        with self.assertRaises(ValueError):
+            bridge.item_action_id("RUN1:ADD_DROP:1", bridge.APPROVE_ALL)
+        with self.assertRaises(ValueError):
+            bridge.bulk_action_id("RUN1", bridge.APPROVE)
+
+    def test_event_parsing_enforces_shape_and_owner(self):
+        """The bridge's two mandatory checks, on realistic event payloads."""
+        b = bridge.HaBridge.__new__(bridge.HaBridge)  # no network setup
+        b.owner_user_id = "owner-1"
+
+        def event(action, user_id):
+            return {"event": {"data": {"action": action},
+                              "context": {"user_id": user_id}}}
+
+        good = b._parse_action_event(event("RUN1:ADD_DROP:1:APPROVE", "owner-1"))
+        self.assertIsNotNone(good)
+        self.assertEqual(good.parsed.proposal_action_id, "RUN1:ADD_DROP:1")
+
+        # Right shape, wrong human.
+        self.assertIsNone(
+            b._parse_action_event(event("RUN1:ADD_DROP:1:APPROVE", "someone-else"))
+        )
+        # Right human, not our id.
+        self.assertIsNone(b._parse_action_event(event("garage_open", "owner-1")))
+        # A tap with no user attribution at all.
+        self.assertIsNone(
+            b._parse_action_event(event("RUN1:ADD_DROP:1:APPROVE", None))
+        )
 
 
 if __name__ == "__main__":

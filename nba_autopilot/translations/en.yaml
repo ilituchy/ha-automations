@@ -1,16 +1,16 @@
 ---
 configuration:
-  espn_league_id:
-    name: ESPN league ID
+  leagues:
+    name: Leagues
     description: >-
-      The numeric ID of your ESPN fantasy basketball league. Open your league
-      in a browser and copy the number after "leagueId=" in the URL.
-  espn_team_id:
-    name: ESPN team ID
-    description: >-
-      The numeric ID of your team within that league. Open your own team page
-      and copy the number after "teamId=" in the URL. It is usually a small
-      number such as 1-12.
+      One entry per team you manage. "league_id" is the number after
+      "leagueId=" in your league URL, "team_id" is the number after "teamId="
+      on your own team page (usually 1-12), and "label" is the short name that
+      appears in notifications - set it to something you will recognise, like
+      "Dynasty" or "Work league". Leagues are optimized independently: rosters,
+      category weights and the games-played budget are never pooled. Do not add
+      the same league twice; one of the two team_ids would be a team you do not
+      own, and ESPN honours writes to a leaguemate's roster without complaint.
   espn_s2:
     name: ESPN espn_s2 cookie
     description: >-
