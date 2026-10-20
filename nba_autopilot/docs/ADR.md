@@ -237,3 +237,127 @@ through `hactl.py ws '{"type":"supervisor/api",...}'`, and `bridge.py`'s
 
 The token lives in `~/.ha_token` (mode 600) and is read from the file, never
 passed on a command line — argv is visible in `ps`.
+
+## ADR-010 — Both leagues are points leagues. The category gradient stays anyway.
+
+The handover spec, and every line of `solve/weights.py`, assumes head-to-head
+**categories**: the objective `J = Σ_k Φ(z_k)`, weights `w_k = φ(z_k)/s_k`,
+punting and clinching as emergent behaviours of the gradient. That machinery is
+the most interesting part of the design.
+
+Live discovery on 2026-10-20 says neither of the two leagues this app was built
+for is a category league. Both report `scoringType: H2H_POINTS`, with seventeen
+identical scoring items — points 1.0, steals 2.0, turnovers −1.0, double-double
+4.0, triple-double 8.0, quadruple-double 15.0, and so on.
+
+In a points league there is exactly one category, and it is the score. So:
+
+* **The value function collapses to a dot product.** `v_p = Σ_k c_k · μ_pk`
+  with `c_k` read straight off `scoringItems`. No z-scores, no `s_k`, nothing
+  to estimate — ESPN *publishes* the exchange rate between a steal and a
+  turnover.
+* **There is no punting**, because there is nothing to punt. The behaviour the
+  gradient produced for free has no analogue here.
+* **The mean objective is exactly linear**, not locally linear. This is
+  strictly stronger than the category case: there, weights depend on the
+  projected margin, so the linearization is only a local model and every
+  accept/reject in the outer loop has to be re-checked against the true
+  `Σ_k Φ(z_k)` or the search can cycle between two lineups forever. Here the
+  mean term needs no such guard.
+* **Risk survives intact.** A points league is the degenerate one-category
+  league, so `dP/dσ² = −(Δ/2s²)·w` still holds with "the category" being
+  fantasy points: trailing means seek variance, leading means avoid it. This is
+  implemented by building *one* `CategoryState` over projected point totals,
+  not by writing a second risk model.
+
+**Decision:** add `solve/value.py` as the single place the two league types
+branch, and keep `solve/weights.py` in full. Deleting the category path would
+be the wrong call for two reasons. It is the harder of the two models and would
+have to be rebuilt from scratch for any future league; and the points path
+*reuses* its risk machinery rather than merely sitting beside it, so the code is
+load-bearing today even though no league is category-scored.
+
+The branch happens once, in `build_value_model`, on ESPN's own `scoringType` —
+never on a flag we set. Everything downstream — the assignment, the shadow
+price — is indifferent to where values came from.
+
+One guard falls out of this. A points value is a sum over games, which is only
+valid for counting stats. A league that awarded points for FG% or for assists
+*per game* could not be valued this way at all: summing a per-game average over
+a four-game week inflates it fourfold, and summing a percentage is meaningless
+at any horizon. Neither observed league does this — all seventeen items are
+counting stats — so `ids.NON_ADDITIVE_STATS` and the `UnsupportedScoring` raise
+cost nothing today. They exist because the failure they prevent is a *plausible
+looking* ranking that is wrong about every player, which is the worst ratio of
+damage to detectability available.
+
+## ADR-011 — The games-played cap is one pooled weekly budget, not per-slot seasonal.
+
+`solve/budget.py` was written against the GP cap as the spec described it: a
+**per-lineup-slot, season-long integer**, giving one multiplier `λ_s` per slot.
+The spec flagged this as its single largest open question. It was wrong on all
+three counts.
+
+Both live leagues send exactly one entry, keyed at slot **15** — a slot that
+appears nowhere in either league's `lineupSlotCounts` — carrying `statId: 42`
+(games played) and a *fractional* `limitValue`, alongside
+`matchupLimitPerScoringPeriod: true`:
+
+| league | starting slots | `limitValue` | `× 7` | per starter |
+|---|---|---|---|---|
+| A | 10 | 5.714286 = 40/7 | 40 | 4.000 |
+| B | 11 | 6.285714 = 44/7 | 44 | 4.000 |
+
+Three readings of this, and what settles between them:
+
+1. *A cap on a Rookie slot* (slot 15's name in the position map). Rejected: the
+   value **scales with starter count** across two independently-configured
+   leagues. A cap attached to one slot would not track another league's roster
+   shape, and 40 vs 44 against 10 vs 11 starters is exactly four per starter in
+   both.
+2. *A season-long total of 5.71.* Rejected as absurd on its face, and by
+   `matchupLimitPerScoringPeriod: true`.
+3. *A pooled team-wide per-scoring-period figure, renewing each matchup
+   period.* Everything fits: the exact sevenths are a weekly number divided by
+   seven days, and the acquisition limits in the same payload are divided the
+   same way (5/7 and 7/7 against `matchupAcquisitionLimit`).
+
+**Decision:** model it as reading 3 — one scalar `λ`, priced over the remaining
+days of the current matchup period, recovered by multiplying by
+`ids.SCORING_PERIODS_PER_MATCHUP`.
+
+This is honest about being an inference, so it is made falsifiable rather than
+assumed. `remaining_budget` logs at ERROR if observed usage exceeds the cap it
+computed, which is precisely what would happen in week two if the cap were in
+fact season-long. The alternative — silently clamping — would hide the one
+observation that could correct the model. `matchup_cap` likewise *raises* on
+limits keyed at real lineup slots instead of coercing them, because the pooled
+and per-slot readings differ by an order of magnitude in how much they restrict
+and guessing permissively burns the real cap without ever noticing.
+
+Two consequences beyond the shape:
+
+**The cap genuinely binds, more than the per-slot reading implied.** League B
+carries 13 bench slots — a 24-player roster. At roughly 3.5 NBA games per
+player per week that is ~84 startable player-games against a cap of 44, so
+`ρ ≈ 0.52`: the optimizer must bench playable players most nights. League A is
+milder at `ρ ≈ 0.87`. `utilization_ratio` is surfaced in the run record
+specifically so that deliberate benching reads as arithmetic rather than a bug.
+
+**Availability cancels out of the threshold.** The cap counts games *played*,
+not started, so a player his NBA team sits consumes nothing. With `v_raw` the
+value conditional on playing, benefit is `p_play · v_raw` and cost is
+`λ · p_play`, so the reduced cost is `p_play · (v_raw − λ)` and `p_play`
+factors out of the comparison entirely. **The gate is on the conditional value,
+not the availability-weighted one.** A questionable star and a healthy role
+player with the same *expected* line are therefore not the same bet under a
+binding cap — the star is strictly better, because he only spends a game in the
+branch where he actually produces. `p_play` still scales the reduced cost, so
+it still orders the assignment; it just does not move the bar.
+
+This is why `value.py` returns conditional values and why
+`Projection.conditional_mean` / `conditional_var` exist. `conditional_var`
+inverts the Bernoulli gate rather than merely dividing by `p_play`, because the
+`p(1−p)E[X]²` term is availability risk rather than game-to-game variance, and
+leaving it in would double-count it against the risk model that is already
+pricing availability.

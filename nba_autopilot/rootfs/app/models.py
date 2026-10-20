@@ -69,6 +69,44 @@ class Projection:
             return dict(self.mean)
         return {k: v * self.p_play for k, v in self.mean.items()}
 
+    def conditional_mean(self) -> Dict[StatId, float]:
+        """Mean *given the player suits up* -- ``p_play`` divided back out.
+
+        The counterpart to :meth:`expected`. ``solve/budget.py`` prices the
+        games-played cap against the conditional value rather than the expected
+        one, because a player only burns a game off the cap in the branch where
+        he plays; see the availability-cancellation note there. Recovering it
+        here keeps that one subtraction honest no matter which convention the
+        projection source used.
+
+        A ``p_play`` of zero leaves the mean untouched: the conditional line of
+        a player who will not play is still his line, and the caller's budget
+        arithmetic multiplies by zero anyway. Dividing would raise.
+        """
+        if not self.p_play_applied or self.p_play <= 0.0:
+            return dict(self.mean)
+        return {k: v / self.p_play for k, v in self.mean.items()}
+
+    def conditional_var(self) -> Dict[StatId, float]:
+        """Variance given the player suits up. See :meth:`conditional_mean`.
+
+        When ``p_play`` has been applied the stored variance is the Bernoulli-
+        gated one, so undoing it means inverting
+        ``Var(B*X) = p*Var(X) + p*(1-p)*E[X]^2`` rather than just dividing --
+        the second term is availability risk, not game-to-game variance, and
+        leaving it in would double-count it against the risk model that is
+        already pricing availability separately.
+        """
+        if not self.p_play_applied or self.p_play <= 0.0:
+            return dict(self.var)
+        p = self.p_play
+        cond_mean = self.conditional_mean()
+        out: Dict[StatId, float] = {}
+        for k, gated in self.var.items():
+            mu = cond_mean.get(k, 0.0)
+            out[k] = max((gated - p * (1.0 - p) * mu * mu) / p, 0.0)
+        return out
+
     def expected_var(self) -> Dict[StatId, float]:
         """Variance of a Bernoulli-gated random variable.
 
