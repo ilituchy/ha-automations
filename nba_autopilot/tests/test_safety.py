@@ -606,5 +606,94 @@ class TestActionIdRoundTrip(unittest.TestCase):
         )
 
 
+class TestNotificationDeepLink(unittest.TestCase):
+    """Regression: the url was hardcoded to a dashboard that does not exist.
+
+    Tapping the notification body followed `/lovelace/fantasy`, the companion
+    app could not resolve it, and it silently landed on the home dashboard.
+    Reported from the real phone, not caught by any test, because nothing here
+    had ever looked at what `notify` puts in `data["url"]`.
+    """
+
+    def _bridge(self, response):
+        b = bridge.HaBridge.__new__(bridge.HaBridge)
+        b._deep_link = bridge._UNRESOLVED
+        b.notify_device = "mobile_app_iphone"
+        b.sent = []
+
+        class FakeHttp:
+            def get(self, url):
+                return response(url)
+
+        b.http = FakeHttp()
+        b.call_service = lambda d, s, data: b.sent.append((d, s, data))
+        return b
+
+    @staticmethod
+    def _ok(slug):
+        class R:
+            def json(self):
+                return {"data": {"slug": slug}}
+        return lambda url: R()
+
+    def test_slug_is_resolved_not_guessed(self):
+        """A store install is not `nba_autopilot`; it carries a repo hash."""
+        b = self._bridge(self._ok("a1b2c3d4_nba_autopilot"))
+        self.assertEqual(b.deep_link(), "/hassio/ingress/a1b2c3d4_nba_autopilot")
+
+        local = self._bridge(self._ok("local_nba_autopilot"))
+        self.assertEqual(local.deep_link(), "/hassio/ingress/local_nba_autopilot")
+
+    def test_unresolvable_slug_omits_the_url_entirely(self):
+        """No url beats a wrong url: only the former is visibly broken."""
+        def boom(url):
+            raise RuntimeError("supervisor unreachable")
+
+        b = self._bridge(boom)
+        self.assertIsNone(b.deep_link())
+        b.notify(title="t", message="m", tag="x")
+        _, _, payload = b.sent[0]
+        self.assertNotIn("url", payload["data"])
+
+    def test_url_is_present_when_resolvable(self):
+        b = self._bridge(self._ok("local_nba_autopilot"))
+        b.notify(title="t", message="m", tag="x")
+        _, _, payload = b.sent[0]
+        self.assertEqual(payload["data"]["url"], "/hassio/ingress/local_nba_autopilot")
+
+    def test_a_failed_lookup_is_cached_not_retried(self):
+        """Otherwise every notification pays a timeout to the Supervisor."""
+        calls = []
+
+        def boom(url):
+            calls.append(url)
+            raise RuntimeError("nope")
+
+        b = self._bridge(boom)
+        for _ in range(5):
+            b.notify(title="t", message="m", tag="x")
+        self.assertEqual(len(calls), 1, "slug lookup should happen once")
+        self.assertEqual(len(b.sent), 5, "notifications must still be sent")
+
+    def test_action_buttons_do_not_depend_on_the_link(self):
+        """The approval path must survive an unresolvable deep link."""
+        def boom(url):
+            raise RuntimeError("nope")
+
+        b = self._bridge(boom)
+        b.notify(
+            title="t", message="m", tag="x",
+            actions=(bridge.Action(
+                bridge.item_action_id("RUN1:ADD_DROP:1", bridge.APPROVE),
+                "Approve",
+            ),),
+        )
+        _, _, payload = b.sent[0]
+        self.assertNotIn("url", payload["data"])
+        self.assertEqual(
+            payload["data"]["actions"][0]["action"], "RUN1:ADD_DROP:1:APPROVE"
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -39,6 +39,17 @@ log = logging.getLogger(__name__)
 SUPERVISOR_CORE = "http://supervisor/core/api"
 SUPERVISOR_WS = "ws://supervisor/core/websocket"
 
+#: The Supervisor's own API, not the Core proxy. Reachable only from inside an
+#: app container with ``SUPERVISOR_TOKEN``; the equivalent ``/api/hassio/*``
+#: path on Core returns 401 to a long-lived token even for the owner, which is
+#: why ``tools/hactl.py`` has to go through the ``supervisor/api`` WebSocket
+#: command instead. See docs/ADR.md ADR-009.
+SUPERVISOR_ROOT = "http://supervisor"
+
+#: Distinguishes "not looked up yet" from a resolved ``None``, so a failed
+#: lookup is cached instead of retried on every single notification.
+_UNRESOLVED = object()
+
 #: 6 hours, matching the proposal TTL in state.py. iOS dismisses the
 #: notification when it elapses, so a stale Approve button stops being tappable
 #: at roughly the same moment the proposal stops being valid.
@@ -161,6 +172,7 @@ class HaBridge:
         self.token = token or os.environ.get("SUPERVISOR_TOKEN", "")
         self.base_url = base_url
         self.ws_url = ws_url
+        self._deep_link: Any = _UNRESOLVED
         if not self.token:
             log.error("SUPERVISOR_TOKEN is unset; HA calls will fail")
         self.http = httpx.Client(
@@ -290,6 +302,41 @@ class HaBridge:
 
     # -- outbound notification --------------------------------------------
 
+    def deep_link(self) -> Optional[str]:
+        """Where tapping the notification *body* should go, or ``None``.
+
+        Resolved from ``/addons/self/info`` and cached, because the app's own
+        slug is not knowable in advance: a store install is
+        ``<repo_hash>_nba_autopilot`` and a ``local_apps`` install is
+        ``local_nba_autopilot``. ``/hassio/ingress/<slug>`` is the stable form
+        -- ``ingress_entry`` embeds a rotating session token and goes stale.
+
+        Returns ``None`` rather than a guess, and callers then omit the ``url``
+        key entirely. This was a live bug: the url was hardcoded to
+        ``/lovelace/fantasy``, a dashboard that does not exist, so tapping the
+        notification dropped the user on their home dashboard with no error.
+        A tap that goes nowhere is better than a tap that goes somewhere wrong,
+        because only the first one is visibly broken.
+        """
+        if self._deep_link is not _UNRESOLVED:
+            return self._deep_link
+        self._deep_link = None
+        try:
+            r = self.http.get("%s/addons/self/info" % SUPERVISOR_ROOT)
+            slug = ((r.json() or {}).get("data") or {}).get("slug")
+        except Exception as exc:
+            log.debug("could not resolve own ingress slug: %s", exc)
+            return None
+        if slug:
+            self._deep_link = "/hassio/ingress/%s" % slug
+            log.info("notification deep link: %s", self._deep_link)
+        else:
+            log.warning(
+                "no slug in /addons/self/info; notifications will have no "
+                "tappable destination (the action buttons still work)"
+            )
+        return self._deep_link
+
     def notify(
         self,
         title: str,
@@ -305,12 +352,21 @@ class HaBridge:
         ``tag`` makes a later notification *replace* this one rather than stack,
         which is how the "executed" confirmation lands on top of the "approve?"
         prompt instead of leaving a dead button in the shade.
+
+        Note for anyone reading a bug report about this: tapping the
+        notification *body* follows ``url`` and fires no event. Only the
+        action buttons -- which on iOS require expanding the notification,
+        long-press or pull-down -- emit
+        ``mobile_app_notification_action``. "I tapped it and nothing was
+        approved" is the expected behaviour of tapping the wrong part.
         """
         data: Dict[str, Any] = {
             "tag": tag,
             "group": group,
-            "url": "/lovelace/fantasy",
         }
+        link = self.deep_link()
+        if link:
+            data["url"] = link
         if actions:
             data["actions"] = [a.to_dict() for a in actions]
             data["timeout"] = NOTIFICATION_TIMEOUT

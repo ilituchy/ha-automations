@@ -311,15 +311,38 @@ def _cmd_states(needle: str = "") -> int:
     return 0
 
 
+def _dump(obj: Any, limit: int = 8000) -> None:
+    """Pretty-print, and *say so* when truncating.
+
+    A silent cap turns a complete response into a JSON prefix, which parses as
+    a syntax error somewhere in the middle of the payload and reads exactly
+    like a protocol bug in the WebSocket reader. Set ``HACTL_FULL=1`` to get
+    everything.
+    """
+    text = json.dumps(obj, indent=2)
+    if os.environ.get("HACTL_FULL") or len(text) <= limit:
+        print(text)
+        return
+    print(text[:limit])
+    print(
+        "... [truncated: %d of %d chars. Not valid JSON above. "
+        "Re-run with HACTL_FULL=1 for the whole response.]" % (limit, len(text)),
+        file=sys.stderr,
+    )
+
+
 def _cmd_call(domain: str, service: str, payload: str = "{}") -> int:
     out = rest("/api/services/%s/%s" % (domain, service), json.loads(payload))
-    print(json.dumps(out, indent=2)[:2000] if out else "ok")
+    if out:
+        _dump(out, 2000)
+    else:
+        print("ok")
     return 0
 
 
 def _cmd_ws(raw: str) -> int:
     ws = HaWs()
-    print(json.dumps(ws.command(json.loads(raw)), indent=2)[:8000])
+    _dump(ws.command(json.loads(raw)))
     ws.close()
     return 0
 
