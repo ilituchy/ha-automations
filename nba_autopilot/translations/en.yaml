@@ -8,9 +8,14 @@ configuration:
       on your own team page (usually 1-12), and "label" is the short name that
       appears in notifications - set it to something you will recognise, like
       "Dynasty" or "Work league". Leagues are optimized independently: rosters,
-      category weights and the games-played budget are never pooled. Do not add
+      player values and the games-played budget are never pooled. Do not add
       the same league twice; one of the two team_ids would be a team you do not
       own, and ESPN honours writes to a leaguemate's roster without complaint.
+      Leave "season" at 0 unless you need to override it - and note that ESPN
+      labels a season by the year it ENDS in, so the 2026-27 season is 2027. A
+      wrong season does not produce an error: ESPN serves the finished season
+      happily, with final standings, so it looks like a plausible late-season
+      state instead of a mistake.
   espn_s2:
     name: ESPN espn_s2 cookie
     description: >-

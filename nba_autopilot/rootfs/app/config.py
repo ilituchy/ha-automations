@@ -44,6 +44,15 @@ class LeagueRef:
     league_id: int
     team_id: int
     label: str
+    #: Per-league override of the global ``season``. ``0`` means "use the
+    #: global value". Exists because a wrong season fails *quietly*: ESPN
+    #: answers every request for a finished season perfectly happily, just with
+    #: final standings. Probing a live league with the previous season's id
+    #: returned ``latestScoringPeriod: 175`` and matchup 22 of 22, which looks
+    #: like a plausible late-season state rather than like an error. Two
+    #: leagues can also legitimately diverge -- a keeper league rolled over on
+    #: a different date is enough.
+    season: int = 0
 
     def display(self) -> str:
         return self.label or ("league %d" % self.league_id)
@@ -77,7 +86,7 @@ class Config:
             team_id=league.team_id,
             espn_s2=self.espn_s2,
             swid=self.espn_swid,
-            season=self.season,
+            season=league.season or self.season,
         )
 
     def redacted(self) -> Dict[str, Any]:
@@ -88,7 +97,12 @@ class Config:
             if k not in ("espn_s2", "espn_swid", "leagues")
         }
         out["leagues"] = [
-            {"league_id": l.league_id, "team_id": l.team_id, "label": l.display()}
+            {
+                "league_id": l.league_id,
+                "team_id": l.team_id,
+                "label": l.display(),
+                "season": l.season or self.season,
+            }
             for l in self.leagues
         ]
         out["espn_s2"] = "<set:%d chars>" % len(self.espn_s2) if self.espn_s2 else "<unset>"
@@ -159,6 +173,23 @@ def _parse_leagues(opt: Any, req: Any) -> List[LeagueRef]:
             raise ConfigError(
                 "leagues[%d]: league_id and team_id must be positive" % i
             )
+        try:
+            season = int(entry.get("season") or 0)
+        except (TypeError, ValueError):
+            raise ConfigError(
+                "leagues[%d]: season must be an integer, got %r"
+                % (i, entry.get("season"))
+            )
+        # ESPN labels a season by the year it *ends* in, so the 2026-27 NBA
+        # season is 2027. Rejecting the start-year spelling is worth a branch
+        # because the mistake resolves to a real, finished season rather than
+        # to an error.
+        if season and not (2000 <= season <= 2100):
+            raise ConfigError(
+                "leagues[%d]: season %d is not a plausible ESPN season id. "
+                "ESPN labels a season by the year it ends in, so the 2026-27 "
+                "season is 2027." % (i, season)
+            )
         if league_id in seen:
             raise ConfigError(
                 "league %d is configured twice (entries %d and %d) with "
@@ -173,6 +204,7 @@ def _parse_leagues(opt: Any, req: Any) -> List[LeagueRef]:
                 league_id=league_id,
                 team_id=team_id,
                 label=str(entry.get("label") or "").strip(),
+                season=season,
             )
         )
     return out

@@ -34,12 +34,20 @@ map:
 
 options:
   # One entry per team you manage. Leagues are optimized independently --
-  # rosters, category weights and the games-played budget never pool across
+  # rosters, player values and the games-played budget never pool across
   # them. `label` is what notifications say, so make it recognisable.
+  #
+  # `season` is optional and almost always left at 0, which means "work it out
+  # from the date". Set it only to override, and note that ESPN labels a season
+  # by the year it *ends* in: the 2026-27 NBA season is 2027. This is worth
+  # being careful about because the wrong season does not error -- ESPN serves
+  # a finished season happily, with final standings, which looks like a
+  # plausible late-season state rather than like a mistake.
   leagues:
     - league_id: 0
       team_id: 0
       label: ""
+      season: 0
   espn_s2: null
   espn_swid: null
   ha_notify_device: mobile_app_iphone
@@ -61,6 +69,7 @@ schema:
     - league_id: int(1,)
       team_id: int(1,)
       label: str?
+      season: int(0,2100)?
   espn_s2: password
   espn_swid: password
   ha_notify_device: str

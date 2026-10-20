@@ -501,6 +501,58 @@ class TestLeagueConfig(unittest.TestCase):
         cfg = self._load(leagues=[{"league_id": 1, "team_id": 2}])
         self.assertEqual(cfg.espn(cfg.leagues[0]).swid, "{ABC-123}")
 
+    def test_per_league_season_overrides_the_global(self):
+        """Two leagues can sit in different seasons; neither affects the other."""
+        cfg = self._load(
+            season=2027,
+            leagues=[
+                {"league_id": 111111111, "team_id": 2},
+                {"league_id": 222222222, "team_id": 7, "season": 2026},
+            ],
+        )
+        a, b = (cfg.espn(l) for l in cfg.leagues)
+        self.assertEqual(a.season, 2027)
+        self.assertEqual(b.season, 2026)
+
+    def test_season_zero_means_use_the_global(self):
+        """0 is the config.yaml placeholder, not a request for year zero."""
+        cfg = self._load(
+            season=2027,
+            leagues=[{"league_id": 111111111, "team_id": 2, "season": 0}],
+        )
+        self.assertEqual(cfg.espn(cfg.leagues[0]).season, 2027)
+
+    def test_a_start_year_season_is_refused(self):
+        """ESPN labels a season by the year it ends in -- 2026-27 is 2027.
+
+        This is worth a check rather than a comment because the mistake does
+        not error: a probe with the previous season's id came back with
+        latestScoringPeriod 175 and matchup 22 of 22, which reads as a
+        plausible late-season state rather than as a wrong year. The guard
+        here only catches the egregious spelling (a two-digit or 1990s value);
+        off-by-one is caught by surfacing the season in the run record.
+        """
+        for bad in (26, 1999, 27, -2027):
+            with self.assertRaises(appconfig.ConfigError, msg="accepted %r" % bad):
+                self._load(leagues=[
+                    {"league_id": 111111111, "team_id": 2, "season": bad}
+                ])
+
+    def test_a_non_integer_season_is_refused_not_ignored(self):
+        with self.assertRaises(appconfig.ConfigError):
+            self._load(leagues=[
+                {"league_id": 111111111, "team_id": 2, "season": "next"}
+            ])
+
+    def test_the_season_in_use_is_logged(self):
+        """A silent wrong season is the failure mode; make it visible."""
+        cfg = self._load(
+            season=2027,
+            leagues=[{"league_id": 111111111, "team_id": 2, "season": 2026}],
+        )
+        blob = json.dumps(cfg.redacted())
+        self.assertIn("2026", blob)
+
 
 class TestActionIdRoundTrip(unittest.TestCase):
     """The tapped id and the stored id are deliberately different strings.
