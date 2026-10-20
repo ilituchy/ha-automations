@@ -47,7 +47,6 @@ All notable changes to this app are documented here. The format follows
   value. The cap counts games *played*, so availability cancels out of the
   comparison: a questionable star and a healthy role player with the same
   expected line are not the same bet, and the star is the better one.
-
 - The app now lives in the [`ha-automations`][repo] repository alongside other
   Home Assistant automations, at `nba_autopilot/`. The store entry, slug and
   `/data` contents are unchanged; re-point the repository URL in
