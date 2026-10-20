@@ -107,6 +107,28 @@ class RosterEntry:
 
 
 @dataclass(frozen=True)
+class StatLimit:
+    """One entry of ``rosterSettings.lineupSlotStatLimits``, as ESPN sends it.
+
+    The shape was assumed to be ``{slot_id: int}`` and is actually
+    ``{slot_id: {"statId": int, "limitValue": float}}``. Verified against two
+    live leagues on 2026-10-20, where the assumed shape raised ``TypeError``
+    on the first read.
+
+    ``limit_value`` is **fractional and per scoring period**: the observed
+    values are exactly ``40/7`` and ``44/7``, alongside an
+    ``matchupAcquisitionLimit`` of exactly ``5/7`` and ``7/7`` with
+    ``matchupLimitPerScoringPeriod: true``. It is stored raw and un-rounded,
+    because the conversion to a per-matchup integer is an interpretation and
+    this class is the record of what ESPN actually said.
+    """
+
+    slot_id: SlotId
+    stat_id: StatId
+    limit_value: float
+
+
+@dataclass(frozen=True)
 class LeagueSettings:
     """Verbatim from ESPN. No invented defaults -- see the note on the GP cap."""
 
@@ -118,10 +140,20 @@ class LeagueSettings:
     #: ``None`` means *no cap configured*, which is categorically different from
     #: a cap of zero. Conflating the two either disables the optimizer's budget
     #: logic or benches the entire roster. Always check for None explicitly.
-    lineup_slot_stat_limits: Optional[Mapping[SlotId, int]]
+    #:
+    #: Keyed by the slot id ESPN attaches the limit to. Both observed leagues
+    #: use a single entry keyed at slot 15, a slot that appears nowhere in
+    #: ``lineup_slot_counts`` -- so in practice this is one league-wide cap on
+    #: games played rather than a family of per-slot caps.
+    lineup_slot_stat_limits: Optional[Mapping[SlotId, StatLimit]]
     scoring_items: Mapping[StatId, float]
     categories: FrozenSet[StatId]
     waiver_mode: str
+    #: ``None`` whenever ESPN reports ``isUsingAcquisitionBudget: false``,
+    #: *even though* it still sends a non-zero ``acquisitionBudget``. Both
+    #: observed leagues send ``100`` while running traditional waiver priority,
+    #: so trusting the number would let the app try to bid FAAB in a league
+    #: that has no FAAB.
     faab_budget: Optional[int]
     roster_lock_mode: str
     current_scoring_period: int
@@ -135,8 +167,16 @@ class LeagueSettings:
         )
 
     @property
+    def is_points(self) -> bool:
+        return self.scoring_type.upper().startswith("H2H_POINTS")
+
+    @property
     def has_gp_cap(self) -> bool:
         return bool(self.lineup_slot_stat_limits)
+
+    @property
+    def uses_faab(self) -> bool:
+        return self.faab_budget is not None
 
 
 @dataclass(frozen=True)

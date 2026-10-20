@@ -26,6 +26,7 @@ from models import (
     LeagueSettings,
     MatchupWindow,
     RosterEntry,
+    StatLimit,
 )
 
 log = logging.getLogger(__name__)
@@ -149,6 +150,7 @@ class EspnRead:
         s = raw.get("settings") or {}
         roster = s.get("rosterSettings") or {}
         scoring = s.get("scoringSettings") or {}
+        acq = s.get("acquisitionSettings") or {}
         status = raw.get("status") or {}
 
         slot_counts = {
@@ -160,10 +162,34 @@ class EspnRead:
         # The GP cap. ESPN omits the key entirely in uncapped leagues, and may
         # also send an all-zero map, which means the same thing. Both collapse
         # to None -- see the note in solve/budget.remaining_budget.
+        #
+        # The value is a nested object, not an int:
+        #     {"15": {"limitValue": 5.714285714285714, "statId": 42}}
+        # Reading it as an int raised TypeError on the very first live league.
+        # Unparseable entries are skipped rather than guessed at: a wrong cap
+        # silently mis-plans every lineup, whereas a dropped one at least makes
+        # `has_gp_cap` false and takes the budget logic out of the loop.
         raw_limits = roster.get("lineupSlotStatLimits")
-        limits: Optional[Dict[SlotId, int]] = None
+        limits: Optional[Dict[SlotId, StatLimit]] = None
         if raw_limits:
-            parsed = {int(k): int(v) for k, v in raw_limits.items() if int(v) > 0}
+            parsed: Dict[SlotId, StatLimit] = {}
+            for k, v in raw_limits.items():
+                if not isinstance(v, Mapping):
+                    log.warning(
+                        "lineupSlotStatLimits[%s] is %s, not an object; "
+                        "ignoring this cap", k, type(v).__name__
+                    )
+                    continue
+                try:
+                    slot, limit, stat = int(k), float(v["limitValue"]), int(v["statId"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    log.warning(
+                        "lineupSlotStatLimits[%s] unparseable (%s): %r", k, exc, v
+                    )
+                    continue
+                if limit > 0:
+                    parsed[slot] = StatLimit(slot_id=slot, stat_id=stat,
+                                             limit_value=limit)
             limits = parsed or None
 
         scoring_items: Dict[StatId, float] = {}
@@ -194,14 +220,25 @@ class EspnRead:
             lineup_slot_stat_limits=limits,
             scoring_items=scoring_items,
             categories=frozenset(categories),
-            waiver_mode=str((s.get("acquisitionSettings") or {}).get("waiverProcessDays")
-                            or (s.get("acquisitionSettings") or {}).get("acquisitionType")
-                            or "UNKNOWN"),
-            faab_budget=_opt_int(
-                (s.get("acquisitionSettings") or {}).get("acquisitionBudget")
+            # `acquisitionType` is the mode. `waiverProcessDays` is a *list* of
+            # weekday names, so reading it first produced the string
+            # "['SUNDAY']" as the waiver mode on both live leagues.
+            waiver_mode=str(acq.get("acquisitionType") or "UNKNOWN"),
+            # Honour `isUsingAcquisitionBudget` over `acquisitionBudget`. Both
+            # live leagues run traditional waiver priority and still report a
+            # budget of 100; taking that at face value would let the app bid
+            # FAAB in a league where FAAB does not exist.
+            faab_budget=(
+                _opt_int(acq.get("acquisitionBudget"))
+                if acq.get("isUsingAcquisitionBudget")
+                else None
             ),
-            roster_lock_mode=str((s.get("rosterSettings") or {}).get("lineupLockTimeType")
-                                 or "UNKNOWN"),
+            # ESPN spells it `lineupLocktimeType` -- lowercase `t` in `time`.
+            # The old `lineupLockTimeType` matched nothing, so every league
+            # reported its lock mode as UNKNOWN. Both live leagues are
+            # INDIVIDUAL_GAME, the strictest mode there is: each player locks
+            # at their own tip-off rather than at the day's first game.
+            roster_lock_mode=str(roster.get("lineupLocktimeType") or "UNKNOWN"),
             current_scoring_period=int(status.get("latestScoringPeriod") or 0),
             current_matchup_period=int(status.get("currentMatchupPeriod") or 0),
             matchup_period_boundaries=_matchup_windows(s),

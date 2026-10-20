@@ -43,6 +43,22 @@ SLOT_NAMES: Dict[SlotId, str] = {
     15: "Rookie",
 }
 
+#: The slot id ESPN hangs a league-wide ``lineupSlotStatLimits`` entry on. It is
+#: named "Rookie" in the position map and is *not* a usable lineup slot in either
+#: observed league -- it appears nowhere in ``lineupSlotCounts``. Treating the
+#: entry as a cap on a Rookie slot would make it inert; treating it as a team
+#: total is what the numbers support, because the value scales with the number of
+#: starting slots: the 10-starter league reports ``40/7`` and the 11-starter
+#: league ``44/7``, i.e. exactly four games per starting slot per matchup period
+#: in both. A cap on one slot would not track another league's starter count.
+TEAM_TOTAL_LIMIT_SLOT: SlotId = 15
+
+#: Days in a scoring period's week. ``lineupSlotStatLimits`` values arrive
+#: divided by this (``matchupLimitPerScoringPeriod: true``), which is why they
+#: show up as repeating decimals rather than the round numbers on the settings
+#: page. Multiply by this to recover the per-matchup cap.
+SCORING_PERIODS_PER_MATCHUP: int = 7
+
 #: Slots that produce no fantasy scoring. This is one of only two semantic
 #: assumptions in this module -- ESPN does not flag it in the payload, so it
 #: cannot be read. If ESPN ever adds a slot type, the symptom is a lineup that
@@ -79,12 +95,41 @@ STAT_NAMES: Dict[StatId, str] = {
     23: "FGMI",
     24: "FTMI",
     25: "3PMI",
+    26: "APG",
+    27: "BPG",
+    28: "MPG",
+    29: "PPG",
+    30: "RPG",
+    31: "SPG",
+    32: "TOPG",
+    33: "3PG",
+    34: "PPM",
+    35: "A/TO",
+    36: "STR",
     37: "DD",
     38: "TD",
+    39: "QD",
     40: "MIN",
     41: "GS",
     42: "GP",
+    43: "TW",
+    44: "FTR",
 }
+
+#: Stats that are **not additive across games**: percentages, per-game averages
+#: and ratios. The whole points-league value function is a dot product of
+#: projected per-game stats against ``scoringItems``, which is only valid for
+#: counting stats -- summing a per-game average over a 4-game week gives 4x the
+#: real figure, and summing FG% is meaningless at any horizon.
+#:
+#: Neither observed league scores on any of these (all 17 of their items are
+#: counting stats), so this exists to make a league that *does* fail loudly in
+#: ``solve/value.py`` rather than quietly mis-rank every player.
+NON_ADDITIVE_STATS: FrozenSet[StatId] = frozenset(
+    {19, 20, 21, 22}  # FG% FT% 3P% AFG%
+    | {26, 27, 28, 29, 30, 31, 32, 33}  # per-game averages
+    | {34, 35, 36, 44}  # PPM, A/TO, STR, FTR
+)
 
 PTS, BLK, STL, AST, REB = 0, 1, 2, 3, 6
 TO, FGM, FGA, FTM, FTA, TPM = 11, 13, 14, 15, 16, 17
