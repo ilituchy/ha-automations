@@ -216,8 +216,24 @@ class Ws:
     def send_json(self, obj: Dict[str, Any]) -> None:
         self._send_frame(0x1, json.dumps(obj).encode())
 
-    def recv_json(self) -> Dict[str, Any]:
+    def recv_json(self, deadline: Optional[float] = None) -> Dict[str, Any]:
+        """Next application message, honouring ``deadline`` across keepalives.
+
+        The deadline has to be enforced *inside* this loop, not by the caller.
+        HA's aiohttp WebSocket sends protocol-level pings on a heartbeat, and
+        each one is a frame that resets the socket timeout -- so a caller that
+        sets a timeout and then calls this once will wait forever as long as
+        the server keeps pinging. Observed exactly that: a tool that announced
+        a 150-second wait sat for nineteen minutes. It happened to succeed,
+        which is the worst outcome, because a verification tool that lies
+        about its own contract cannot be trusted about anything else.
+        """
         while True:
+            if deadline is not None:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    raise socket.timeout("deadline reached")
+                self.sock.settimeout(remaining)
             opcode, payload = self._read_frame()
             if opcode == 0x9:  # ping
                 self._send_frame(0xA, payload)
@@ -272,11 +288,10 @@ class HaWs:
         return self._id
 
     def events(self, deadline: float) -> Iterator[Dict[str, Any]]:
-        while time.time() < deadline:
-            remaining = max(0.5, deadline - time.time())
-            self.ws.sock.settimeout(remaining)
+        """Yield events until ``deadline``, then stop. The deadline is real."""
+        while True:
             try:
-                msg = self.ws.recv_json()
+                msg = self.ws.recv_json(deadline=deadline)
             except socket.timeout:
                 return
             if msg.get("type") == "event":
