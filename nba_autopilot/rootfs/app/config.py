@@ -19,6 +19,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+import judge
 from espn import ids
 from espn.read import EspnConfig
 from solve import addrop
@@ -98,6 +99,18 @@ class Config:
     #: taking all of them spends a five-a-week acquisition budget on rounding
     #: error. Waived when the move would by itself erase the current deficit.
     addrop_churn_floor: float
+    #: Anthropic API key. Empty means **no review gate at all** and the
+    #: previous behaviour, which is why it is not required: the app has to keep
+    #: working for someone who has not got one.
+    #:
+    #: Setting it is the statement "judge swaps before showing them to me", so
+    #: once it is set a swap the reviewer could not reach a verdict on is not
+    #: shown. See the fail-closed note in ``judge.py`` -- a timeout is not
+    #: permission to proceed unexamined.
+    anthropic_api_key: str
+    #: Which model reviews swaps. An option because the trade between latency
+    #: and depth of recall is the user's to make, not ours.
+    ai_judge_model: str
     shadow_mode: bool
     log_level: str
     season: int
@@ -120,7 +133,7 @@ class Config:
         out = {
             k: v
             for k, v in self.__dict__.items()
-            if k not in ("espn_s2", "espn_swid", "leagues")
+            if k not in ("espn_s2", "espn_swid", "anthropic_api_key", "leagues")
         }
         out["leagues"] = [
             {
@@ -134,6 +147,13 @@ class Config:
         ]
         out["espn_s2"] = "<set:%d chars>" % len(self.espn_s2) if self.espn_s2 else "<unset>"
         out["espn_swid"] = "<set>" if self.espn_swid else "<unset>"
+        # Not just masked -- the presence or absence is itself the setting,
+        # since it is what decides whether swaps are reviewed at all. A startup
+        # log that said nothing here would leave "no key" and "key present"
+        # looking identical in the one place a user goes to check.
+        out["anthropic_api_key"] = (
+            "<set>" if self.anthropic_api_key else "<unset: add/drop review off>"
+        )
         return out
 
 
@@ -353,6 +373,10 @@ def load(path: Optional[str] = None) -> Config:
         addrop_churn_floor=as_float(
             "addrop_churn_floor", addrop.DEFAULT_CHURN_FLOOR
         ),
+        anthropic_api_key=str(opt("anthropic_api_key", "") or "").strip(),
+        ai_judge_model=str(
+            opt("ai_judge_model", judge.DEFAULT_MODEL) or judge.DEFAULT_MODEL
+        ).strip(),
         shadow_mode=as_bool(opt("shadow_mode"), True),
         log_level=str(opt("log_level", "info")).lower(),
         season=int(opt("season", 0) or 0) or ids.season_id(),

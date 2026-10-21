@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import logging
 import signal
@@ -32,6 +33,7 @@ from zoneinfo import ZoneInfo
 
 import config as appconfig
 import discover as discovery
+import judge as judge_mod
 import pipeline
 import usage as usage_mod
 from espn import ids
@@ -112,6 +114,42 @@ def _redact_host(url: str) -> str:
         return "<unparseable>"
 
 
+def join_injuries(
+    players: Sequence[Any], injuries: Optional[Any]
+) -> Dict[int, Any]:
+    """``player_id -> InjuryNote`` for whoever is on the page.
+
+    Factored out of :meth:`Autopilot._availability_overrides` because there are
+    now two consumers wanting different things from the same join: that method
+    wants the normalized bucket, and the add/drop review wants the reporter's
+    actual words. Doing the id-then-name lookup twice would be two chances to
+    drift apart on which players matched, which is the sort of disagreement
+    that only shows up as a swap being judged on a report about someone else.
+
+    A module-level function rather than a method because it needs nothing from
+    the instance -- and because ``tests/test_espn_injuries.py`` calls
+    ``_availability_overrides`` unbound, with ``None`` for ``self``.
+
+    Takes any sequence of players rather than the roster specifically, since
+    the review has to ask about a free agent too.
+    """
+    if injuries is None:
+        return {}
+    payload = injuries.payload or {}
+    by_id = payload.get("by_athlete_id") or {}
+    by_name = payload.get("by_name") or {}
+    from sources.crosswalk import normalize_name
+
+    out: Dict[int, Any] = {}
+    for entry in players:
+        note = by_id.get(str(entry.player_id))
+        if note is None:
+            note = by_name.get(normalize_name(entry.name))
+        if note is not None:
+            out[int(entry.player_id)] = note
+    return out
+
+
 class League:
     """One league's read/write pair, plus the label used in notifications.
 
@@ -166,6 +204,26 @@ class Autopilot:
         # :meth:`injury_notes`.
         self._injuries: Any = None
         self._injuries_at: Optional[datetime] = None
+        # ``None`` means no review gate. Built from the presence of a key
+        # rather than from a separate on/off switch, so there is one fact to
+        # get right instead of two that can contradict each other -- a key
+        # with the switch off, or a switch on with no key, would both need a
+        # behaviour nobody could predict from the Configuration tab.
+        self.judge: Optional[judge_mod.AddDropJudge] = None
+        if cfg.anthropic_api_key:
+            self.judge = judge_mod.AddDropJudge(
+                cfg.anthropic_api_key, model=cfg.ai_judge_model
+            )
+            log.info(
+                "add/drop review is on (%s): every proposed swap is checked "
+                "before you see it, and one that cannot be checked is not "
+                "shown", cfg.ai_judge_model,
+            )
+        else:
+            log.info(
+                "add/drop review is off: no anthropic_api_key is set, so swaps "
+                "are proposed on their points case alone"
+            )
 
     def league_for_run(self, run_id: str) -> Optional[League]:
         """Map a stored run back to its league, to execute an approved tap.
@@ -366,21 +424,15 @@ class Autopilot:
         if injuries is None:
             return {}, []
 
-        payload = injuries.payload
-        by_id = payload.get("by_athlete_id") or {}
-        by_name = payload.get("by_name") or {}
-        from sources.crosswalk import normalize_name
-
         overrides: Dict[int, Tuple[str, str]] = {}
         notes: List[str] = []
+        joined = join_injuries(roster, injuries)
+        by_id = (injuries.payload or {}).get("by_athlete_id") or {}
         for entry in roster:
-            note = by_id.get(str(entry.player_id))
-            matched_on = "id"
-            if note is None:
-                note = by_name.get(normalize_name(entry.name))
-                matched_on = "name"
+            note = joined.get(int(entry.player_id))
             if note is None:
                 continue
+            matched_on = "id" if str(entry.player_id) in by_id else "name"
 
             label = "espn-injuries" if not note.comment_matched else "espn-beat-report"
             overrides[entry.player_id] = (note.bucket, label)
@@ -446,6 +498,7 @@ class Autopilot:
         cal: Optional[SeasonCalendar],
         matchup_period: int,
         schedule: Mapping[int, Mapping[int, int]],
+        injuries: Optional[Any] = None,
     ) -> Tuple[Optional["addrop_mod.AddDropPlan"], List[str]]:
         """Price the pool and decide at most one swap. Reads only.
 
@@ -455,6 +508,12 @@ class Autopilot:
         fetch that fails must degrade to "no add/drop this run" and nothing
         else. That ordering is the reason this is a separate method rather than
         part of ``plan_lineup``.
+
+        ``injuries`` is the same page the availability overrides came from, and
+        it is passed in rather than re-fetched so that the review reads the
+        reporting this run actually acted on. A second fetch could legitimately
+        return something newer, and a reviewer shown different news from the
+        model it is reviewing would be answering a different question.
         """
         notes: List[str] = []
         if not settings.is_points:
@@ -571,7 +630,81 @@ class Autopilot:
                 % (decision.acquisitions_left, matchup_period)
             )
         log.info("add/drop: %s", decision.describe())
+
+        decision, review_notes = self._review_addrop(
+            lg, decision,
+            roster=roster, pool=pool, matchup=matchup, injuries=injuries,
+        )
+        notes.extend(review_notes)
         return decision, notes
+
+    def _review_addrop(
+        self,
+        lg: "League",
+        decision: "addrop_mod.AddDropPlan",
+        *,
+        roster: Sequence[Any],
+        pool: Sequence[Any],
+        matchup: Optional[Any],
+        injuries: Optional[Any],
+    ) -> Tuple[Optional["addrop_mod.AddDropPlan"], List[str]]:
+        """Show the swap to the reviewer before the user sees it.
+
+        Returns the plan to go ahead with, or ``None`` when it was blocked.
+        Both outcomes carry notes, because both are things the user is entitled
+        to read afterwards -- *"it should be able to show why it rejected a
+        request to add drop"*. A block with no stated reason would be the same
+        silence the points model was already criticised for.
+
+        A plan that proposes nothing is returned untouched without a call. The
+        reviewer exists to veto moves, and there is nothing to veto; asking it
+        to confirm an absence would spend a request to be told what we knew.
+        """
+        if self.judge is None or not decision.proposed:
+            return decision, []
+
+        notes: List[str] = []
+        reports = join_injuries(list(roster) + list(pool), injuries)
+        verdict = self.judge.review(
+            league_name=lg.name,
+            keeper=bool(lg.ref.keeper),
+            plan=decision,
+            matchup=matchup,
+            reports=reports,
+            acquisitions_left=decision.acquisitions_left,
+        )
+        swap = decision.add.name
+        if decision.drop is not None:
+            swap = "%s for %s" % (decision.add.name, decision.drop.name)
+
+        if not verdict.approve:
+            notes.append("%s was not proposed -- %s" % (swap, verdict.describe()))
+            if verdict.errored:
+                # Distinguished in the log as well as in the note. A week of
+                # outages and a week of sound judgment produce the same absence
+                # of proposals, and only this line tells them apart.
+                log.warning(
+                    "add/drop review unavailable, so %s was withheld rather "
+                    "than shown unexamined", swap,
+                )
+            return None, notes
+
+        notes.append("%s cleared review -- %s" % (swap, verdict.reason))
+        if not verdict.concern:
+            return decision, notes
+        # A caveat raised on an approval goes on the card, not only into the
+        # record: the card is where the decision is actually made, and a
+        # reservation filed somewhere the user is not looking is not a
+        # reservation. Appended to the computed rationale rather than replacing
+        # it -- see the invariant on ``models.Move.rationale``.
+        return (
+            dataclasses.replace(
+                decision,
+                rationale="%s\n\nReviewer's caveat: %s"
+                % (decision.rationale, verdict.concern),
+            ),
+            notes,
+        )
 
     def run_league(self, lg: "League") -> str:
         run_id = _ulid()
@@ -712,6 +845,7 @@ class Autopilot:
         decision, addrop_notes = self._consider_addrop(
             lg, settings, roster, projections, plan,
             cal=cal, matchup_period=matchup_period, schedule=schedule,
+            injuries=injuries,
         )
         notes.extend(addrop_notes)
         if decision is not None and decision.proposed:

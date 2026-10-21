@@ -735,3 +735,79 @@ world); and bidding zero in a FAAB league rather than declining — it would
 submit, reliably lose, spend an acquisition, appear in the activity feed, and
 teach the user the feature is broken. Neither live league uses FAAB, so
 `plan_addrop` declines on `uses_faab` instead.
+
+## ADR-019 — A model reviews every proposed swap, and can only block it.
+
+**Status:** accepted, forced by two consecutive live runs.
+
+ADR-018's pricing is correct and its blindness is load-bearing: `surplus` is
+points over the rest of this scoring period, and that is answerable *because* it
+ignores everything else. The cost of that is a player who will not suit up again
+this week being worth exactly zero, and zero is the cheapest thing on the roster
+to give away. A season-ending injury and a sprained ankle are the same number.
+
+Observed live on 2026-10-20 and 2026-10-21: the layer proposed dropping an
+88%-owned first-overall rookie, parked on IR with a short-term injury, on
+back-to-back runs. Nothing in the arithmetic was wrong. The requirement arrived
+in one sentence — *"it rewcommended dropping [him]... number one overall draft
+pick. this is why we need ai options in here"* — and the scope in the next:
+
+> "the ai should be called to validate any recoomendations for add drops before
+> i see them. ai knows the context around first round picks, famous players,
+> past stats. we should be prompting the ai to be a judge of weather the
+> statisical value of the add drop makes sense. it should read recent reports,
+> and be able to show why it rejected a request to add drop"
+
+**Decision:** `judge.py` reviews each fully-priced proposal before it is offered
+to the user, and its only power is to withhold it.
+
+**It gates, it does not author.** It is never shown the pool, never asked who to
+pick up, never asked to rank anything. Every number in the prompt is one that
+already moved the decision, and the verdict is a boolean plus a reason. This is
+what keeps the whole thing auditable: a rejection is checkable against the case
+it was shown, and an approval contributes no claim of its own. A model that
+could *propose* a swap would be a second valuation layer with no units, and
+there would be no way to tell its recall from its taste.
+
+**`models.Move.rationale` is untouched.** That invariant — *"never written by an
+LLM without the numbers being present and checkable"* — survives because the
+card still carries what `addrop._rationale` computed. A caveat raised on an
+approval is appended to it, never substituted for it.
+
+**Ownership share is the signal, and it is carried but never priced.** ADR-018's
+inputs are points and percent-per-game; `percent_owned` is neither, and adding
+it as a term would mean inventing an exchange rate between "the league rosters
+him" and "fantasy points". So `Candidate` carries the four market readings —
+ownership share, average draft position, ESPN's preseason rank, the season
+outlook — and `solve/addrop.py` uses none of them. They exist for the layer that
+reasons in prose, which is the only one that can use "thousands of other owners
+disagree with this valuation" without fabricating a coefficient.
+`tests/test_addrop.py::TestMarketSignalsAreCarriedNotPriced` fails if a later
+version quietly starts pricing them.
+
+**Fail-closed on error, fail-off with no key.** Configuring a key *is* the
+statement that swaps should be reviewed, so once one is present a proposal the
+judge could not reach a verdict on is not shown — a timed-out request is not
+permission to make an irreversible, publicly attributed move unexamined. With no
+key there is no gate and ADR-018's behaviour stands unchanged. `Verdict.errored`
+keeps the two apart in the run notes, because a single boolean would make a week
+of API outages read as a week of good judgment. The on/off state is derived from
+the presence of the key rather than from a separate switch: two facts that can
+contradict each other is one more than the feature needs.
+
+**The verdict is a forced tool call.** `tool_choice` is pinned to
+`record_verdict`, and a response without it raises rather than reading as
+assent. The alternative is regexing free text for a yes/no that gates an
+irreversible action, and the near-misses all produce *something*: a refusal, a
+`max_tokens` truncation mid-call, a model that does not support tools. Treating
+"something" as approval would fail open on exactly the inputs that confused it.
+
+**Rejected:** letting the judge pick the add as well (no units, unauditable, and
+a second valuation layer the first one cannot check); a hard `percent_owned`
+threshold in `plan_addrop` instead of a model — it blocks the keeper-league
+rookie and also blocks every legitimate drop of a widely-held player in a bad
+role, with no way to tell those apart and no sentence to show the user;
+re-fetching the injuries page inside the review (the run already holds it, and
+two fetches is two chances to judge a swap against a report about someone else);
+and letting the judge's own words replace the computed rationale, which would
+void the `Move.rationale` invariant for the sake of a nicer-reading card.

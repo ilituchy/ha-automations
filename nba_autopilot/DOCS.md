@@ -36,6 +36,8 @@ what it *would* have done without touching your ESPN team.
 | `max_faab_bid` | no | `0` | 0–1000, whole dollars |
 | `addrop_margin_pct` | no | `12` | How much better a pickup must be, on quality alone |
 | `addrop_churn_floor` | no | `3` | Smallest points gain worth a permanent move |
+| `anthropic_api_key` | no | — | Turns on the add/drop review, see below |
+| `ai_judge_model` | no | `claude-sonnet-4-6` | Which model reviews swaps |
 | `shadow_mode` | no | `true` | Compute + notify, never POST to ESPN |
 | `log_level` | no | `info` | `trace`…`fatal` |
 
@@ -101,6 +103,42 @@ The matchup score is read every run and shown in the notes, but it is only ever
 used to *waive* the floor, never to raise it. ESPN publishes no projected final
 for basketball, so a lead you can see accumulated is not evidence the week is
 safe — there is no opponent projection behind it.
+
+### The add/drop review
+
+Everything above prices the rest of the current scoring week and nothing else.
+That is deliberate and it is what makes "how many points does this gain" a
+question with an answer — but it means a player who will not suit up again
+before Sunday is worth exactly zero to it, whether he is out for the season or
+out until Friday. Zero is the cheapest thing on your roster, so he is the first
+one it offers to give away. This happened on a live roster: a first-overall
+rookie sitting on IR with a short-term injury, proposed as the drop on two runs
+in a row.
+
+Put an Anthropic API key in `anthropic_api_key` and every proposed swap goes to
+Claude before it reaches you. It is shown both players' projections, their games
+left, how much of ESPN disagrees with the valuation (the share of leagues
+rostering each of them, and where each was drafted), ESPN's own injury reporting
+including the beat reporters' words, your current matchup score, and the
+model's full reasoning. Then it is asked one question: does the statistical case
+hold up against what you know that these numbers cannot encode.
+
+It can only **block** a swap. It never picks a player, never proposes a move and
+never ranks the pool, so a rejection is always checkable against the numbers it
+was shown and an approval adds no claim of its own. When it blocks something it
+says why, in its own words, on the status page under that run's notes. It can
+also approve with a caveat, which is appended to the move's rationale rather
+than replacing it — the computed numbers stay on the card.
+
+Leave the key empty and nothing changes: swaps are proposed exactly as they were
+before. Fill it in and a swap the reviewer could not be reached about is **not**
+shown — a timed-out HTTP request is not permission to make an irreversible,
+publicly attributed move unexamined. Those two cases read differently in the
+notes, so a week of API outages does not look like a week of good judgment.
+
+Cost is a handful of requests per run, billed to your own Anthropic account.
+`ai_judge_model` overrides the model if you want a different speed/judgment
+trade.
 
 ## Configuring your leagues
 
@@ -291,6 +329,14 @@ Confirm it with the `{{ user_id }}` template above while logged in as yourself.
 
 **It says it did something but ESPN is unchanged.** `shadow_mode` is still on.
 That's the point of shadow mode — turn it off to go live.
+
+**Swaps stopped being proposed after I added an API key.** Look at the run notes
+on the status page. A swap withheld because the reviewer *could not be reached*
+says so and quotes the error — an invalid key reads as `401`, an unknown model
+name as `404`. That is the fail-closed path working: the key being present is
+what tells the app swaps must be reviewed, so an unreachable reviewer blocks
+rather than waves them through. Clear `anthropic_api_key` to go back to
+unreviewed proposals.
 
 To get more detail, set `log_level` to `debug` and check the app's **Log** tab.
 Cookie values stay redacted at every log level.

@@ -8,6 +8,33 @@ All notable changes to this app are documented here. The format follows
 
 ### Added
 
+- **Every proposed swap is reviewed before you see it.** Set
+  `anthropic_api_key` and `judge.py` shows each fully-priced add/drop to Claude
+  first — both players' projections, games left, ownership share, draft
+  position, ESPN's preseason rank, the beat reporters' own injury wording, the
+  matchup score and the model's full reasoning — and asks whether the
+  statistical case survives contact with what those numbers cannot encode. It
+  can only **block**: it never picks a player, never proposes a move and never
+  ranks the pool, so a rejection is checkable against the case it was shown.
+  When it blocks something it says why, in its own words, in that run's notes.
+  This exists because the week-surplus model is blind outside the current
+  scoring period by design, which makes a first-round pick on a three-day
+  injury worth exactly zero and therefore the cheapest man on the roster to
+  give away — observed twice in two runs on a live roster. See ADR-019.
+- Four **market readings** on every player — `percent_owned`, `draft_adp`,
+  `draft_rank` and ESPN's `seasonOutlook` — carried from the wire through to
+  the decision layer and priced by **nothing**. Ownership share is thousands of
+  other owners' answer to the exact question a drop asks, and it is not
+  denominated in fantasy points, so it informs the review and never enters the
+  arithmetic. A test fails if that changes. `None` rather than `0.0` when ESPN
+  omits a field: an unowned player and an unreported one must not read alike.
+- The review **fails closed but not off**. With no key configured there is no
+  gate and nothing changes. With a key configured, a swap the reviewer could
+  not be reached about is withheld rather than shown unexamined — a timed-out
+  request is not permission to make an irreversible, publicly attributed move
+  — and "blocked on the merits" stays distinguishable from "could not be
+  reached" in the notes, so a week of API outages does not read as a week of
+  good judgment.
 - **Availability now reads the beat reports, not just the status field.**
   `sources/espn_injuries.py` fetches ESPN's NBA injuries page and uses it in
   two tiers. Tier 1 is the structured `status`, which turns out to have only

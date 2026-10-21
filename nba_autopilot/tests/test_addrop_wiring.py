@@ -154,9 +154,13 @@ class _Read:
 
 
 class _League:
-    def __init__(self, read, write=None):
+    def __init__(self, read, write=None, keeper=False):
         self.name = "Test League"
-        self.ref = type("Ref", (), {"league_id": 111111111, "team_id": 2})()
+        self.ref = type(
+            "Ref",
+            (),
+            {"league_id": 111111111, "team_id": 2, "keeper": keeper},
+        )()
         self.read = read
         self.write = write or _Write()
 
@@ -241,12 +245,16 @@ class _Harness:
 
     ``Autopilot.__init__`` opens an HTTP client and a SQLite file, neither of
     which this is about, so the instance is built without it and given only the
-    three collaborators these two methods touch.
+    collaborators these two methods touch.
+
+    ``judge`` defaults to ``None``, which is the no-API-key path and the one
+    every test in this file wants: the arithmetic's proposal reaches the user
+    unmodified. ``tests/test_judge.py`` passes a stub to exercise the other.
     """
 
     def __init__(self, *, autonomy=False, shadow=False, read=None, write=None,
                  store=None, ha=None, st=None, margin=12.0, floor=3.0,
-                 never_drop=()):
+                 never_drop=(), judge=None):
         self.store = store or _Store()
         self.ha = ha or _Ha()
         self.cfg = type("Cfg", (), {
@@ -260,6 +268,7 @@ class _Harness:
         self.app.cfg = self.cfg
         self.app.store = self.store
         self.app.ha = self.ha
+        self.app.judge = judge
 
         self.settings = st or settings()
         # Three players for two starting slots and one bench, so the roster is
@@ -285,11 +294,12 @@ class _Harness:
             values=dict(self.values), notes=(),
         )
 
-    def consider(self, target=None):
+    def consider(self, target=None, injuries=None):
         return self.app._consider_addrop(
             self.lg, self.settings, self.roster, self.projections,
             self.plan(target),
             cal=self.cal, matchup_period=1, schedule=self.schedule,
+            injuries=injuries,
         )
 
     def offer(self, decision):

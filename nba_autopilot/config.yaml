@@ -83,6 +83,24 @@ options:
   # Waived automatically when the move would by itself erase the deficit in
   # the current matchup.
   addrop_churn_floor: 3
+  # An Anthropic API key turns on the add/drop review. Every proposed swap is
+  # then shown to Claude first, with both players' numbers, how much of the
+  # league owns each of them, where they were drafted and ESPN's own injury
+  # reporting, and asked whether the statistical case actually holds up. It can
+  # block a swap, and when it does it says why -- on the status page, in its
+  # own words.
+  #
+  # This exists because the points model is blind to everything outside the
+  # current week, so a first-round pick with a two-week injury is worth exactly
+  # zero to it and becomes the cheapest man on the roster to give away. The
+  # review is the only part of the app that knows who players are.
+  #
+  # Leave it empty and nothing changes: swaps are proposed exactly as before.
+  # Fill it in and a swap the reviewer could not be reached about is **not**
+  # shown, because a timed-out request is not permission to make an
+  # irreversible move unexamined.
+  anthropic_api_key: ""
+  ai_judge_model: claude-sonnet-4-6
   shadow_mode: true
   log_level: info
 
@@ -109,5 +127,7 @@ schema:
   max_faab_bid: int(0,1000)
   addrop_margin_pct: float(0,100)
   addrop_churn_floor: float(0,500)
+  anthropic_api_key: password?
+  ai_judge_model: str?
   shadow_mode: bool
   log_level: list(trace|debug|info|notice|warning|error|fatal)
