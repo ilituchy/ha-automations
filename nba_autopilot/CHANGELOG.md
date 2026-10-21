@@ -8,6 +8,25 @@ All notable changes to this app are documented here. The format follows
 
 ### Added
 
+- **The ingress status page actually exists**, in the sidebar, listing every
+  proposal waiting on a decision with its rationale next to an Approve and a
+  Reject button, plus the last eight runs and their notes. A notification is a
+  one-shot thing — miss it, swipe it away, or read it on a locked screen and
+  the approval is gone until the proposal expires six hours later. This page is
+  always there and survives being ignored. It calls the same
+  `Store.decide` → `execute_approved` pair a notification tap calls, so the
+  double-decision guard, the stale-proposal guard and the audit trail are
+  shared rather than duplicated; and it mirrors the tap's owner check, so
+  another Home Assistant user on the same instance cannot drop a player.
+  Decisions from the page are attributed to the Home Assistant user who made
+  them. Every URL it emits is relative, because ingress serves the app under a
+  rotating `/api/hassio_ingress/<token>/` prefix, and everything interpolated
+  into it is HTML-escaped — rationale text carries ESPN player names today and
+  LLM output later, and the page renders inside the authenticated frontend.
+- `Store.query`, a locked read-only helper, so the page never touches the
+  shared SQLite connection directly. Runs execute on a worker thread, so an
+  unlocked cursor would interleave with their writes.
+
 - **The solver runs.** `run_league()` is wired end to end: projections →
   per-player value → games-played shadow price → assignment → proposal →
   journal → notification. Previously it read the league and stopped, recording
@@ -99,6 +118,13 @@ All notable changes to this app are documented here. The format follows
   options; `leagues` is checked by `_parse_leagues`, which can say *which*
   entry is wrong, and which `bashio::config.has_value` could not have checked
   anyway — it sees an empty list as the string `"[]"` and passes it.
+- **Nothing was listening on the ingress port.** `config.yaml` declared
+  `ingress: true` and `ingress_port: 8099`, the 0.1.0 notes listed an "ingress
+  status UI", `fastapi` and `uvicorn` shipped in the image, and the approval
+  notification's deep link resolved to the app's ingress path — but no server
+  was ever started, so following that link opened the Home Assistant app on its
+  home page. The notification tap was not the weakest approval surface; it was
+  the only one.
 - **The add/drop and cancel write paths were all three wrong**, and are now
   verified end to end against a throwaway ESPN league rather than against the
   documented grammar. Every item below was found by a real request on the first

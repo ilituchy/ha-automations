@@ -615,6 +615,26 @@ class Autopilot:
         """
         await asyncio.to_thread(self.run_once)
 
+    async def _serve_web(self) -> None:
+        """The ingress status page, isolated so its failure is survivable.
+
+        A crash here must not take the daemon down with it. The page is how you
+        *see* proposals; the notification is how you get told about them, and
+        losing the former while keeping the latter is a degraded app rather than
+        a dead one. So the exception is logged and the task ends quietly.
+        """
+        try:
+            import web
+
+            await web.serve(self, self.cfg.ingress_port)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "the ingress status page stopped; scheduled runs and "
+                "notification approvals are unaffected"
+            )
+
     async def serve(self) -> None:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         from apscheduler.triggers.cron import CronTrigger
@@ -651,6 +671,11 @@ class Autopilot:
         sched.start()
 
         listener = asyncio.create_task(self.ha.listen_actions(queue, stop=stop))
+        # The review surface. Deliberately a sibling task rather than a
+        # precondition: if uvicorn cannot bind, the scheduler and the
+        # notification path must keep working, because they are what make the
+        # app useful and the page is only the nicer way to answer it.
+        web_task = asyncio.create_task(self._serve_web())
         try:
             while not stop.is_set():
                 try:
@@ -660,6 +685,7 @@ class Autopilot:
                 await self.handle_action(ev)
         finally:
             listener.cancel()
+            web_task.cancel()
             sched.shutdown(wait=False)
             self.store.close()
             self.http.close()

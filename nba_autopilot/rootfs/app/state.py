@@ -427,6 +427,23 @@ class Store:
             rows = self.db.execute(q + " ORDER BY id", args).fetchall()
         return [_row_to_proposal(r) for r in rows]
 
+    def query(self, sql: str, args: Sequence[Any] = ()) -> List[Mapping[str, Any]]:
+        """Read-only escape hatch, locked, for views this class should not own.
+
+        The ingress page needs joins and orderings that are presentation
+        decisions, not state-machine ones, and growing a bespoke method here for
+        each of them would put the layout of a web page into the file that owns
+        the approval invariants. What it must *not* do is touch ``self.db``
+        directly: a run executes on a worker thread, so an unlocked cursor would
+        interleave with its writes on the one shared connection.
+
+        Rows are copied to plain dicts so nothing holding a cursor escapes the
+        lock.
+        """
+        with self._lock:
+            rows = self.db.execute(sql, tuple(args)).fetchall()
+        return [dict(r) for r in rows]
+
     def stuck_writes(self) -> List[Mapping[str, Any]]:
         """Indeterminate journal entries awaiting reconciliation.
 
