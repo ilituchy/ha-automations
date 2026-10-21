@@ -545,6 +545,22 @@ class TestDropProtections(unittest.TestCase):
         self.assertFalse(plan.proposed)
         self.assertIn("never_drop", " ".join(plan.notes))
 
+    def test_a_man_picked_up_earlier_this_run_is_not_given_away(self):
+        """A run may propose several swaps, and the second is priced against
+        the roster the first leaves behind -- which contains the first swap's
+        pickup. "Add him, then drop him" is two cards that cancel out and one
+        acquisition spent on nothing.
+
+        Reported as its own reason rather than folded into ``never_drop``,
+        because a user reading "never_drop" against a man the same run proposes
+        to pick up would reasonably conclude the option was misconfigured.
+        """
+        plan = self.base().run(just_added=[2])
+        self.assertFalse(plan.proposed)
+        joined = " ".join(plan.notes)
+        self.assertIn("picked up earlier this run", joined)
+        self.assertNotIn("never_drop", joined)
+
     def test_a_locked_player_is_never_dropped(self):
         plan = self.base(locked=True).run()
         self.assertFalse(plan.proposed)

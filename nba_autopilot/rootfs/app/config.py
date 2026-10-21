@@ -99,6 +99,16 @@ class Config:
     #: taking all of them spends a five-a-week acquisition budget on rounding
     #: error. Waived when the move would by itself erase the current deficit.
     addrop_churn_floor: float
+    #: How many swaps one run may propose, each approved separately.
+    #:
+    #: One is not enough: points matter in these leagues, and a run that sees
+    #: three worthwhile moves and offers only the best of them leaves the other
+    #: two on the table until tomorrow. More than a handful is worse than one,
+    #: because every swap after the first is priced against a roster that only
+    #: exists if the earlier ones are approved, so the estimate decays as the
+    #: list gets longer. The acquisition budget -- five to seven for a whole
+    #: week -- is the real ceiling and ``plan_addrop`` enforces it regardless.
+    addrop_max_moves: int
     #: Anthropic API key. Empty means **no review gate at all** and the
     #: previous behaviour, which is why it is not required: the app has to keep
     #: working for someone who has not got one.
@@ -373,6 +383,10 @@ def load(path: Optional[str] = None) -> Config:
         addrop_churn_floor=as_float(
             "addrop_churn_floor", addrop.DEFAULT_CHURN_FLOOR
         ),
+        # Floored at 1 rather than rejected: zero would be a way to turn
+        # add/drop off by a number nobody reading the options would recognize
+        # as off, and there is already a switch for that.
+        addrop_max_moves=max(1, int(opt("addrop_max_moves", 3) or 3)),
         anthropic_api_key=str(opt("anthropic_api_key", "") or "").strip(),
         ai_judge_model=str(
             opt("ai_judge_model", judge.DEFAULT_MODEL) or judge.DEFAULT_MODEL

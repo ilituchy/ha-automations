@@ -728,10 +728,14 @@ exclusion is about making room, not about protecting them, and a note explaining
 an absence of room must not be shown where there is room.
 
 **Rejected:** a discount rate converting keeper value into this week's points
-(invented number, changes decisions); a ranked list of the best several swaps
-(the acquisition budget is five to seven for a *week*, and a layer that proposed
-its five best ideas at once would spend the week on one run's view of the
-world); and bidding zero in a FAAB league rather than declining — it would
+(invented number, changes decisions); having `plan_addrop` itself return a
+ranked list of its best several swaps — the drop side and the open-spot
+arithmetic both depend on what the roster holds, so the second-best swap
+against today's roster is usually the same pickup paired with the same man
+going out, and a list of those is one decision wearing several hats. A run
+*does* now offer several swaps, by calling this layer again against the roster
+each accepted swap leaves behind; see ADR-021. And bidding zero in a FAAB
+league rather than declining was rejected too — it would
 submit, reliably lose, spend an acquisition, appear in the activity feed, and
 teach the user the feature is broken. Neither live league uses FAAB, so
 `plan_addrop` declines on `uses_faab` instead.
@@ -886,3 +890,89 @@ breath, so a rebalance could cascade into another swap — one irreversible move
 per approval, and the N-swap funnel is a separate decision with its own
 acquisition accounting; and re-notifying when the plan came back unchanged,
 which would train the user to ignore the one notification that means something.
+
+## ADR-021 — A run offers up to N swaps, each priced against the one above it.
+
+**Status:** accepted. *"i also think you should recomend multiple adds."*
+
+One swap a run was never a statement about what is worth doing; it was a
+statement about what `plan_addrop` can answer in one call. Points matter in both
+live leagues, the acquisition budget is five to seven a week, and a run that
+finds three worthwhile moves and shows the best one leaves the other two until
+tomorrow — which in a four-day matchup period is a quarter of the week. The
+cap is now `addrop_max_moves`, default 3, schema-bounded to 1–5.
+
+**The funnel re-prices rather than ranks.** `_consider_addrops` calls
+`plan_addrop` in a loop, and between calls it advances a *simulated* roster and
+pool with `_apply_swap`. This is the whole design, and the alternative —
+asking the solver for its best N swaps against one roster — is wrong rather
+than merely cruder. The drop side is "the cheapest man who may go", and the
+open-spot arithmetic is `active_roster_cap` against `active_roster_use`; both
+are properties of the roster. Rank against a fixed roster and the second and
+third entries are the same weakest player paired with the second- and
+third-best pickup: three cards of which exactly one can be approved, which is
+the bug that prompted this, not a feature.
+
+**The acquisition lands on the bench in the simulation.** `BENCH_SLOT`, which
+is where ESPN puts one, and more importantly what keeps `active_roster_use`
+consistent: a drop-plus-add leaves the count where it was, an add into an open
+spot raises it by one. Which lineup slot he eventually starts in is not this
+layer's business — that is the rebalance after the write (ADR-020).
+
+**`just_added` is a separate protection from `never_drop`.** A man the loop has
+just picked up is undroppable for the rest of the run: "add him, then drop him"
+is two cards that cancel out and one acquisition spent on nothing. The
+arithmetic would normally never choose him — he was taken for being better than
+everyone — but a thin pool and an unlucky schedule can make the newest bench
+player the cheapest way out. It is its own parameter and its own note only
+because a user reading `never_drop` against a man the same run proposes to pick
+up would reasonably conclude the option was misconfigured.
+
+**The acquisition counter advances too, so the budget is real.** `sim_used`
+increments per accepted swap, which means `remaining_acquisitions` refuses the
+fourth swap of a week that had three left by exactly the guard that would have
+refused it on tomorrow's run. A counter ESPN would not give us stays `None` —
+unknown is not spent — and the funnel then runs to the option's ceiling, as it
+would in a league with no limit.
+
+**What is held fixed, and what that costs.** `lam` and `theta` come from the
+lineup plan computed at the top of the run and are *not* re-solved per
+hypothetical roster. Re-solving would mean a full lineup optimization per
+attempt for an estimate of an estimate. The cost is real: the second swap's gain
+is priced with the first swap's duals, and after two pickups the starting slots
+are held by the pickups, so the true price of a starting slot has risen. The
+estimates therefore decay down the list, which is why the list is short, why it
+is strictly best-first, and why every card after the first says so in words —
+*"Priced as the second move of this run, assuming the swap above it is
+approved."* An approximation the user is told about is a different thing from one
+they are not.
+
+**A blocked swap and an unreachable reviewer are opposite signals.** The review
+(ADR-019) runs per attempt, inside the loop, so the reviewer reads the same card
+the user would — the conditional-pricing line included. A *judgment* is about
+one pair: the loop retires both halves (the add by id, the drop by name) and
+carries on, because the verdict is prose and there is no telling which half it
+objected to, and re-offering a pair sharing a half is asking the same question
+twice. A reviewer that *could not be reached* is not a judgment about anything,
+so the loop stops entirely rather than spending the remaining attempts failing
+the same way and withholding every one of them for the same non-reason. That
+distinction is why `_review_addrop` returns `(plan, notes, unreachable)` instead
+of just the first two.
+
+**Each swap is its own approval, with its own notification tag.** Three swaps
+are three rows, three cards and three taps — approve any subset, in any order.
+The tag is now `autopilot-addrop-<league>-<proposal>`: iOS treats the tag as an
+identity, so one tag per league meant the third notification replaced the first
+two on the lock screen and the user was asked one question and never saw the
+others. The league id stays in front so two leagues can never collide whatever
+the proposal ids turn out to be.
+
+**Rejected:** one notification listing all three with a basket approval (a swap
+is irreversible and publicly attributed; "yes to all of that" is not a thing the
+user should be able to say in one tap, and the later entries are the least
+certain); re-solving the lineup per hypothetical roster (cost, for an estimate
+whose honesty is better served by saying it is conditional); letting the loop
+continue past an unreachable reviewer so the user at least sees the unreviewed
+swaps — a timed-out request is not permission, which was already settled in
+ADR-019 and does not become permission in bulk; and a default of 1, which would
+have shipped the mechanism switched off.

@@ -100,12 +100,18 @@ evidence the week is safe.
 
 Boundaries
 ----------
-Nothing here does I/O, and nothing here writes. It returns at most one swap per
-run with a rationale, and ``main.py`` decides whether that becomes a proposal
-the user taps or (under ``autonomy_add_drop``) a transaction. One swap, not a
-ranked list: the acquisition budget is between five and seven for a whole week,
-and a layer that proposed its five best ideas at once would spend the week's
-budget on a single run's view of the world.
+Nothing here does I/O, and nothing here writes. One call returns **at most one
+swap**, the best one against the roster it was given, with a rationale.
+``main.py`` decides whether that becomes a proposal the user taps or (under
+``autonomy_add_drop``) a transaction.
+
+One swap per call, deliberately, even though a run may offer several. This
+layer is not the place to rank: the drop side and the open-spot arithmetic both
+depend on what the roster holds, so the second-best swap against today's roster
+is usually *not* the second swap to make -- it is the same pickup paired with
+the same man going out. A caller that wants more calls again with the roster
+the first swap leaves behind, which is what ``_consider_addrops`` does, passing
+``just_added`` so the new man is not immediately given back (ADR-021).
 """
 
 from __future__ import annotations
@@ -431,6 +437,7 @@ def plan_addrop(
     matchup: Optional[MatchupScore] = None,
     acquisitions_used: Optional[Mapping[int, int]] = None,
     never_drop: Iterable[str] = (),
+    just_added: Iterable[PlayerId] = (),
     margin_pct: float = DEFAULT_MARGIN_PCT,
     churn_floor: float = DEFAULT_CHURN_FLOOR,
     keeper_drop_fraction: float = DEFAULT_KEEPER_DROP_FRACTION,
@@ -455,6 +462,11 @@ def plan_addrop(
         never_drop: configured names, matched case-insensitively the same way
             ``espn/write.py`` matches them, so this layer refuses what preflight
             would refuse rather than proposing a move that dies at the wire.
+        just_added: players an earlier swap *in the same run* put on the
+            roster. Undroppable, and separate from ``never_drop`` only so that
+            the note says which of the two reasons applied -- a user reading
+            "never_drop" against a man the same run proposes to pick up would
+            reasonably conclude the option was misconfigured.
     """
     notes: List[str] = []
     left = remaining_acquisitions(settings, acquisitions_used, matchup_period)
@@ -532,6 +544,7 @@ def plan_addrop(
 
     protected = {n.strip().lower() for n in never_drop if n.strip()}
     started = {int(p) for p in (starters or ())}
+    fresh = {int(p) for p in just_added}
     mine = [candidate(e) for e in roster]
     priced = {c.player_id: c for c in mine}
     by_value = sorted(mine, key=lambda c: c.per_game)
@@ -556,6 +569,9 @@ def plan_addrop(
         cand = priced[e.player_id]
         if e.name.strip().lower() in protected:
             blocked.append("%s (never_drop)" % e.name)
+            continue
+        if int(e.player_id) in fresh:
+            blocked.append("%s (picked up earlier this run)" % e.name)
             continue
         if e.lineup_locked:
             blocked.append("%s (locked)" % e.name)

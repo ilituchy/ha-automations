@@ -150,6 +150,49 @@ def join_injuries(
     return out
 
 
+def _ordinal(n: int) -> str:
+    """``2 -> "second"``. For prose on an approval card, nothing else."""
+    return {1: "first", 2: "second", 3: "third", 4: "fourth",
+            5: "fifth"}.get(n, "%dth" % n)
+
+
+def _apply_swap(
+    roster: Sequence[Any], pool: Sequence[Any], decision: Any
+) -> Tuple[List[Any], List[Any]]:
+    """The roster and pool as they would be if ``decision`` went through.
+
+    So that a run offering several swaps prices the second against the first.
+    Without it every attempt sees the same weakest player and the same best
+    free agent, and the run proposes three different pickups all paired with
+    the same man going out -- three cards, one of which can be approved.
+
+    The acquisition lands on the **bench**, which is where ESPN puts one and is
+    also what keeps the slot arithmetic honest: ``ids.active_roster_use``
+    counts bench occupancy, so a drop-plus-add leaves the count where it was
+    and an add into an open spot raises it by one, exactly as on ESPN. The
+    lineup that eventually starts him is not this layer's business -- that is
+    the rebalance after the write (ADR-020).
+
+    A pure function returning new lists. Mutating the caller's roster would
+    make the real one, read from ESPN at the top of the run, diverge from what
+    the rest of the run thinks it is holding.
+    """
+    drop_id = (
+        int(decision.drop.player_id) if decision.drop is not None else None
+    )
+    add_id = int(decision.add.player_id)
+    next_roster = [
+        e for e in roster if drop_id is None or int(e.player_id) != drop_id
+    ]
+    for entry in pool:
+        if int(entry.player_id) == add_id:
+            next_roster.append(
+                dataclasses.replace(entry, current_slot=ids.BENCH_SLOT)
+            )
+            break
+    return next_roster, [e for e in pool if int(e.player_id) != add_id]
+
+
 @dataclasses.dataclass(frozen=True)
 class LineupWork:
     """Everything between a roster read and a validated lineup plan.
@@ -527,7 +570,7 @@ class Autopilot:
         notes.append(cal.describe(matchup))
         return cal, matchup, notes
 
-    def _consider_addrop(
+    def _consider_addrops(
         self,
         lg: "League",
         settings: Any,
@@ -539,8 +582,8 @@ class Autopilot:
         matchup_period: int,
         schedule: Mapping[int, Mapping[int, int]],
         injuries: Optional[Any] = None,
-    ) -> Tuple[Optional["addrop_mod.AddDropPlan"], List[str]]:
-        """Price the pool and decide at most one swap. Reads only.
+    ) -> Tuple[List["addrop_mod.AddDropPlan"], List[str]]:
+        """Price the pool and decide up to ``addrop_max_moves`` swaps. Reads only.
 
         Every read here is wrapped, because none of them is worth a run. The
         lineup has already been computed and written by the time this is called
@@ -554,6 +597,11 @@ class Autopilot:
         reporting this run actually acted on. A second fetch could legitimately
         return something newer, and a reviewer shown different news from the
         model it is reviewing would be answering a different question.
+
+        Returns the swaps to offer, best first, and the notes for all of them
+        including the ones that were declined or blocked. The list is empty when
+        there is nothing worth doing, which is the ordinary outcome; the reason
+        is always in the notes.
         """
         notes: List[str] = []
         if not settings.is_points:
@@ -564,7 +612,7 @@ class Autopilot:
                 "add/drop not considered: this is a %s league and the swap "
                 "arithmetic is in points" % settings.scoring_type
             )
-            return None, notes
+            return [], notes
 
         horizon = (
             cal.remaining_periods(matchup_period, settings.current_scoring_period)
@@ -577,14 +625,14 @@ class Autopilot:
                 "period %d, so a pickup's games cannot be counted"
                 % matchup_period
             )
-            return None, notes
+            return [], notes
 
         try:
             pool = lg.read.free_agents()
         except Exception as exc:  # noqa: BLE001 - the lineup is already applied
             log.error("could not read the free-agent pool: %s", exc)
             notes.append("add/drop not considered: pool read failed (%s)" % exc)
-            return None, notes
+            return [], notes
 
         model = value_mod.build_value_model(settings)
         values = dict(plan.values)
@@ -597,7 +645,7 @@ class Autopilot:
                 notes.append(
                     "add/drop not considered: pool projections failed (%s)" % exc
                 )
-                return None, notes
+                return [], notes
             pool_projections, _pool_avail, unprojected = (
                 projections_mod.build_projections(
                     pool, splits, as_of=datetime.now(timezone.utc)
@@ -638,45 +686,121 @@ class Autopilot:
             log.error("could not read the acquisition counter: %s", exc)
             notes.append("acquisition counter unavailable (%s)" % exc)
 
-        decision = addrop_mod.plan_addrop(
-            settings,
-            roster,
-            pool,
-            values,
-            everyone,
-            scoring_period=settings.current_scoring_period,
-            matchup_period=matchup_period,
-            horizon=horizon,
-            schedule=schedule,
-            lam=plan.lam,
-            # The lineup we are about to have in place, not the one ESPN had
-            # when the run started. A player the optimizer just started may
-            # already be tipping off, and a drop that empties a started slot
-            # cannot be undone.
-            starters=[
-                pid for pid, slot in plan.target.items()
-                if ids.is_starting_slot(int(slot))
-            ],
-            matchup=matchup,
-            acquisitions_used=used,
-            never_drop=self.cfg.never_drop,
-            margin_pct=self.cfg.addrop_margin_pct,
-            churn_floor=self.cfg.addrop_churn_floor,
-        )
-        notes.extend(decision.notes)
-        if decision.acquisitions_left is not None:
-            notes.append(
-                "%d acquisition(s) left in matchup period %d"
-                % (decision.acquisitions_left, matchup_period)
-            )
-        log.info("add/drop: %s", decision.describe())
+        # The lineup we are about to have in place, not the one ESPN had when
+        # the run started. A player the optimizer just started may already be
+        # tipping off, and a drop that empties a started slot cannot be undone.
+        starters = [
+            pid for pid, slot in plan.target.items()
+            if ids.is_starting_slot(int(slot))
+        ]
 
-        decision, review_notes = self._review_addrop(
-            lg, decision,
-            roster=roster, pool=pool, matchup=matchup, injuries=injuries,
-        )
-        notes.extend(review_notes)
-        return decision, notes
+        accepted: List["addrop_mod.AddDropPlan"] = []
+        # Advanced after each accepted swap, so swap two is priced against the
+        # roster swap one leaves behind rather than against today's. Without
+        # this the loop would propose the same best pickup repeatedly, or three
+        # different pickups all paired with the same single weakest player.
+        sim_roster = list(roster)
+        sim_pool = list(pool)
+        sim_used = dict(used) if used is not None else None
+        # Players a blocked swap has retired from consideration for the rest of
+        # the run. The verdict is prose, so there is no telling which half of
+        # the pair it objected to -- retiring both is the conservative read, and
+        # re-offering a pair that shares a half with a rejected one is asking
+        # the reviewer the same question twice.
+        vetoed_names = list(self.cfg.never_drop)
+        vetoed_adds: set = set()
+        # Protected for the rest of the run, and reported as such rather than
+        # as a ``never_drop`` entry they are not.
+        just_added: List[int] = []
+
+        for attempt in range(max(1, int(self.cfg.addrop_max_moves))):
+            decision = addrop_mod.plan_addrop(
+                settings,
+                sim_roster,
+                [e for e in sim_pool if int(e.player_id) not in vetoed_adds],
+                values,
+                everyone,
+                scoring_period=settings.current_scoring_period,
+                matchup_period=matchup_period,
+                horizon=horizon,
+                schedule=schedule,
+                lam=plan.lam,
+                starters=starters,
+                matchup=matchup,
+                acquisitions_used=sim_used,
+                never_drop=vetoed_names,
+                just_added=just_added,
+                margin_pct=self.cfg.addrop_margin_pct,
+                churn_floor=self.cfg.addrop_churn_floor,
+            )
+            if attempt == 0 and decision.acquisitions_left is not None:
+                # Once, from the real counter. Re-reporting it per attempt would
+                # print a countdown of a budget nothing has spent yet.
+                notes.append(
+                    "%d acquisition(s) left in matchup period %d"
+                    % (decision.acquisitions_left, matchup_period)
+                )
+            log.info("add/drop: %s", decision.describe())
+            if not decision.proposed:
+                # The notes of the attempt that found nothing are the ones that
+                # explain where the list stopped, so they are always kept. The
+                # notes of the attempts that *did* propose are kept below, with
+                # the swap they belong to.
+                notes.extend(decision.notes)
+                break
+            notes.extend(decision.notes)
+
+            if attempt:
+                # On the card, not only in the record. The gain was computed
+                # against a roster that only exists if the swaps above this one
+                # are approved, and a user tapping this one in isolation is
+                # entitled to know the number assumes company.
+                decision = dataclasses.replace(
+                    decision,
+                    rationale="%s\n\nPriced as the %s move of this run, "
+                    "assuming the %s above %s approved."
+                    % (
+                        decision.rationale,
+                        _ordinal(attempt + 1),
+                        "swap" if attempt == 1 else "%d swaps" % attempt,
+                        "it is" if attempt == 1 else "them are",
+                    ),
+                )
+
+            reviewed, review_notes, unreachable = self._review_addrop(
+                lg, decision,
+                roster=sim_roster, pool=sim_pool, matchup=matchup,
+                injuries=injuries,
+            )
+            notes.extend(review_notes)
+            if reviewed is None:
+                if unreachable:
+                    # Not a judgment about this swap, so the next one would be
+                    # withheld for the same non-reason. Stop rather than spend
+                    # the remaining attempts failing the same way.
+                    notes.append(
+                        "stopped looking for further swaps: the reviewer is "
+                        "unreachable, so none of them could be shown either"
+                    )
+                    break
+                vetoed_adds.add(int(decision.add.player_id))
+                if decision.drop is not None:
+                    vetoed_names.append(decision.drop.name)
+                continue
+
+            accepted.append(reviewed)
+            sim_roster, sim_pool = _apply_swap(sim_roster, sim_pool, reviewed)
+            # A man this run just picked up is not a candidate to give away in
+            # the same run. The arithmetic would normally never choose him -- he
+            # was taken for being better than everyone -- but a thin pool and an
+            # unlucky schedule can make the newest bench player the cheapest
+            # drop, and "add him, then drop him" is two cards that cancel out
+            # and one acquisition spent on nothing.
+            just_added.append(int(reviewed.add.player_id))
+            if sim_used is not None:
+                sim_used[matchup_period] = sim_used.get(matchup_period, 0) + 1
+
+        return accepted, notes
 
     def _review_addrop(
         self,
@@ -687,21 +811,27 @@ class Autopilot:
         pool: Sequence[Any],
         matchup: Optional[Any],
         injuries: Optional[Any],
-    ) -> Tuple[Optional["addrop_mod.AddDropPlan"], List[str]]:
+    ) -> Tuple[Optional["addrop_mod.AddDropPlan"], List[str], bool]:
         """Show the swap to the reviewer before the user sees it.
 
-        Returns the plan to go ahead with, or ``None`` when it was blocked.
-        Both outcomes carry notes, because both are things the user is entitled
-        to read afterwards -- *"it should be able to show why it rejected a
-        request to add drop"*. A block with no stated reason would be the same
-        silence the points model was already criticised for.
+        Returns the plan to go ahead with or ``None`` when it was blocked, the
+        notes, and whether the block was *"could not be reached"* rather than a
+        judgment. All three outcomes carry notes, because all three are things
+        the user is entitled to read afterwards -- *"it should be able to show
+        why it rejected a request to add drop"*. A block with no stated reason
+        would be the same silence the points model was already criticised for.
+
+        The third value exists because the caller offers several swaps a run and
+        the two kinds of block mean opposite things for the next one: a judgment
+        is about this pair and says nothing about the next, while an unreachable
+        reviewer would withhold every remaining swap for the same non-reason.
 
         A plan that proposes nothing is returned untouched without a call. The
         reviewer exists to veto moves, and there is nothing to veto; asking it
         to confirm an absence would spend a request to be told what we knew.
         """
         if self.judge is None or not decision.proposed:
-            return decision, []
+            return decision, [], False
 
         notes: List[str] = []
         reports = join_injuries(list(roster) + list(pool), injuries)
@@ -727,11 +857,11 @@ class Autopilot:
                     "add/drop review unavailable, so %s was withheld rather "
                     "than shown unexamined", swap,
                 )
-            return None, notes
+            return None, notes, bool(verdict.errored)
 
         notes.append("%s cleared review -- %s" % (swap, verdict.reason))
         if not verdict.concern:
-            return decision, notes
+            return decision, notes, False
         # A caveat raised on an approval goes on the card, not only into the
         # record: the card is where the decision is actually made, and a
         # reservation filed somewhere the user is not looking is not a
@@ -744,6 +874,7 @@ class Autopilot:
                 % (decision.rationale, verdict.concern),
             ),
             notes,
+            False,
         )
 
     def plan_from_roster(
@@ -932,13 +1063,18 @@ class Autopilot:
         # time-critical half; add/drop is the permanent half and needs several
         # more ESPN reads. Doing it second means a pool fetch that hangs or
         # fails costs the run nothing it had already earned.
-        decision, addrop_notes = self._consider_addrop(
+        decisions, addrop_notes = self._consider_addrops(
             lg, settings, roster, projections, plan,
             cal=cal, matchup_period=matchup_period, schedule=schedule,
             injuries=injuries,
         )
         notes.extend(addrop_notes)
-        if decision is not None and decision.proposed:
+        # Best first, each its own approval. Offered in the order they were
+        # priced, because that is the order their estimates assume: the second
+        # was computed as if the first went through. Nothing here waits for an
+        # answer -- under ``autonomy_add_drop`` they all execute, and otherwise
+        # they all sit in the queue and the user takes the ones he wants.
+        for decision in decisions:
             self._offer_addrop(run_id, lg, decision, matchup_period)
 
         self._finish(run_id, sources_used, sources_missing, shadow_prices,
@@ -1188,6 +1324,14 @@ class Autopilot:
         )
         log.info("add/drop %s: %s", swap, decision.rationale)
 
+        # Per proposal, not per league. A run may offer several swaps, and iOS
+        # treats the tag as an identity: a second notification carrying the
+        # league's tag *replaces* the first on the lock screen, so the user
+        # would be asked about the third swap and never see the other two. The
+        # league id stays in front for the same reason it was there before --
+        # it keeps two leagues' cards from ever colliding, whatever the ids.
+        tag = "autopilot-addrop-%d-%s" % (lg.ref.league_id, proposal.action_id)
+
         if not auto:
             # The one class of move that asks. The buttons carry the verb; the
             # proposal id does not -- see ``ha.bridge.item_action_id``.
@@ -1195,7 +1339,7 @@ class Autopilot:
                 self.ha.notify(
                     title=title,
                     message=decision.rationale,
-                    tag="autopilot-addrop-%d" % lg.ref.league_id,
+                    tag=tag,
                     actions=(
                         Action(
                             action_id=bridge_mod.item_action_id(
@@ -1243,7 +1387,7 @@ class Autopilot:
             self.ha.notify(
                 title=title,
                 message=decision.rationale,
-                tag="autopilot-addrop-%d" % lg.ref.league_id,
+                tag=tag,
                 actions=(),
                 time_sensitive=False,
             )

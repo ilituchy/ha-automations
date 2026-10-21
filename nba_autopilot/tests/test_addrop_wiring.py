@@ -149,10 +149,14 @@ class _Read:
     the pickup, which is the entire point of re-reading.
     """
 
-    def __init__(self, *, pool=(), pool_mean=45.0, score=None, used=None,
-                 fail=(), fresh_roster=(), fresh_settings=None):
+    def __init__(self, *, pool=(), pool_mean=45.0, pool_means=None, score=None,
+                 used=None, fail=(), fresh_roster=(), fresh_settings=None):
         self.pool = list(pool)
         self.pool_mean = pool_mean
+        # Per-player, for the tests about the *list* of swaps. One mean for the
+        # whole pool makes every free agent interchangeable, so "best first"
+        # would be a statement about tie-breaking rather than about ordering.
+        self.pool_means = dict(pool_means or {})
         self.score = score
         self.used = used if used is not None else {}
         self.fail = set(fail)
@@ -177,7 +181,11 @@ class _Read:
         # back as "no usable projection" and quietly value the whole pool at
         # zero -- which looks exactly like a pool nobody in it is good enough.
         return {
-            int(p): {ids.SPLIT_SEASON_PROJECTED: {PTS: self.pool_mean}}
+            int(p): {
+                ids.SPLIT_SEASON_PROJECTED: {
+                    PTS: self.pool_means.get(int(p), self.pool_mean)
+                }
+            }
             for p in ids_
         }
 
@@ -299,13 +307,18 @@ class _Harness:
 
     def __init__(self, *, autonomy=False, shadow=False, read=None, write=None,
                  store=None, ha=None, st=None, margin=12.0, floor=3.0,
-                 never_drop=(), judge=None, autonomy_lineup=True):
+                 never_drop=(), judge=None, autonomy_lineup=True,
+                 max_moves=1):
         self.store = store or _Store()
         self.ha = ha or _Ha()
         self.cfg = type("Cfg", (), {
             "never_drop": tuple(never_drop),
             "addrop_margin_pct": margin,
             "addrop_churn_floor": floor,
+            # One by default, so a test about *a* decision gets exactly one
+            # pass of the funnel and its stub pool is not drained by attempts
+            # it never asked for. The tests about the list say so explicitly.
+            "addrop_max_moves": max_moves,
             "autonomy_add_drop": autonomy,
             # Defaults to true, as the real option does. It gates the rebalance
             # that follows an acquisition, not the acquisition.
@@ -342,13 +355,23 @@ class _Harness:
             values=dict(self.values), notes=(),
         )
 
-    def consider(self, target=None, injuries=None):
-        return self.app._consider_addrop(
+    def consider_all(self, target=None, injuries=None):
+        return self.app._consider_addrops(
             self.lg, self.settings, self.roster, self.projections,
             self.plan(target),
             cal=self.cal, matchup_period=1, schedule=self.schedule,
             injuries=injuries,
         )
+
+    def consider(self, target=None, injuries=None):
+        """The best swap only, or ``None``, plus every note.
+
+        Most of the tests below are about one decision -- what blocks it, what
+        it says, what it writes -- and reading ``[0]`` in each of them would be
+        noise obscuring which tests are actually about the list.
+        """
+        decisions, notes = self.consider_all(target=target, injuries=injuries)
+        return (decisions[0] if decisions else None), notes
 
     def offer(self, decision):
         return self.app._offer_addrop("RUN1", self.lg, decision, 1)
@@ -459,7 +482,7 @@ class TestStartersComeFromThePlan(unittest.TestCase):
         decision, notes = h.consider(target={1: START, 3: START, 2: BENCH})
         self.assertIn("never_drop", " ".join(notes))
         self.assertNotEqual(
-            decision.drop.name if decision.drop else "", "Weak"
+            decision.drop.name if decision and decision.drop else "", "Weak"
         )
 
     def test_the_configured_thresholds_reach_the_decision(self):
@@ -468,7 +491,7 @@ class TestStartersComeFromThePlan(unittest.TestCase):
         h = _Harness(read=_Read(pool=[player(90, name="Better")]),
                      floor=10_000.0)
         decision, notes = h.consider()
-        self.assertFalse(decision.proposed)
+        self.assertIsNone(decision)
         self.assertIn("10000.0-point churn floor", " ".join(notes))
 
 
@@ -883,6 +906,220 @@ class TestTheApprovalLoopRebalancesToo(unittest.TestCase):
         self.assertFalse(swap.completed)
         self.assertEqual(h.lg.write.lineups, [])
         self.assertTrue(h.ha.problems)
+
+
+# ---------------------------------------------------------------------------
+# several swaps a run
+# ---------------------------------------------------------------------------
+
+
+def funnel(*, max_moves=3, pool_means=None, st=None, used=None, **kw):
+    """A roster with room for several swaps, and a pool to make them from.
+
+    The default ``_Harness`` holds one droppable player and one free agent,
+    which is everything the single-decision tests need and nothing the list
+    needs: with one of each there is no second swap to find, so "it stopped
+    after one" would be true of a funnel that was never built.
+
+    Three starting slots and three bench, all six filled, so every pickup has
+    to pay for itself with a drop -- the open-spot path is a different branch
+    and is covered where it is decided.
+
+    The shape is dictated by the arithmetic rather than chosen for brevity.
+    Only a player who can *start* earns anything, so a pickup has to beat the
+    cheapest occupied starting slot, and that price rises with every swap the
+    simulation accepts: after two pickups the good slots are held by the
+    pickups. A pool that descends slowly enough to stay above the rising price
+    is therefore the only pool from which three swaps exist to be found.
+    """
+    means = pool_means or {90: 70.0, 91: 60.0, 92: 50.0}
+    h = _Harness(
+        max_moves=max_moves,
+        st=st or settings(lineup_slot_counts={START: 3, BENCH: 3}),
+        read=_Read(
+            pool=[player(p, name="FA%d" % p, slot=BENCH) for p in sorted(means)],
+            pool_means=means,
+            used=used,
+        ),
+        **kw
+    )
+    h.roster = [player(1), player(2), player(3),
+                player(4, name="Weak", slot=BENCH),
+                player(5, name="Weaker", slot=BENCH),
+                player(6, name="Weakest", slot=BENCH)]
+    # The bench ascends while the pool descends, so swap one is the biggest
+    # gain and swap three the smallest. Strictly decreasing rather than merely
+    # non-increasing, so "best first" is falsifiable.
+    means_by_pid = {1: 30.0, 2: 20.0, 3: 10.0, 4: 1.0, 5: 2.0, 6: 3.0}
+    h.projections = {p: projection(p, m) for p, m in means_by_pid.items()}
+    h.values = dict(means_by_pid)
+    return h
+
+
+def funnel_target():
+    return {1: START, 2: START, 3: START, 4: BENCH, 5: BENCH, 6: BENCH}
+
+
+class TestSeveralSwapsARun(unittest.TestCase):
+    """*"i also think you should recomend multiple adds"*.
+
+    A run that sees three worthwhile moves and shows the best one leaves the
+    other two until tomorrow, and in a four-day week tomorrow is a quarter of
+    it. The list is bounded, ordered, and each entry is priced against the
+    roster the entries above it leave behind.
+    """
+
+    def test_three_worthwhile_swaps_become_three_offers(self):
+        decisions, _notes = funnel().consider_all(target=funnel_target())
+        self.assertEqual(len(decisions), 3)
+        self.assertTrue(all(d.proposed for d in decisions))
+
+    def test_best_first(self):
+        decisions, _notes = funnel().consider_all(target=funnel_target())
+        gains = [d.gain for d in decisions]
+        self.assertEqual(gains, sorted(gains, reverse=True))
+
+    def test_no_pair_is_offered_twice(self):
+        """The bug this whole mechanism exists to avoid: three cards naming
+        three different pickups and the same single man going out, of which
+        exactly one can be approved."""
+        decisions, _notes = funnel().consider_all(target=funnel_target())
+        self.assertEqual(
+            [d.add.name for d in decisions], ["FA90", "FA91", "FA92"]
+        )
+        self.assertEqual(
+            [d.drop.name for d in decisions], ["Weak", "Weaker", "Weakest"]
+        )
+
+    def test_nobody_is_added_and_then_dropped_in_the_same_run(self):
+        """Two cards that cancel out, and one acquisition spent on nothing."""
+        decisions, _notes = funnel().consider_all(target=funnel_target())
+        added = {d.add.name for d in decisions}
+        self.assertFalse(added & {d.drop.name for d in decisions if d.drop})
+
+    def test_the_option_is_the_ceiling(self):
+        decisions, _notes = funnel(max_moves=2).consider_all(
+            target=funnel_target()
+        )
+        self.assertEqual(len(decisions), 2)
+
+    def test_one_is_the_old_behaviour_exactly(self):
+        decisions, _notes = funnel(max_moves=1).consider_all(
+            target=funnel_target()
+        )
+        self.assertEqual(len(decisions), 1)
+
+    def test_the_list_ends_when_the_pool_does(self):
+        """Asking for three when only one pickup is worth having. The notes of
+        the attempt that found nothing are what explain where it stopped."""
+        h = funnel(pool_means={90: 60.0})
+        decisions, notes = h.consider_all(target=funnel_target())
+        self.assertEqual(len(decisions), 1)
+        self.assertTrue(notes)
+
+    def test_the_acquisition_budget_caps_the_real_total(self):
+        """Two left in the period, so the third attempt is refused by the same
+        guard that refuses it on a second run of the day -- the simulated
+        counter advances as the list grows."""
+        h = funnel(
+            st=settings(lineup_slot_counts={START: 3, BENCH: 3},
+                        acquisition_limit=2.0),
+            used={1: 0},
+        )
+        decisions, notes = h.consider_all(target=funnel_target())
+        self.assertEqual(len(decisions), 2)
+        self.assertIn("no acquisitions left", " ".join(notes))
+
+    def test_a_counter_ESPN_would_not_give_us_does_not_stop_the_list(self):
+        """``acquisitions_used`` unavailable means "unknown", not "spent". The
+        simulated count has nothing to advance, and the list runs to the
+        option's ceiling as it would with no limit at all."""
+        h = funnel()
+        h.lg.read.fail = {"acquisitions_used"}
+        decisions, notes = h.consider_all(target=funnel_target())
+        self.assertEqual(len(decisions), 3)
+        self.assertIn("acquisition counter unavailable", " ".join(notes))
+
+    def test_the_budget_is_reported_once_not_counted_down(self):
+        h = funnel(
+            st=settings(lineup_slot_counts={START: 3, BENCH: 3},
+                        acquisition_limit=9.0),
+            used={1: 0},
+        )
+        _decisions, notes = h.consider_all(target=funnel_target())
+        self.assertEqual(
+            sum(1 for n in notes if "acquisition(s) left" in n), 1
+        )
+
+    def test_the_second_card_says_its_number_assumes_the_first(self):
+        """The gain was computed against a roster that only exists if the swap
+        above it goes through, and a user tapping this one in isolation is
+        entitled to know that."""
+        decisions, _notes = funnel().consider_all(target=funnel_target())
+        self.assertNotIn("Priced as the", decisions[0].rationale)
+        self.assertIn("second move of this run", decisions[1].rationale)
+        self.assertIn("the swap above it is approved", decisions[2 - 1].rationale)
+        self.assertIn("the 2 swaps above them are approved",
+                      decisions[2].rationale)
+
+    def test_the_first_card_is_priced_against_the_real_roster(self):
+        """Not against a simulation of anything. Whatever the list does, the
+        best swap has to be the one a single-swap run would have offered."""
+        many, _n1 = funnel().consider_all(target=funnel_target())
+        one, _n2 = funnel(max_moves=1).consider_all(target=funnel_target())
+        self.assertEqual(many[0].add.name, one[0].add.name)
+        self.assertEqual(many[0].drop.name, one[0].drop.name)
+        self.assertAlmostEqual(many[0].gain, one[0].gain)
+
+
+class TestEachOfferStandsAlone(unittest.TestCase):
+    """Three swaps are three approvals, not one basket."""
+
+    def test_three_proposals_and_three_notifications(self):
+        h = funnel()
+        decisions, _notes = h.consider_all(target=funnel_target())
+        for d in decisions:
+            h.offer(d)
+        self.assertEqual(len(h.store.rows), 3)
+        self.assertEqual(len(h.ha.sent), 3)
+
+    def test_each_notification_has_its_own_tag(self):
+        """iOS treats the tag as an identity. One tag for the league means the
+        third swap's notification replaces the first two on the lock screen,
+        and the user is asked one question and never sees the others."""
+        h = funnel()
+        decisions, _notes = h.consider_all(target=funnel_target())
+        for d in decisions:
+            h.offer(d)
+        tags = [s["tag"] for s in h.ha.sent]
+        self.assertEqual(len(set(tags)), 3)
+        # Still league-scoped in front, so two leagues can never collide
+        # whatever their proposal ids turn out to be.
+        self.assertTrue(all(t.startswith("autopilot-addrop-111111111-")
+                            for t in tags))
+
+    def test_each_card_carries_its_own_pair(self):
+        h = funnel()
+        decisions, _notes = h.consider_all(target=funnel_target())
+        for d in decisions:
+            h.offer(d)
+        self.assertEqual(
+            [(r.payload["add_name"], r.payload["drop_name"])
+             for r in h.store.rows],
+            [("FA90", "Weak"), ("FA91", "Weaker"), ("FA92", "Weakest")],
+        )
+
+    def test_approving_one_does_not_approve_the_others(self):
+        """Each row is independently claimable, so a tap on the second card
+        leaves the first and third exactly where they were."""
+        h = funnel()
+        decisions, _notes = h.consider_all(target=funnel_target())
+        for d in decisions:
+            h.offer(d)
+        self.assertTrue(h.app.store.claim_for_execution(h.store.rows[1].id))
+        self.assertEqual(
+            [r.completed for r in h.store.rows], [None, None, None]
+        )
 
 
 if __name__ == "__main__":

@@ -8,6 +8,30 @@ All notable changes to this app are documented here. The format follows
 
 ### Added
 
+- **A run can offer up to three swaps, each approved separately.** New
+  `addrop_max_moves` option (1–5, default 3). Previously a run that found three
+  worthwhile moves showed the best one and left the other two until tomorrow,
+  which in a four-day matchup period is a quarter of the week. Each swap is its
+  own notification, its own row and its own tap — there is no basket approval,
+  because a drop is irreversible. The notification tag is now per proposal;
+  iOS treats the tag as an identity, so a single league-wide tag meant the
+  third card replaced the first two on the lock screen.
+
+  The list is re-priced rather than ranked: who should go out depends on who is
+  on the roster, so `_consider_addrops` works out the best swap, advances a
+  simulated roster and pool through it, and asks again. Ranking against a fixed
+  roster would have produced three cards naming three different pickups and the
+  same single man going out, of which exactly one could be approved. Every
+  entry after the first says on the card that its number assumes the ones above
+  it. The acquisition counter advances with the list, so the league's own limit
+  caps the real total, and a man picked up earlier in a run is never offered as
+  a drop later in it (`just_added`, reported as its own reason rather than as a
+  `never_drop` entry it is not).
+
+  The review runs per swap, and its two refusals now mean opposite things: a
+  judgment retires that pair and the run carries on looking, while an
+  unreachable reviewer stops the search, since every remaining swap would be
+  withheld for the same non-reason. See ADR-021.
 - **An acquisition rebalances the lineup immediately.** A pickup on your bench
   is worth nothing, and the day's lineup was written earlier in the run against
   a roster that did not contain him. So the moment a swap actually lands — in

@@ -38,7 +38,14 @@ import judge as judge_mod  # noqa: E402
 from models import MatchupScore  # noqa: E402
 from solve.addrop import AddDropPlan, Candidate  # noqa: E402
 
-from tests.test_addrop_wiring import _Harness, _League, _Read, player  # noqa: E402
+from tests.test_addrop_wiring import (  # noqa: E402
+    _Harness,
+    _League,
+    _Read,
+    funnel,
+    funnel_target,
+    player,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -512,8 +519,90 @@ class TestTheGateSitsBeforeTheUser(unittest.TestCase):
         h = self.harness(judge_mod.Verdict(True, "ok"))
         h.lg = _League(_Read(pool=[]), keeper=False)
         decision, _notes = h.consider()
-        self.assertFalse(decision.proposed)
+        self.assertIsNone(decision)
         self.assertEqual(h.app.judge.seen, [])
+
+
+class _PerSwapJudge:
+    """A reviewer with an opinion about each swap rather than about all of them.
+
+    The single-verdict ``_Judge`` above cannot express the case the list cares
+    about -- one swap blocked and the next one fine -- and that case is the
+    whole reason a block does not end the run.
+    """
+
+    def __init__(self, decide):
+        self.decide = decide
+        self.seen = []
+
+    def review(self, **kw):
+        self.seen.append(kw)
+        return self.decide(kw["plan"])
+
+
+class TestTheReviewerSeesEverySwap(unittest.TestCase):
+    """A run offering several swaps shows the reviewer each of them, and the
+    two kinds of refusal mean opposite things for the ones still to come."""
+
+    def test_every_offer_was_reviewed(self):
+        h = funnel(judge=_PerSwapJudge(lambda p: judge_mod.Verdict(True, "ok")))
+        decisions, _notes = h.consider_all(target=funnel_target())
+        self.assertEqual(len(decisions), 3)
+        self.assertEqual(
+            [k["plan"].add.name for k in h.app.judge.seen],
+            ["FA90", "FA91", "FA92"],
+        )
+
+    def test_a_block_is_about_that_swap_and_the_run_carries_on(self):
+        """*"this is why we need ai options in here"* -- the reviewer is there
+        to stop one bad idea, not to end the run that had it."""
+        h = funnel(judge=_PerSwapJudge(
+            lambda p: judge_mod.Verdict(False, "FA90 is hurt.")
+            if p.add.name == "FA90" else judge_mod.Verdict(True, "ok")
+        ))
+        decisions, notes = h.consider_all(target=funnel_target())
+        self.assertEqual([d.add.name for d in decisions], ["FA91", "FA92"])
+        self.assertIn("FA90 is hurt.", " | ".join(notes))
+
+    def test_a_blocked_pair_is_not_put_forward_again(self):
+        """The verdict is prose, so there is no telling which half it objected
+        to. Re-offering a pair that shares a half with a rejected one is asking
+        the reviewer the same question twice."""
+        h = funnel(judge=_PerSwapJudge(
+            lambda p: judge_mod.Verdict(False, "no")
+            if p.add.name == "FA90" else judge_mod.Verdict(True, "ok")
+        ))
+        decisions, _notes = h.consider_all(target=funnel_target())
+        self.assertNotIn("FA90", [d.add.name for d in decisions])
+        self.assertNotIn("Weak", [d.drop.name for d in decisions])
+
+    def test_an_unreachable_reviewer_stops_the_list_entirely(self):
+        """Not a judgment about this swap, so the next one would be withheld
+        for the same non-reason. One wasted request, not three."""
+        h = funnel(judge=_PerSwapJudge(
+            lambda p: judge_mod.Verdict(False, "connect timeout", errored=True)
+        ))
+        decisions, notes = h.consider_all(target=funnel_target())
+        self.assertEqual(decisions, [])
+        self.assertEqual(len(h.app.judge.seen), 1)
+        self.assertIn("stopped looking for further swaps", " | ".join(notes))
+
+    def test_the_reviewer_reads_the_card_the_user_would(self):
+        """Including the line saying this one's number assumes the swap above
+        it. The reviewer is being asked whether the case holds up, and the case
+        for the second swap is conditional -- hiding that from the reviewer
+        while showing it to the user would be two different questions."""
+        h = funnel(judge=_PerSwapJudge(lambda p: judge_mod.Verdict(True, "ok")))
+        decisions, _notes = h.consider_all(target=funnel_target())
+        self.assertNotIn("Priced as the", h.app.judge.seen[0]["plan"].rationale)
+        self.assertIn(
+            "second move of this run", h.app.judge.seen[1]["plan"].rationale
+        )
+        # And what the reviewer saw is what the proposal carries, bar a caveat
+        # the reviewer itself may add.
+        self.assertEqual(
+            h.app.judge.seen[1]["plan"].rationale, decisions[1].rationale
+        )
 
 
 if __name__ == "__main__":

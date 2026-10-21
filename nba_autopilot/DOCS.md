@@ -36,6 +36,7 @@ what it *would* have done without touching your ESPN team.
 | `max_faab_bid` | no | `0` | 0–1000, whole dollars |
 | `addrop_margin_pct` | no | `12` | How much better a pickup must be, on quality alone |
 | `addrop_churn_floor` | no | `3` | Smallest points gain worth a permanent move |
+| `addrop_max_moves` | no | `3` | 1–5. Swaps one run may offer, each approved separately |
 | `anthropic_api_key` | no | — | Turns on the add/drop review, see below |
 | `ai_judge_model` | no | `claude-sonnet-4-6` | Which model reviews swaps |
 | `shadow_mode` | no | `true` | Compute + notify, never POST to ESPN |
@@ -104,6 +105,40 @@ used to *waive* the floor, never to raise it. ESPN publishes no projected final
 for basketball, so a lead you can see accumulated is not evidence the week is
 safe — there is no opponent projection behind it.
 
+### Several swaps in one run
+
+One run can offer up to `addrop_max_moves` swaps — three by default. Each
+arrives as its own notification with its own **Approve** button, and you can
+take any of them, in any order, or none. There is no "approve all": a drop is
+irreversible, so every one of them is a separate question.
+
+The list runs **best first**, and each entry after the first is priced as if the
+ones above it go through. That is not a presentation choice. Who should go out
+depends on who is on your roster, so the "second-best swap" against your roster
+as it stands today is usually the same pickup paired with the same man going out
+— three notifications of which exactly one could ever be approved. Instead the
+app works out the best swap, then re-prices against the roster *that* swap would
+leave behind, and so on.
+
+The consequence is that the numbers on the lower cards assume company, and they
+say so: *"Priced as the second move of this run, assuming the swap above it is
+approved."* Approving them out of order is fine — nothing breaks, you just get a
+slightly different gain than the card quoted. Approving only the bottom one is
+also fine, and is the case where the quoted number is least accurate.
+
+Two things cap the real total below `addrop_max_moves`:
+
+- **Your league's acquisition limit.** The app counts the swaps it has already
+  offered this run against your remaining acquisitions for the matchup period,
+  so it will not hand you four cards in a week that had two left.
+- **Running out of worthwhile moves**, which is the usual reason. Only a player
+  who can actually get into your starting lineup earns anything, and each
+  pickup raises the bar for the next one — after two acquisitions the good slots
+  are held by the acquisitions. The status page's notes for the run say where
+  the list stopped and why.
+
+Nobody the app picks up in a run is offered as a drop later in the same run.
+
 ### The add/drop review
 
 Everything above prices the rest of the current scoring week and nothing else.
@@ -135,6 +170,14 @@ before. Fill it in and a swap the reviewer could not be reached about is **not**
 shown — a timed-out HTTP request is not permission to make an irreversible,
 publicly attributed move unexamined. Those two cases read differently in the
 notes, so a week of API outages does not look like a week of good judgment.
+
+Every swap in a run is reviewed separately, and the two kinds of refusal behave
+differently. A swap the reviewer **judges** badly is dropped and the run carries
+on looking for others — neither of its two players is put forward again that
+run, since the verdict is prose and there is no telling which of them it
+objected to. A reviewer that **cannot be reached** stops the search entirely:
+every remaining swap would be withheld for the same non-reason, so there is
+nothing to be gained by asking again.
 
 Cost is a handful of requests per run, billed to your own Anthropic account.
 `ai_judge_model` overrides the model if you want a different speed/judgment
@@ -371,6 +414,19 @@ waiver claim, which does not take effect until ESPN processes it overnight, or
 `autonomy_lineup` is off, in which case the log says what it would have started
 him over. Both cases sort themselves out on the next run — the first
 automatically, the second once you move him or turn lineup autonomy on.
+
+**I only ever get one add/drop suggestion.** That is usually the correct answer
+rather than a setting: only a player who can get into your starting lineup gains
+you anything, and each pickup raises the bar for the next one. Check the run's
+notes on the status page — they say where the list stopped, whether it was the
+pool, the acquisition limit, or the reviewer. `addrop_max_moves` is the ceiling,
+not a target.
+
+**I got three suggestions and approved the last one, and the gain was smaller
+than the card said.** Expected, and the card says so. Each entry after the first
+is priced as if the ones above it go through; taking only the bottom one prices
+it against a roster that includes the players the other two would have replaced.
+Nothing is broken — the swap is still a gain, just a different one.
 
 To get more detail, set `log_level` to `debug` and check the app's **Log** tab.
 Cookie values stay redacted at every log level.

@@ -83,6 +83,16 @@ options:
   # Waived automatically when the move would by itself erase the deficit in
   # the current matchup.
   addrop_churn_floor: 3
+  # How many swaps one run may offer you, each as its own approval. A run that
+  # sees three worthwhile moves and shows only the best of them leaves the other
+  # two until tomorrow, and in a four-day week tomorrow is a quarter of it.
+  #
+  # Each one after the first is priced as if the ones above it go through --
+  # the roster, the pool and the acquisition count all advance -- so the list
+  # runs best-first and the later entries are the least certain. Approving them
+  # out of order is fine; the numbers on the lower cards just assume company.
+  # Your league's acquisition limit still caps the real total.
+  addrop_max_moves: 3
   # An Anthropic API key turns on the add/drop review. Every proposed swap is
   # then shown to Claude first, with both players' numbers, how much of the
   # league owns each of them, where they were drafted and ESPN's own injury
@@ -127,6 +137,7 @@ schema:
   max_faab_bid: int(0,1000)
   addrop_margin_pct: float(0,100)
   addrop_churn_floor: float(0,500)
+  addrop_max_moves: int(1,5)
   anthropic_api_key: password?
   ai_judge_model: str?
   shadow_mode: bool
