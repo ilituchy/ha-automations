@@ -90,5 +90,49 @@ class TestScheduledRun(unittest.TestCase):
         self.assertEqual(required, [], "scheduled_run must be callable with no args")
 
 
+class TestRedactHost(unittest.TestCase):
+    """The startup log must not publish the instance's address.
+
+    A Nabu Casa hostname is a long random label fronting this instance's login
+    page, and app logs routinely get pasted into bug reports. The assertion
+    that matters is the negative one: the random label must not survive.
+    """
+
+    def test_nabu_casa_label_is_gone(self):
+        # Invented label of the right shape -- a real one would make this file
+        # the leak it is testing against, and this repository is public.
+        label = "a" * 20 + "bcdefghijkl"
+        out = mainmod._redact_host("https://%s.ui.nabu.casa" % label)
+        self.assertNotIn(label, out)
+        # ...while still saying it is Nabu Casa, which is the diagnosis.
+        self.assertEqual(out, "https://***.ui.nabu.casa")
+
+    def test_subdomain_of_own_domain_is_gone(self):
+        self.assertEqual(
+            mainmod._redact_host("https://ha.example.com/lovelace"),
+            "https://***.example.com/lovelace",
+        )
+
+    def test_apex_domain_is_left_alone(self):
+        """Nothing random to hide, and `***.com` would be strictly worse."""
+        self.assertEqual(mainmod._redact_host("https://example.com"),
+                         "https://example.com")
+
+    def test_ipv4_host_is_replaced_whole(self):
+        """Address from RFC 5737 documentation space, deliberately not a real one."""
+        out = mainmod._redact_host("http://203.0.113.7:8123/")
+        for octet in ("203", "113", "7"):
+            self.assertNotIn(octet, out)
+        self.assertEqual(out, "http://***:8123/")
+
+    def test_never_raises(self):
+        """This runs inside a log call; raising there would mask the startup."""
+        for bad in ("", "garbage", "://", "http://", None, 7):
+            try:
+                mainmod._redact_host(bad)
+            except Exception as exc:  # noqa: BLE001
+                self.fail("_redact_host(%r) raised %r" % (bad, exc))
+
+
 if __name__ == "__main__":
     unittest.main()

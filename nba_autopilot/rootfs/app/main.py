@@ -60,6 +60,42 @@ def _ulid() -> str:
         return datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
 
 
+def _redact_host(url: str) -> str:
+    """``https://abc123.ui.nabu.casa`` -> ``https://***.ui.nabu.casa``.
+
+    Keeps everything diagnostically useful -- the scheme, and whether this is
+    Nabu Casa or a self-hosted domain -- and drops the one label that is
+    effectively a secret: the first, which is where the random part lives in
+    both ``abc123.ui.nabu.casa`` and ``ha.example.com``.
+
+    Three labels is the threshold. An apex domain has no subdomain to hide, so
+    redacting ``example.com`` into ``***.com`` would destroy the useful half of
+    a string that was not sensitive to begin with.
+
+    A bare IPv4 address is replaced whole. Dropping only its first octet would
+    satisfy the label rule while still publishing most of a network address,
+    which is the opposite of the point.
+    """
+    try:
+        if "://" in url:
+            scheme, _, rest = url.partition("://")
+            prefix = scheme + "://"
+        else:
+            prefix, rest = "", url
+        host, slash, path = rest.partition("/")
+        hostname, colon, port = host.partition(":")
+        labels = hostname.split(".")
+        if len(labels) == 4 and all(l.isdigit() for l in labels):
+            labels = ["***"]
+        elif len(labels) >= 3:
+            labels[0] = "***"
+        return "%s%s%s%s%s%s" % (
+            prefix, ".".join(labels), colon, port, slash, path,
+        )
+    except Exception:  # noqa: BLE001 - a log line must never raise
+        return "<unparseable>"
+
+
 class League:
     """One league's read/write pair, plus the label used in notifications.
 
@@ -187,7 +223,11 @@ class Autopilot:
                 "will still run; add/drop approvals will not be actionable."
             )
         else:
-            log.info("HA external access: %s", ext)
+            # Only the fact matters here, not the address. A Nabu Casa hostname
+            # is a long random label that fronts this instance's login page,
+            # and app logs get pasted into bug reports; printing the whole
+            # thing on every start buys nothing the scheme and suffix don't.
+            log.info("HA external access: OK (%s)", _redact_host(ext))
 
         stuck = self.store.stuck_writes()
         if stuck:
