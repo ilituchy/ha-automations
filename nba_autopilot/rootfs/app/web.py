@@ -27,7 +27,17 @@ inside the authenticated HA frontend -- the single worst place to put an
 injection.
 """
 
-from __future__ import annotations
+#
+# **This module must not use ``from __future__ import annotations``.** That
+# makes every annotation a string, and FastAPI resolves a route handler's
+# annotations with ``get_type_hints``, which looks them up in *module* globals.
+# ``Request`` is imported inside ``build_app`` to keep this file importable
+# without FastAPI installed, so it is not a module global -- the name would not
+# resolve, and FastAPI's fallback for a parameter whose type it cannot identify
+# is to treat it as a required **query** parameter. The symptom is that every
+# page load returns ``422 {"loc": ["query", "request"], "msg": "Field
+# required"}``, which is how this was found: on the device, through the ingress
+# proxy, because no test here imports FastAPI at all. See test_web.py.
 
 import html
 import json
@@ -335,7 +345,7 @@ def build_app(bot: Any):
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     seen_headers = {"done": False}
 
-    def identify(request: "Request") -> tuple:
+    def identify(request: Request) -> tuple:
         """``(user_id, display_name)`` as ingress reports them.
 
         Logged once per process at info, because the exact header names are the
@@ -359,12 +369,12 @@ def build_app(bot: Any):
     # single connection; the page's queries are a handful of indexed reads over
     # tens of rows, so serving them on the loop is cheaper than the contention.
     @app.get("/", response_class=HTMLResponse)
-    async def index(request: "Request"):
+    async def index(request: Request):
         _, name = identify(request)
         return HTMLResponse(render(page, user=name))
 
     @app.post("/decide")
-    async def decide(request: "Request"):
+    async def decide(request: Request):
         # The form is read off the request rather than declared with
         # `Form(...)`, which would be the idiomatic FastAPI spelling. Declaring
         # a Form parameter makes FastAPI require `python-multipart`, and that is

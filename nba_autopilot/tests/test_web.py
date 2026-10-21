@@ -311,6 +311,47 @@ class TestApplyDecision(unittest.TestCase):
         self.assertEqual(bot.executed, 1)
 
 
+class TestAnnotationsAreResolvable(unittest.TestCase):
+    """`from __future__ import annotations` in web.py breaks every page load.
+
+    FastAPI resolves a route handler's annotations with ``get_type_hints``,
+    which consults *module* globals. ``Request`` is imported inside
+    ``build_app`` so this file stays importable without FastAPI, so under that
+    future import the name is a string that resolves nowhere -- and FastAPI's
+    fallback for a parameter it cannot type is a required **query** parameter.
+    Every GET then returns ``422 {"loc": ["query", "request"]}``.
+
+    This happened. It was found on the device, through the ingress proxy,
+    because nothing in this file imports FastAPI and so nothing here exercises
+    the route layer. This test is the cheap proxy for the expensive discovery:
+    the future import binds the name ``annotations`` in the module namespace,
+    which is observable without FastAPI being installed at all.
+    """
+
+    def test_module_does_not_use_postponed_annotations(self):
+        self.assertIsNone(
+            getattr(web, "annotations", None),
+            "web.py must not use `from __future__ import annotations`; "
+            "see this test's docstring",
+        )
+
+    def test_route_annotations_are_not_string_literals(self):
+        """The other half of the same mistake: quoting the annotation by hand.
+
+        Removing the future import is not enough if a handler is written
+        ``request: "Request"`` -- a string literal stays a string, and
+        ``get_type_hints`` fails on it identically.
+        """
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "rootfs", "app", "web.py",
+        )
+        with open(path) as fh:
+            source = fh.read()
+        self.assertNotIn('request: "Request"', source)
+        self.assertIn("request: Request", source)
+
+
 class TestStoreQuery(unittest.TestCase):
     """`Store.query` exists so the page never touches `store.db` unlocked.
 
