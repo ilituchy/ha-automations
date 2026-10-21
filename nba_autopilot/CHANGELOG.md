@@ -81,6 +81,16 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **No scheduled run could ever have executed.** The daily job was a `lambda`
+  calling `asyncio.create_task`, and `AsyncIOScheduler` awaits a job on the
+  event loop only when the job *is* a coroutine function — anything else it
+  hands to a worker thread, where `create_task` raised `RuntimeError: no
+  running event loop`. Startup logged "scheduled daily run at 09:00" and looked
+  healthy; the failure only existed at the moment of firing. Found by pointing
+  the live instance at a run time two minutes out instead of waiting for
+  morning. The job is now an `async def` with a test asserting that predicate
+  directly, plus a `misfire_grace_time` of an hour — the one-second default
+  would discard a whole day's run if the loop were busy at 09:00.
 - **The app refused to start**, because the s6 run script still required the
   `espn_league_id` and `espn_team_id` options that `leagues` replaced — so a
   correctly configured app exited 1 with *"Required option 'espn_league_id' is

@@ -557,6 +557,24 @@ class Autopilot:
 
     # -- daemon ------------------------------------------------------------
 
+    async def scheduled_run(self) -> None:
+        """The daily run, as the scheduler invokes it.
+
+        **This must stay a coroutine function.** ``AsyncIOScheduler`` only
+        awaits the job on the event loop when it *is* one; a plain function is
+        handed to a worker thread instead, where there is no running loop. The
+        first version of this was a ``lambda`` calling ``asyncio.create_task``,
+        which meant every scheduled run died with ``RuntimeError: no running
+        event loop`` -- the job was dispatched to a thread, so the one thing it
+        did needed the loop it no longer had. Nothing caught it in testing
+        because the failure needs a real fire to happen at all.
+
+        ``run_once`` is blocking (ESPN reads, SQLite, notifications), so it goes
+        to a thread deliberately -- just via ``await``, from inside the loop,
+        rather than from a thread that is pretending to be in one.
+        """
+        await asyncio.to_thread(self.run_once)
+
     async def serve(self) -> None:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         from apscheduler.triggers.cron import CronTrigger
@@ -572,9 +590,14 @@ class Autopilot:
         for t in self.cfg.run_times:
             hour, minute = t.split(":")
             sched.add_job(
-                lambda: asyncio.create_task(asyncio.to_thread(self.run_once)),
+                self.scheduled_run,
                 CronTrigger(hour=int(hour), minute=int(minute), timezone=self.tz),
                 name="run@%s" % t,
+                # The default grace is one second. On a job that fires once a
+                # day, a loop that happens to be busy for a second at 09:00
+                # would discard the entire day's run as a misfire. An hour is
+                # still far short of the next fire, so this cannot double up.
+                misfire_grace_time=3600,
             )
             log.info("scheduled daily run at %s %s", t, self.cfg.timezone)
 
