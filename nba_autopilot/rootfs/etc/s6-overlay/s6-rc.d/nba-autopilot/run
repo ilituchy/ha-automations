@@ -11,10 +11,16 @@ declare timezone
 log_level=$(bashio::config 'log_level' 'info')
 timezone=$(bashio::config 'timezone' 'America/Los_Angeles')
 
-# Fail fast with a clear message if a required option is missing, instead of
-# letting the Python app crash on a null.
-for key in espn_league_id espn_team_id espn_s2 espn_swid \
-           ha_notify_device ha_owner_user_id; do
+# Fail fast with a clear message if a required scalar option is missing, instead
+# of letting the Python app crash on a null.
+#
+# `leagues` is deliberately not in this list. It is a list of mappings, and
+# `bashio::config.has_value` sees an empty list as the two-character string
+# "[]" -- a value -- so it would pass vacuously. The Supervisor already rejects
+# a non-positive league_id via the `int(1,)` schema, and `_parse_leagues` in
+# config.py reports an empty or malformed list with the entry index, which is a
+# better message than this loop could produce.
+for key in espn_s2 espn_swid ha_notify_device ha_owner_user_id; do
     if ! bashio::config.has_value "${key}"; then
         bashio::exit.nok "Required option '${key}' is not set. Open the app's Configuration tab and set it."
     fi

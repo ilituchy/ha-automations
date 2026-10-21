@@ -251,14 +251,17 @@ EXEC_CANCEL = "CANCEL"
 #: transaction. Established empirically against a throwaway league on
 #: 2026-10-20; see ADR-015.
 #:
-#: ``FREEAGENT`` accepts **exactly one ADD item**. It is not "the type for
-#: instant moves": a lone DROP sent as ``FREEAGENT`` is refused with
-#: ``TRAN_INVALID_ITEM_TYPE_COUNT`` ("may only contain one item for MoveType:
-#: ADD"), and so is an instant add-and-drop pair.
+#: ``FREEAGENT`` accepts **at most one ADD item**, plus an optional DROP. The
+#: constraint is on the count of ADDs, not on the count of items: ESPN's
+#: ``TRAN_INVALID_ITEM_TYPE_COUNT`` reads "may only contain one item for
+#: MoveType: ADD", and an ADD+DROP pair gets past that check (it fails later, on
+#: the player, with ``TRAN_PLAYER_NOT_FREEAGENT`` -- which is how we know the
+#: item set was accepted). What ``FREEAGENT`` will *not* carry is a lone DROP,
+#: so it is not simply "the type for instant moves".
 #:
 #: ``ROSTER`` is the type a lone DROP needs -- the same type lineup moves use,
 #: which reads oddly until you see that ESPN models a drop as a roster
-#: mutation rather than as an acquisition.
+#: mutation rather than as an acquisition. It cannot carry an ADD.
 #:
 #: ``WAIVER`` accepts one ADD or an ADD+DROP pair, and lands ``PENDING``.
 TRAN_FREEAGENT = "FREEAGENT"

@@ -81,6 +81,14 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **The app refused to start**, because the s6 run script still required the
+  `espn_league_id` and `espn_team_id` options that `leagues` replaced — so a
+  correctly configured app exited 1 with *"Required option 'espn_league_id' is
+  not set"*, naming a setting that no longer exists in the Configuration tab.
+  Found on the first real install. The guard now covers only the scalar
+  options; `leagues` is checked by `_parse_leagues`, which can say *which*
+  entry is wrong, and which `bashio::config.has_value` could not have checked
+  anyway — it sees an empty list as the string `"[]"` and passes it.
 - **The add/drop and cancel write paths were all three wrong**, and are now
   verified end to end against a throwaway ESPN league rather than against the
   documented grammar. Every item below was found by a real request on the first
