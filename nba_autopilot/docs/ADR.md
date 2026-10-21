@@ -720,10 +720,12 @@ was the cheapest way out on points *and* the lowest `p_play` on the tie-break,
 so he was the drop of choice by two independent routes. Dropping him frees an IR
 slot; the active count does not move; ESPN refuses add+drop as readily as it
 refused the unpaired add. So `Candidate` carries one slot fact, `on_ir`, and when
-there is no active room the IR occupants come out of the droppable set with a
-stated reason on the card. They stay in it when there *is* room — the exclusion
-is about making room, not about protecting them, and a note explaining an
-absence of room must not be shown where there is room.
+there is no active room the IR occupants come out of the droppable set, named in
+the run's notes alongside the `never_drop` and locked exclusions — which is the
+status page, not the approval card: the card carries the rationale for the move
+that *was* proposed. They stay in the droppable set when there *is* room — the
+exclusion is about making room, not about protecting them, and a note explaining
+an absence of room must not be shown where there is room.
 
 **Rejected:** a discount rate converting keeper value into this week's points
 (invented number, changes decisions); a ranked list of the best several swaps
