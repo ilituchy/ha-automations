@@ -659,6 +659,22 @@ class TestABlockIsNotAMove(unittest.TestCase):
         self.assertEqual(len(h.app.judge.seen), 3)
         self.assertNotIn("the reviewer blocked", " | ".join(notes))
 
+    def test_a_veto_is_reported_as_the_reviewer_s_and_not_as_a_setting(self):
+        """The wiring half of the same point. ``_consider_addrops`` used to
+        append the vetoed name to the configured ``never_drop`` list it passes
+        down, so a league with no ``never_drop`` at all got told three of its
+        players were in it.
+        """
+        h = funnel(judge=_PerSwapJudge(
+            lambda p: judge_mod.Verdict(False, "no")
+            if p.add.name == "FA90" else judge_mod.Verdict(True, "ok")
+        ))
+        _decisions, notes = h.consider_all(target=funnel_target())
+        joined = " | ".join(notes)
+        self.assertIn("Weak (the reviewer blocked a swap sending him out)",
+                      joined)
+        self.assertNotIn("never_drop", joined)
+
     def test_a_card_found_after_a_rejection_is_not_priced_on_it(self):
         """The conditional-pricing line counts accepted swaps, not attempts.
 

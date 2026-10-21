@@ -1041,6 +1041,16 @@ is still priced against the real roster. The attempt index told the user his
 making him discount a number needing no discount, and go looking for a card
 that did not exist. It now counts `len(accepted)`.
 
+**A veto is reported as the app's doing, not the user's.** The retired name
+used to be appended to the configured `never_drop` list `_consider_addrops`
+passes down, which meant a league with an empty `never_drop` was told "not
+droppable: Aaron Gordon (never_drop), Karl-Anthony Towns (never_drop), Walker
+Kessler (never_drop)" — three players the reviewer had refused, presented as a
+setting the user went looking for and could not find. `review_blocked` is now
+its own parameter with its own note, for the same reason `just_added` is
+(ADR-021): every protection the app invents for itself must be distinguishable
+from the one the user configured, or the notes become a bug report.
+
 **Rejected:** making the review budget an add-on option (a fourth add/drop
 knob, for a number whose right value is a function of API cost rather than of
 how the user wants his team run); counting reviews across leagues in one run

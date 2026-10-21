@@ -719,7 +719,12 @@ class Autopilot:
         # the pair it objected to -- retiring both is the conservative read, and
         # re-offering a pair that shares a half with a rejected one is asking
         # the reviewer the same question twice.
-        vetoed_names = list(self.cfg.never_drop)
+        #
+        # Kept apart from ``never_drop`` rather than appended to it: these are
+        # the app's own doing and are reported as such. Folding them in told a
+        # user whose ``never_drop`` is empty that three of his players were in
+        # it, which reads as a misconfiguration he then goes looking for.
+        vetoed_names: List[str] = []
         vetoed_adds: set = set()
         # Protected for the rest of the run, and reported as such rather than
         # as a ``never_drop`` entry they are not.
@@ -752,7 +757,8 @@ class Autopilot:
                 starters=starters,
                 matchup=matchup,
                 acquisitions_used=sim_used,
-                never_drop=vetoed_names,
+                never_drop=self.cfg.never_drop,
+                review_blocked=vetoed_names,
                 just_added=just_added,
                 margin_pct=self.cfg.addrop_margin_pct,
                 churn_floor=self.cfg.addrop_churn_floor,

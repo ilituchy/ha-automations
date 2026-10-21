@@ -26,6 +26,13 @@ All notable changes to this app are documented here. The format follows
   the real roster — yet the first card could claim its number assumed a swap
   "above it" that the reviewer had thrown away. It now counts approved swaps.
 
+  And a veto is no longer reported as configuration. The vetoed name used to be
+  appended to the `never_drop` list passed down to the solver, so a league with
+  an empty `never_drop` was told *"not droppable: Aaron Gordon (never_drop),
+  Karl-Anthony Towns (never_drop), Walker Kessler (never_drop)"* — sending the
+  user to look for a setting he had never made. The reviewer's own refusals now
+  travel separately and say so.
+
 - **A run can offer up to three swaps, each approved separately.** New
   `addrop_max_moves` option (1–5, default 3). Previously a run that found three
   worthwhile moves showed the best one and left the other two until tomorrow,

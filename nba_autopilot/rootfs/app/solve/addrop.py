@@ -438,6 +438,7 @@ def plan_addrop(
     acquisitions_used: Optional[Mapping[int, int]] = None,
     never_drop: Iterable[str] = (),
     just_added: Iterable[PlayerId] = (),
+    review_blocked: Iterable[str] = (),
     margin_pct: float = DEFAULT_MARGIN_PCT,
     churn_floor: float = DEFAULT_CHURN_FLOOR,
     keeper_drop_fraction: float = DEFAULT_KEEPER_DROP_FRACTION,
@@ -467,6 +468,11 @@ def plan_addrop(
             the note says which of the two reasons applied -- a user reading
             "never_drop" against a man the same run proposes to pick up would
             reasonably conclude the option was misconfigured.
+        review_blocked: names the reviewer's veto has retired for the rest of
+            the run, matched like ``never_drop``. Separate for the same reason
+            ``just_added`` is: these are the app's own doing, and reporting them
+            as ``never_drop`` told a user whose ``never_drop`` is empty that
+            three of his players were in it.
     """
     notes: List[str] = []
     left = remaining_acquisitions(settings, acquisitions_used, matchup_period)
@@ -543,6 +549,7 @@ def plan_addrop(
     # -- who may go out ----------------------------------------------------
 
     protected = {n.strip().lower() for n in never_drop if n.strip()}
+    vetoed = {n.strip().lower() for n in review_blocked if n.strip()}
     started = {int(p) for p in (starters or ())}
     fresh = {int(p) for p in just_added}
     mine = [candidate(e) for e in roster]
@@ -569,6 +576,10 @@ def plan_addrop(
         cand = priced[e.player_id]
         if e.name.strip().lower() in protected:
             blocked.append("%s (never_drop)" % e.name)
+            continue
+        if e.name.strip().lower() in vetoed:
+            blocked.append("%s (the reviewer blocked a swap sending him out)"
+                           % e.name)
             continue
         if int(e.player_id) in fresh:
             blocked.append("%s (picked up earlier this run)" % e.name)

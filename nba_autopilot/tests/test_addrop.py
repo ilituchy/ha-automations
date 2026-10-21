@@ -591,6 +591,19 @@ class TestDropProtections(unittest.TestCase):
         self.assertIn("picked up earlier this run", joined)
         self.assertNotIn("never_drop", joined)
 
+    def test_a_man_the_reviewer_refused_is_not_reported_as_configuration(self):
+        """Seen on a live run: *"not droppable: Aaron Gordon (never_drop),
+        Karl-Anthony Towns (never_drop), Walker Kessler (never_drop)"* against
+        a league whose ``never_drop`` was empty. All three had been retired by
+        the reviewer's own vetoes earlier in the run, and folding them into the
+        configured list sent the user looking for a setting he had never made.
+        """
+        plan = self.base().run(review_blocked=["Weak"])
+        self.assertFalse(plan.proposed)
+        joined = " ".join(plan.notes)
+        self.assertIn("the reviewer blocked a swap sending him out", joined)
+        self.assertNotIn("never_drop", joined)
+
     def test_a_locked_player_is_never_dropped(self):
         plan = self.base(locked=True).run()
         self.assertFalse(plan.proposed)
