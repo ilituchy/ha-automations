@@ -146,6 +146,64 @@ class TestRosterGhost(unittest.TestCase):
         self.assertFalse(got[0].must_claim_on_waivers)
 
 
+class TestMarketSignals(unittest.TestCase):
+    """The ownership block, read off the exact live shape.
+
+    Field spellings copied from a 2026-10-21 probe of both payloads. They are
+    nested two different ways -- ``ownership.*`` flat, ``draftRanksByRankType``
+    keyed by rank type -- and a wrong guess at either reads as "ESPN told us
+    nothing", which is precisely the state the judge is supposed to be able to
+    tell apart from a real zero.
+    """
+
+    def entry(self, **over):
+        e = _entry(1, "Market Guy", PG)
+        player = e["playerPoolEntry"]["player"]
+        player["ownership"] = {
+            "percentOwned": 88.43,
+            "averageDraftPosition": 81.0,
+            "percentStarted": 70.1,
+            "auctionValueAverage": 4.2,
+        }
+        player["draftRanksByRankType"] = {
+            "STANDARD": {"rank": 81, "rankType": "STANDARD", "auctionValue": 4},
+            "ROTO": {"rank": 77, "rankType": "ROTO", "auctionValue": 5},
+        }
+        player["seasonOutlook"] = "A rookie with a first-overall pedigree."
+        player.update(over)
+        return e
+
+    def test_the_four_readings_come_off_the_wire(self):
+        got = _reader([self.entry()]).roster()[0]
+        self.assertAlmostEqual(got.percent_owned, 88.43)
+        self.assertAlmostEqual(got.draft_adp, 81.0)
+        # STANDARD, not ROTO: the two disagree, so which one is read is a
+        # decision rather than an implementation detail.
+        self.assertEqual(got.draft_rank, 81)
+        self.assertEqual(got.outlook, "A rookie with a first-overall pedigree.")
+
+    def test_an_absent_block_reads_as_unknown_not_as_zero(self):
+        """``None``, not ``0.0``. A player nobody owns is not a missing field.
+
+        Both end up falsy, which is exactly why this needs a test: a judge told
+        "owned in 0% of leagues" about a player ESPN simply said nothing about
+        has been handed a fact that is not one.
+        """
+        bare = _entry(2, "No Data", PG)
+        got = _reader([bare]).roster()[0]
+        self.assertIsNone(got.percent_owned)
+        self.assertIsNone(got.draft_adp)
+        self.assertIsNone(got.draft_rank)
+        self.assertEqual(got.outlook, "")
+
+    def test_a_genuine_zero_survives(self):
+        got = _reader([
+            self.entry(ownership={"percentOwned": 0.0, "averageDraftPosition": 0.0})
+        ]).roster()[0]
+        self.assertEqual(got.percent_owned, 0.0)
+        self.assertEqual(got.draft_adp, 0.0)
+
+
 # ---------------------------------------------------------------------------
 # write side: transaction type, cancel shape, acquisition mode
 # ---------------------------------------------------------------------------

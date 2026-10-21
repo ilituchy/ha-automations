@@ -149,6 +149,33 @@ class RosterEntry:
     #: instant add of a ``WAIVERS`` player is refused with
     #: ``TRAN_PLAYER_NOT_FREEAGENT``.
     acquisition_status: str = ""
+    #: ``ownership.percentOwned`` -- the share of ESPN leagues rostering him.
+    #:
+    #: The four fields below are *market* readings, and none of them is an
+    #: input to any arithmetic. They exist because the week-surplus model is
+    #: deliberately blind to everything outside this week, which is correct for
+    #: valuing a start and badly wrong for valuing a drop: a first-round pick
+    #: who is out for a fortnight has a surplus of exactly zero and so becomes
+    #: the cheapest player on the roster to give away. Observed live on
+    #: 2026-10-21 -- the layer proposed dropping an 88%-owned asset twice in
+    #: two runs. These are what make "the rest of the league disagrees with
+    #: this valuation" a thing the app can see at all.
+    #:
+    #: ``None`` rather than ``0.0`` when ESPN did not report: a genuinely
+    #: unowned player and a missing field must not read the same, since one of
+    #: them is evidence and the other is its absence.
+    percent_owned: Optional[float] = None
+    #: ``ownership.averageDraftPosition``. Where the market drafted him.
+    draft_adp: Optional[float] = None
+    #: ``draftRanksByRankType.STANDARD.rank`` -- ESPN's own preseason ranking,
+    #: which is a *fantasy* ranking and not an NBA one. Worth keeping distinct
+    #: from the draft position because they disagree, and the disagreement is
+    #: informative: the player this was built for went first overall in the NBA
+    #: draft and is ranked 81st here.
+    draft_rank: Optional[int] = None
+    #: ``seasonOutlook`` -- ESPN's own prose on the player's season. Not parsed
+    #: and not scored; carried verbatim for a reader, human or otherwise.
+    outlook: str = ""
 
     @property
     def availability(self) -> str:

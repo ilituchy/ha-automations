@@ -85,7 +85,8 @@ def settings(**kw) -> LeagueSettings:
 
 
 def player(pid, *, name=None, team=1, slot=11, locked=False, status="ACTIVE",
-           acq="FREEAGENT") -> RosterEntry:
+           acq="FREEAGENT", owned=None, adp=None, rank=None,
+           outlook="") -> RosterEntry:
     return RosterEntry(
         player_id=pid,
         name=name or "P%d" % pid,
@@ -95,6 +96,10 @@ def player(pid, *, name=None, team=1, slot=11, locked=False, status="ACTIVE",
         injury_status=status,
         lineup_locked=locked,
         acquisition_status=acq,
+        percent_owned=owned,
+        draft_adp=adp,
+        draft_rank=rank,
+        outlook=outlook,
     )
 
 
@@ -555,6 +560,78 @@ class TestDropProtections(unittest.TestCase):
         plan = case.run(starters=[1, 2])
         self.assertFalse(plan.proposed)
         self.assertIn("nowhere to go", " ".join(plan.notes))
+
+
+class TestMarketSignalsAreCarriedNotPriced(unittest.TestCase):
+    """ESPN's ownership readings reach the decision and change none of it.
+
+    Both halves matter. They have to arrive, because the layer that reasons in
+    prose cannot see what it was not handed. And they have to change nothing
+    here, because every gate in this module is denominated in points or in
+    percent-per-game, and "but 88% of the league owns him" has no exchange rate
+    into either -- inventing one is how a brake becomes a guess.
+    """
+
+    def case(self, **over):
+        """``TestQualityGate``'s shape, with the ownership block filled in.
+
+        Three starting slots, three players who all play every day, so a slot
+        prices at the worst of them and the 24-against-20 swap is worth 12.
+        """
+        c = _Case(
+            roster=[
+                player(1, team=1, owned=99.9, adp=3.6, rank=3),
+                player(2, name="Weak", team=1, owned=47.6, adp=131.2, rank=136),
+                player(3, team=1, owned=90.6, adp=68.7, rank=58),
+            ],
+            pool=[player(90, name="Better", team=1, owned=63.6, adp=121.8,
+                         rank=121, outlook="Likely starter.")],
+            values={1: 60.0, 2: 20.0, 3: 40.0, 90: 24.0},
+        )
+        c.kw.update(over)
+        return c
+
+    def test_they_reach_both_sides_of_the_proposal(self):
+        plan = self.case().run()
+        self.assertTrue(plan.proposed)
+        self.assertEqual(plan.add.percent_owned, 63.6)
+        self.assertEqual(plan.add.draft_rank, 121)
+        self.assertEqual(plan.add.outlook, "Likely starter.")
+        self.assertEqual(plan.drop.name, "Weak")
+        self.assertEqual(plan.drop.percent_owned, 47.6)
+        self.assertEqual(plan.drop.draft_adp, 131.2)
+
+    def test_the_most_owned_player_is_still_the_one_proposed(self):
+        """Ownership is inverted against value, and value still decides.
+
+        The pickup here is owned in fewer leagues than the man he replaces
+        would be if the numbers were read as a preference. They are not read at
+        all, so the swap goes through on its 25-against-5 per-game case -- and
+        any future version that quietly starts pricing ownership breaks here
+        rather than in the activity feed.
+        """
+        plan = self.case().run()
+        self.assertEqual(plan.add.name, "Better")
+        self.assertGreater(plan.drop.percent_owned, 0.0)
+        self.assertEqual(plan.reason, addrop.REASON_QUALITY)
+
+    def test_a_missing_reading_is_unknown_and_says_so(self):
+        c = _Case(
+            roster=[player(1, team=1), player(2, name="Weak", team=1),
+                    player(3, team=1)],
+            pool=[player(90, name="Better", team=1)],
+            values={1: 60.0, 2: 20.0, 3: 40.0, 90: 24.0},
+        )
+        plan = c.run()
+        self.assertIsNone(plan.add.percent_owned)
+        self.assertEqual(plan.add.describe_market(), "no market readings reported")
+
+    def test_the_market_description_names_every_reading_it_has(self):
+        plan = self.case().run()
+        said = plan.drop.describe_market()
+        self.assertIn("48%", said)
+        self.assertIn("131", said)
+        self.assertIn("136", said)
 
 
 class TestIrIsNotRoom(unittest.TestCase):

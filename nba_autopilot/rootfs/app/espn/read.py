@@ -770,6 +770,15 @@ def _parse_entry(raw: Mapping[str, Any]) -> RosterEntry:
     # here is a rejected transaction that takes the day's whole lineup with it.
     ir_ok = ids.IR_SLOT in eligible and status == "OUT"
 
+    # The market readings. Present in both payload shapes -- verified live
+    # 2026-10-21 against ``mRoster`` and ``kona_player_info`` both -- and read
+    # with ``_opt_float``/``_opt_int`` rather than ``or 0`` so that a field ESPN
+    # omitted stays distinguishable from one it reported as zero. See the note
+    # on ``RosterEntry.percent_owned`` for why they are carried at all.
+    ownership = player.get("ownership") or {}
+    ranks = player.get("draftRanksByRankType") or {}
+    standard = ranks.get("STANDARD") or {}
+
     return RosterEntry(
         player_id=pid,
         name=str(player.get("fullName") or player.get("name") or "player %d" % pid),
@@ -784,6 +793,10 @@ def _parse_entry(raw: Mapping[str, Any]) -> RosterEntry:
         # ``playerPoolEntry.status``, and on ``kona_player_info`` the same
         # field sits on the wrapper that ``pool`` fell back to.
         acquisition_status=str(pool.get("status") or "").upper(),
+        percent_owned=_opt_float(ownership.get("percentOwned")),
+        draft_adp=_opt_float(ownership.get("averageDraftPosition")),
+        draft_rank=_opt_int(standard.get("rank")),
+        outlook=str(player.get("seasonOutlook") or "").strip(),
     )
 
 

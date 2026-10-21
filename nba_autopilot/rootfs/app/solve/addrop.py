@@ -197,6 +197,17 @@ class Candidate:
     #: than an active one -- so on a roster whose active slots are all taken,
     #: he is not a way to make room for a healthy pickup.
     on_ir: bool = False
+    #: ESPN's market readings, carried verbatim from :class:`RosterEntry` and
+    #: used by **nothing in this module**. Every gate above is priced in points
+    #: or in percent-per-game, and adding "but the league likes him" as a term
+    #: would mean inventing an exchange rate between ownership share and fantasy
+    #: points. They are here so the layer that *does* reason in prose -- the
+    #: judge in ``judge.py`` -- can see what the arithmetic cannot, and so the
+    #: rationale can quote it. See :attr:`RosterEntry.percent_owned`.
+    percent_owned: Optional[float] = None
+    draft_adp: Optional[float] = None
+    draft_rank: Optional[int] = None
+    outlook: str = ""
 
     @property
     def startable_games(self) -> float:
@@ -216,6 +227,23 @@ class Candidate:
             self.name, self.per_game, self.games,
             max(self.p_play, 0.0) * 100.0, self.surplus,
         )
+
+    def describe_market(self) -> str:
+        """The market readings, or an explicit statement that there are none.
+
+        Never an empty string and never a zero stood in for a missing field: a
+        reader who is being asked to judge a drop needs to know the difference
+        between "nobody owns him" and "we do not know who owns him", and those
+        are the two readings most likely to be confused.
+        """
+        bits = []
+        if self.percent_owned is not None:
+            bits.append("owned in %.0f%% of ESPN leagues" % self.percent_owned)
+        if self.draft_adp is not None:
+            bits.append("drafted on average at %.0f" % self.draft_adp)
+        if self.draft_rank is not None:
+            bits.append("ESPN's preseason fantasy rank %d" % self.draft_rank)
+        return "; ".join(bits) if bits else "no market readings reported"
 
 
 @dataclass(frozen=True)
@@ -494,6 +522,10 @@ def plan_addrop(
             p_play=p_play,
             waiver=e.must_claim_on_waivers,
             on_ir=int(e.current_slot) == ids.IR_SLOT,
+            percent_owned=e.percent_owned,
+            draft_adp=e.draft_adp,
+            draft_rank=e.draft_rank,
+            outlook=e.outlook,
         )
 
     # -- who may go out ----------------------------------------------------
