@@ -150,6 +150,46 @@ def join_injuries(
     return out
 
 
+@dataclasses.dataclass(frozen=True)
+class LineupWork:
+    """Everything between a roster read and a validated lineup plan.
+
+    One object rather than a long tuple because there are now two callers that
+    need the whole chain -- the scheduled run, and the rebalance that happens
+    the moment an acquisition lands -- and the chain is the part that must not
+    drift. ``plan_lineup`` takes eight arguments that each change the answer; two
+    call sites assembling them by hand is two sets of eight chances to compute a
+    different lineup for the same roster and never notice, because both would
+    look like valid lineups.
+
+    ``plan`` is ``None`` when ESPN projected nobody at all. That is not a
+    failure to plan, it is a refusal: every value would be zero, so the
+    "optimal" lineup would be whatever the tie-breaks happened to emit, and
+    writing that is worse than leaving yesterday's lineup alone. The caller
+    decides what to say about it, because the scheduled run and the rebalance
+    owe the user different sentences.
+    """
+
+    plan: Optional["pipeline.LineupPlan"]
+    projections: Mapping[int, Any]
+    availability: Mapping[int, float]
+    #: Rostered players ESPN gave no usable projection for. Excluded from the
+    #: lineup rather than valued at zero -- see ``solve/projections.py``.
+    skipped: Sequence[Any]
+    #: ``player_id -> (bucket, label)`` from the injuries page.
+    overrides: Mapping[int, Tuple[str, str]]
+    injuries: Optional[Any]
+    cal: Optional[SeasonCalendar]
+    matchup_period: int
+    schedule: Mapping[int, Mapping[int, int]]
+    games_used: Optional[Any]
+    notes: Tuple[str, ...]
+    #: Only the sources *this* chain consulted. The run-level `"espn": "ok"`
+    #: belongs to the caller, which is the thing that read the league at all.
+    sources_used: Mapping[str, str]
+    sources_missing: Mapping[str, str]
+
+
 class League:
     """One league's read/write pair, plus the label used in notifications.
 
@@ -706,25 +746,26 @@ class Autopilot:
             notes,
         )
 
-    def run_league(self, lg: "League") -> str:
-        run_id = _ulid()
-        settings = lg.read.league_settings()
-        self.store.start_run(
-            run_id,
-            settings.current_scoring_period,
-            self.cfg.shadow_mode,
-            league_id=lg.ref.league_id,
-        )
-        log.info("=== run %s | %s | scoring period %d ===", run_id,
-                 settings.name, settings.current_scoring_period)
+    def plan_from_roster(
+        self, lg: "League", settings: Any, roster: Sequence[Any]
+    ) -> LineupWork:
+        """Roster in, lineup out, with every input that produced it.
 
+        Extracted from ``run_league`` when the post-acquisition rebalance
+        needed the same chain. It deliberately does no writing, no notifying
+        and no aborting -- it reads, computes, and hands back what it found,
+        including the notes. What to *do* about an infeasible plan differs
+        between the caller that is starting a run and the caller that has just
+        made an irreversible move, and only they can know.
+
+        The three slow reads behind this are all cached on the instance
+        (``season_calendar``, ``pro_schedule``, ``injury_notes``), so calling it
+        twice in one run costs one extra projections fetch rather than a second
+        multi-megabyte season document.
+        """
         notes: List[str] = []
-        sources_used: Dict[str, str] = {"espn": "ok"}
+        sources_used: Dict[str, str] = {}
         sources_missing: Dict[str, str] = {}
-
-        roster = lg.read.roster()
-        log.info("roster: %d players, %d locked", len(roster),
-                 sum(1 for p in roster if p.lineup_locked))
 
         cal, matchup_period, cal_notes = self._calendar_for(settings)
         notes.extend(cal_notes)
@@ -769,19 +810,28 @@ class Autopilot:
             notes.append(
                 "no projection for: %s" % ", ".join(e.name for e in skipped)
             )
-        if not projections:
-            # Every value would be zero, so the "optimal" lineup would be
-            # whatever the tie-breaks happened to produce. Writing that is worse
-            # than leaving yesterday's lineup alone.
-            sources_missing["espn-projection"] = "no players projected"
-            notes.append("aborting: no usable projections for any player")
-            self._finish(run_id, sources_used, sources_missing, {}, {}, notes)
-            self._notify_problem(
-                "Autopilot: no projections",
-                "%s: ESPN returned no usable projections, so no lineup was "
-                "computed. Yesterday's lineup is untouched." % lg.name,
+
+        def work(plan: Optional["pipeline.LineupPlan"],
+                 games_used: Optional[Any]) -> LineupWork:
+            return LineupWork(
+                plan=plan,
+                projections=projections,
+                availability=availability,
+                skipped=skipped,
+                overrides=overrides,
+                injuries=injuries,
+                cal=cal,
+                matchup_period=matchup_period,
+                schedule=schedule,
+                games_used=games_used,
+                notes=tuple(notes),
+                sources_used=sources_used,
+                sources_missing=sources_missing,
             )
-            return run_id
+
+        if not projections:
+            sources_missing["espn-projection"] = "no players projected"
+            return work(None, None)
 
         games_used = usage_mod.measure(
             lg.read,
@@ -808,6 +858,46 @@ class Autopilot:
             availability=availability,
         )
         notes.extend(plan.notes)
+        return work(plan, games_used)
+
+    def run_league(self, lg: "League") -> str:
+        run_id = _ulid()
+        settings = lg.read.league_settings()
+        self.store.start_run(
+            run_id,
+            settings.current_scoring_period,
+            self.cfg.shadow_mode,
+            league_id=lg.ref.league_id,
+        )
+        log.info("=== run %s | %s | scoring period %d ===", run_id,
+                 settings.name, settings.current_scoring_period)
+
+        notes: List[str] = []
+        sources_used: Dict[str, str] = {"espn": "ok"}
+        sources_missing: Dict[str, str] = {}
+
+        roster = lg.read.roster()
+        log.info("roster: %d players, %d locked", len(roster),
+                 sum(1 for p in roster if p.lineup_locked))
+
+        work = self.plan_from_roster(lg, settings, roster)
+        notes.extend(work.notes)
+        sources_used.update(work.sources_used)
+        sources_missing.update(work.sources_missing)
+        cal, matchup_period = work.cal, work.matchup_period
+        schedule, injuries = work.schedule, work.injuries
+        projections = work.projections
+
+        if work.plan is None:
+            notes.append("aborting: no usable projections for any player")
+            self._finish(run_id, sources_used, sources_missing, {}, {}, notes)
+            self._notify_problem(
+                "Autopilot: no projections",
+                "%s: ESPN returned no usable projections, so no lineup was "
+                "computed. Yesterday's lineup is untouched." % lg.name,
+            )
+            return run_id
+        plan = work.plan
         for line in pipeline.summarize(plan, roster).splitlines():
             log.info("  %s", line)
 
@@ -937,6 +1027,114 @@ class Autopilot:
         except Exception as exc:  # noqa: BLE001 - a failed push is not a failed run
             log.error("could not deliver lineup notification: %s", exc)
 
+    def rebalance_after_swap(
+        self, run_id: str, lg: "League", payload: Mapping[str, Any], result: Any
+    ) -> None:
+        """Re-read, re-optimize and apply the lineup now that the roster moved.
+
+        A pickup that sits on the bench is worth nothing. The lineup was written
+        earlier in the run against a roster that did not contain him, so without
+        this the points the swap was approved *for* arrive a day late -- and in a
+        week with three days left, a day late is a third of the gain. The
+        requirement was plain: *"remember when i make an add, we have to
+        potentially rebalance the lineup"*.
+
+        Immediately after the transaction rather than on the next scheduled run,
+        because the next run is up to 24 hours away and tonight's games are not.
+
+        **Only when the roster actually changed.** Three things can make the
+        write a no-op for this purpose, and all three would otherwise produce a
+        confident log line about a rebalance that rebalanced nothing:
+
+        * a waiver claim is ``PENDING`` -- the player is not ours yet, and the
+          drop has not happened either, so the roster on ESPN is the one the
+          lineup was already optimized against;
+        * ``shadow_mode`` means the swap never left the process;
+        * a write that failed.
+
+        **It honours ``autonomy_lineup``.** That flag is the standing answer to
+        "may this app move players without asking", and an add/drop approval is
+        not a second answer to it: approving a swap says who should be on the
+        roster, not who should be in the starting five. With it off the run says
+        what it would have done and leaves the lineup alone.
+
+        Never raises. It runs after an irreversible, already-journalled
+        transaction, and a failure here must not make a completed swap look
+        failed -- the swap happened, and the worst case is a bench spot for a
+        night.
+        """
+        if not (result is not None and getattr(result, "ok", False)):
+            return
+        if getattr(result, "shadow", False):
+            log.info("shadow mode: roster unchanged, so no rebalance")
+            return
+        if payload.get("waiver"):
+            log.info(
+                "waiver claim is pending, so the roster is unchanged and the "
+                "lineup is already optimal for it; it will be rebalanced on the "
+                "run after the claim processes"
+            )
+            return
+
+        swap = payload.get("add_name") or "the acquisition"
+        if not self.cfg.autonomy_lineup:
+            log.info(
+                "autonomy_lineup is off, so the lineup is left alone after %s; "
+                "he will not be started until you move him or it is turned on",
+                swap,
+            )
+            return
+
+        try:
+            settings = lg.read.league_settings()
+            roster = lg.read.roster()
+            work = self.plan_from_roster(lg, settings, roster)
+        except Exception as exc:  # noqa: BLE001 - the swap already succeeded
+            log.exception("could not re-read %s after %s", lg.name, swap)
+            self._notify_problem(
+                "Autopilot: lineup not rebalanced",
+                "%s: %s went through, but the roster could not be re-read, so "
+                "the lineup still reflects the old one. %s"
+                % (lg.name, swap, str(exc)[:200]),
+            )
+            return
+
+        plan = work.plan
+        if plan is None or not plan.feasible:
+            # Deliberately loud. Everywhere else an unusable plan means
+            # "yesterday's lineup stands", which is a safe default. Here the
+            # roster underneath it just changed, so the lineup standing is one
+            # that may start a player who is no longer on the team.
+            log.warning("no usable lineup for %s after %s", lg.name, swap)
+            self._notify_problem(
+                "Autopilot: lineup not rebalanced",
+                "%s: %s went through, but no valid lineup could be computed "
+                "afterwards. Worth a look -- the lineup may still be set for "
+                "the old roster." % (lg.name, swap),
+            )
+            return
+
+        if not plan.changed:
+            log.info("lineup still optimal after %s; nothing to do", swap)
+            return
+
+        log.info("rebalancing %s after %s: %d move(s)",
+                 lg.name, swap, len(plan.moves))
+        try:
+            self._apply_lineup(run_id, lg, plan, roster, settings)
+        except Exception as exc:  # noqa: BLE001 - see "never raises" above
+            # ``_apply_lineup`` handles a refused ESPN write itself, so reaching
+            # here means the journal or the store broke. Caught anyway because
+            # one of this method's two callers is the approval loop, and an
+            # exception escaping it would stop every *other* pending approval
+            # from executing. A bench spot must not cost the queue.
+            log.exception("could not rebalance %s after %s", lg.name, swap)
+            self._notify_problem(
+                "Autopilot: lineup not rebalanced",
+                "%s: %s went through, but the new lineup could not be applied. "
+                "%s" % (lg.name, swap, str(exc)[:200]),
+            )
+
     def _offer_addrop(
         self,
         run_id: str,
@@ -1052,6 +1250,11 @@ class Autopilot:
         except Exception as exc:  # noqa: BLE001
             log.error("could not deliver add/drop notification: %s", exc)
 
+        # After the notification, not before. The swap is the news; the lineup
+        # change that follows from it is a consequence, and the user should read
+        # them in that order.
+        self.rebalance_after_swap(run_id, lg, payload, result)
+
     # -- approval loop -----------------------------------------------------
 
     async def handle_action(self, ev: ActionEvent) -> None:
@@ -1102,6 +1305,18 @@ class Autopilot:
                 log.exception("executing %s failed", p.action_id)
                 self.store.complete(p.id, False, str(exc))
                 self._notify_problem("Autopilot: move failed", str(exc)[:400])
+                continue
+            # The approved swap is on the roster; the lineup still is not. This
+            # is the tap path, so it may be hours after the run that proposed
+            # it -- which is exactly why the rebalance cannot wait for the next
+            # scheduled one. Journalled under the original run, because that is
+            # the decision this follows from.
+            if p.kind in ("ADD", "DROP", "ADD_DROP"):
+                lg = self.league_for_run(p.run_id)
+                if lg is not None:
+                    self.rebalance_after_swap(
+                        p.run_id, lg, p.payload or {}, result
+                    )
 
     def _execute(self, proposal: Any) -> Any:
         lg = self.league_for_run(proposal.run_id)

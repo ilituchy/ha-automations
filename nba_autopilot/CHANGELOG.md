@@ -8,6 +8,21 @@ All notable changes to this app are documented here. The format follows
 
 ### Added
 
+- **An acquisition rebalances the lineup immediately.** A pickup on your bench
+  is worth nothing, and the day's lineup was written earlier in the run against
+  a roster that did not contain him. So the moment a swap actually lands — in
+  the autonomy path, or hours later when you tap Approve — the roster is
+  re-read from ESPN, the lineup is re-planned against it and written, and you
+  get the swap notification first and the lineup change second. Waiting for the
+  next scheduled run would deliver the points the swap was approved for after
+  the games it was meant to win. A pending waiver claim, a shadow run and a
+  refused write all mean the roster did not change, and none of them rebalance;
+  `autonomy_lineup` is honoured, because approving a swap says who should be on
+  the roster, not who should be in the starting five. See ADR-020.
+- `plan_from_roster` and `LineupWork`, so the roster-to-lineup chain has one
+  call site rather than two. `plan_lineup` takes eight arguments that each
+  change the answer; a second hand-assembled copy would be eight chances to
+  compute a different lineup for the same roster, and both would look valid.
 - **Every proposed swap is reviewed before you see it.** Set
   `anthropic_api_key` and `judge.py` shows each fully-priced add/drop to Claude
   first — both players' projections, games left, ownership share, draft

@@ -140,6 +140,34 @@ Cost is a handful of requests per run, billed to your own Anthropic account.
 `ai_judge_model` overrides the model if you want a different speed/judgment
 trade.
 
+### After a swap goes through
+
+A pickup who sits on your bench is worth nothing. The lineup for the day was
+already written earlier in the run, against a roster that did not contain him —
+so the moment an add/drop actually lands, the roster is re-read from ESPN, the
+lineup is re-optimized against it, and the new one is written. You get two
+notifications in order: the swap, then the lineup change that followed from it.
+
+This happens straight away rather than on the next scheduled run, because the
+next run can be up to a day later and tonight's games are not.
+
+Three things mean the roster did not really change, and none of them rebalance:
+
+- a **waiver claim**, which is pending until ESPN processes it overnight — he is
+  not yours yet and the drop has not happened either, so the lineup already
+  standing is the right one for the roster you actually have. It gets rebalanced
+  on the run after the claim clears;
+- **shadow mode**, where the swap never left the add-on;
+- a write ESPN refused.
+
+It respects `autonomy_lineup`. Approving a swap says who should be on your
+roster, not who should be in your starting five — if you have lineup autonomy
+off, the log says what it would have done and your lineup is left alone.
+
+If the roster cannot be re-read, or no valid lineup can be computed afterwards,
+you get a notification saying so. That case is worth looking at by hand: the
+lineup currently set is one for a roster that no longer exists.
+
 ## Configuring your leagues
 
 Open each league on `fantasy.espn.com` in a desktop browser, click through to
@@ -337,6 +365,12 @@ name as `404`. That is the fail-closed path working: the key being present is
 what tells the app swaps must be reviewed, so an unreachable reviewer blocks
 rather than waves them through. Clear `anthropic_api_key` to go back to
 unreviewed proposals.
+
+**I approved an add and he is still on my bench.** Either the acquisition was a
+waiver claim, which does not take effect until ESPN processes it overnight, or
+`autonomy_lineup` is off, in which case the log says what it would have started
+him over. Both cases sort themselves out on the next run — the first
+automatically, the second once you move him or turn lineup autonomy on.
 
 To get more detail, set `log_level` to `debug` and check the app's **Log** tab.
 Cookie values stay redacted at every log level.

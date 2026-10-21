@@ -14,6 +14,8 @@ it, which has its own failure modes and none of them are arithmetic:
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import os
 import sys
 import unittest
@@ -35,6 +37,7 @@ from models import (  # noqa: E402
     P_PLAY_PRIOR,
     LeagueSettings,
     MatchupScore,
+    Move,
     Projection,
     RosterEntry,
 )
@@ -48,8 +51,13 @@ class _Store:
     """Just enough of ``state.Store`` to see what was journalled."""
 
     class _Row:
-        def __init__(self, pid, action_id, kind, payload, rationale, delta, auto):
+        def __init__(self, pid, run_id, action_id, kind, payload, rationale,
+                     delta, auto):
             self.id = pid
+            # Kept because the lineup written after an acquisition must be
+            # journalled under the run that *proposed* the swap, which may be
+            # hours earlier than the tap that approved it.
+            self.run_id = run_id
             self.action_id = action_id
             self.kind = kind
             self.payload = payload
@@ -63,10 +71,11 @@ class _Store:
         self.rows = []
         self.claimable = claimable
         self.claims = []
+        self.queued = []
 
     def propose(self, run_id, kind, payload, *, rationale="", value_delta=0.0,
                 auto_approve=False):
-        row = self._Row(len(self.rows) + 1,
+        row = self._Row(len(self.rows) + 1, run_id,
                         "%s:%s:%d" % (run_id, kind, len(self.rows) + 1),
                         kind, dict(payload), rationale, value_delta,
                         auto_approve)
@@ -76,6 +85,11 @@ class _Store:
     def claim_for_execution(self, pid):
         self.claims.append(pid)
         return self.claimable
+
+    def approved(self):
+        """What the approval loop finds waiting. Populated by a test, because
+        the real query is ``state.Store``'s and is covered there."""
+        return list(self.queued)
 
     def complete(self, pid, ok, error=None):
         self.rows[pid - 1].completed = ok
@@ -97,10 +111,15 @@ class _Ha:
     def persistent_notification(self, title, message):
         self.problems.append((title, message))
 
+    def confirm(self, *, tag, title, message):
+        self.sent.append({"title": title, "message": message, "tag": tag,
+                          "actions": []})
+
 
 class _Write:
     def __init__(self, *, explode: bool = False):
         self.calls = []
+        self.lineups = []
         self.explode = explode
 
     def add_drop(self, *, add, drop, bid, waiver):
@@ -108,19 +127,37 @@ class _Write:
             raise RuntimeError("ESPN said no")
         self.calls.append({"add": add, "drop": drop, "bid": bid,
                            "waiver": waiver})
-        return type("R", (), {"ok": True})()
+        # ``shadow`` as well as ``ok``, because the rebalance that follows an
+        # acquisition reads it to tell "ESPN accepted this" from "this never
+        # left the process", and a stub missing the attribute would make every
+        # shadow run look like a real one.
+        return type("R", (), {"ok": True, "shadow": False})()
+
+    def set_lineup(self, target, *, roster=None, scoring_period=None):
+        self.lineups.append({"target": dict(target), "roster": roster,
+                             "scoring_period": scoring_period})
+        return type("R", (), {"ok": True, "shadow": False})()
 
 
 class _Read:
-    """The four reads add/drop makes, each independently breakable."""
+    """The reads add/drop makes, each independently breakable.
+
+    ``league_settings`` and ``roster`` are here for the post-acquisition
+    rebalance only -- the add/drop decision itself is handed the roster the run
+    already read. They return ``fresh_*`` rather than the harness's own copies
+    so a test can prove the rebalance planned against the roster that *includes*
+    the pickup, which is the entire point of re-reading.
+    """
 
     def __init__(self, *, pool=(), pool_mean=45.0, score=None, used=None,
-                 fail=()):
+                 fail=(), fresh_roster=(), fresh_settings=None):
         self.pool = list(pool)
         self.pool_mean = pool_mean
         self.score = score
         self.used = used if used is not None else {}
         self.fail = set(fail)
+        self.fresh_roster = list(fresh_roster)
+        self.fresh_settings = fresh_settings
         self.asked = []
 
     def _maybe_fail(self, what):
@@ -151,6 +188,14 @@ class _Read:
     def acquisitions_used(self, team_id=None):
         self._maybe_fail("acquisitions_used")
         return dict(self.used)
+
+    def league_settings(self):
+        self._maybe_fail("league_settings")
+        return self.fresh_settings if self.fresh_settings is not None else settings()
+
+    def roster(self):
+        self._maybe_fail("roster")
+        return list(self.fresh_roster)
 
 
 class _League:
@@ -254,7 +299,7 @@ class _Harness:
 
     def __init__(self, *, autonomy=False, shadow=False, read=None, write=None,
                  store=None, ha=None, st=None, margin=12.0, floor=3.0,
-                 never_drop=(), judge=None):
+                 never_drop=(), judge=None, autonomy_lineup=True):
         self.store = store or _Store()
         self.ha = ha or _Ha()
         self.cfg = type("Cfg", (), {
@@ -262,6 +307,9 @@ class _Harness:
             "addrop_margin_pct": margin,
             "addrop_churn_floor": floor,
             "autonomy_add_drop": autonomy,
+            # Defaults to true, as the real option does. It gates the rebalance
+            # that follows an acquisition, not the acquisition.
+            "autonomy_lineup": autonomy_lineup,
             "shadow_mode": shadow,
         })()
         self.app = object.__new__(main_mod.Autopilot)
@@ -544,6 +592,297 @@ class TestScoreIsReadNotIgnored(unittest.TestCase):
         decision, notes = h.consider(target={1: START, 3: START, 2: BENCH})
         self.assertIn("churn floor is waived", " ".join(notes))
         self.assertTrue(decision.proposed)
+
+
+# ---------------------------------------------------------------------------
+# the lineup follows the roster
+# ---------------------------------------------------------------------------
+
+
+def lineup_work(plan, **kw):
+    """A ``LineupWork`` with everything but the plan stubbed out.
+
+    Only ``plan`` and ``roster``-shaped arguments change what the rebalance
+    does; the rest of the dataclass is what ``run_league`` reports on, and
+    filling it here would be inventing evidence for assertions nobody makes.
+    """
+    base = dict(
+        plan=plan, projections={}, availability={}, skipped=(), overrides={},
+        injuries=None, cal=None, matchup_period=1, schedule={},
+        games_used=None, notes=(), sources_used={}, sources_missing={},
+    )
+    base.update(kw)
+    return main_mod.LineupWork(**base)
+
+
+def after_the_swap(**kw):
+    """A harness whose *next* roster read includes the pickup.
+
+    Four players for two starting slots, the new man better than one of the
+    incumbents -- so an optimal lineup has to move somebody, which is what
+    makes "did it rebalance" an answerable question.
+    """
+    h = _Harness(**kw)
+    h.lg.read.fresh_roster = [
+        player(1), player(2, name="Weak"), player(3, slot=BENCH),
+        player(90, name="Better", slot=BENCH),
+    ]
+    return h
+
+
+def swap_payload(**kw):
+    """The journalled payload of an executed add/drop, as ``_offer_addrop``
+    writes it and the approval loop reads it back."""
+    base = {"add": 90, "add_name": "Better", "drop": 2, "drop_name": "Weak",
+            "bid": None, "waiver": False, "matchup_period": 1,
+            "reason": "quality"}
+    base.update(kw)
+    return base
+
+
+def write_result(ok=True, shadow=False):
+    return type("R", (), {"ok": ok, "shadow": shadow})()
+
+
+def moved_plan():
+    """A feasible plan that starts the pickup over the weak incumbent."""
+    return pipeline.LineupPlan(
+        target={1: START, 90: START, 2: BENCH, 3: BENCH},
+        moves=(
+            Move(kind="LINEUP", player_id=90, player_name="Better",
+                 from_slot=BENCH, to_slot=START, value_delta=15.0),
+            Move(kind="LINEUP", player_id=2, player_name="Weak",
+                 from_slot=START, to_slot=BENCH, value_delta=-5.0),
+        ),
+        lam=0.0, utilization=float("inf"),
+        values={1: 60.0, 2: 5.0, 3: 30.0, 90: 45.0}, notes=(),
+    )
+
+
+class TestRebalanceAfterTheSwap(unittest.TestCase):
+    """*"remember when i make an add, we have to potentially rebalance the
+    lineup"*.
+
+    The lineup was written earlier in the run, against a roster that did not
+    contain the pickup. Every test here is about one of two failures: starting
+    the new man when the roster really did change, or claiming to have done so
+    when it did not.
+
+    These call ``rebalance_after_swap`` directly rather than through
+    ``_offer_addrop``, because the guards are about the *result* of a write and
+    the harness's own pool produces exactly one of the several shapes a write
+    result can take.
+    """
+
+    # -- the roster did not actually change -------------------------------
+
+    def test_a_failed_write_is_not_rebalanced(self):
+        """Nothing moved, so there is nothing to re-plan -- and re-planning
+        anyway would write a lineup for a roster that never existed."""
+        h = after_the_swap()
+        h.app.rebalance_after_swap("RUN1", h.lg, swap_payload(),
+                                   write_result(ok=False))
+        self.assertEqual(h.lg.read.asked, [])
+        self.assertEqual(h.lg.write.lineups, [])
+
+    def test_a_missing_result_is_not_rebalanced(self):
+        h = after_the_swap()
+        h.app.rebalance_after_swap("RUN1", h.lg, swap_payload(), None)
+        self.assertEqual(h.lg.write.lineups, [])
+
+    def test_shadow_mode_does_not_rebalance(self):
+        """The swap never left the process, so the roster on ESPN is the one
+        the lineup was already optimized against."""
+        h = after_the_swap()
+        h.app.rebalance_after_swap("RUN1", h.lg, swap_payload(),
+                                   write_result(shadow=True))
+        self.assertEqual(h.lg.read.asked, [])
+        self.assertEqual(h.lg.write.lineups, [])
+
+    def test_a_pending_waiver_claim_does_not_rebalance(self):
+        """A claim is not an acquisition. He is not ours until it processes,
+        and the drop has not happened either -- so the *current* roster is
+        unchanged and the lineup standing against it is still the right one."""
+        h = after_the_swap()
+        h.app.rebalance_after_swap("RUN1", h.lg, swap_payload(waiver=True),
+                                   write_result())
+        self.assertEqual(h.lg.read.asked, [])
+        self.assertEqual(h.lg.write.lineups, [])
+
+    def test_autonomy_lineup_off_leaves_the_lineup_alone(self):
+        """Approving a swap says who should be on the roster, not who should be
+        in the starting five. The lineup flag is the answer to the second."""
+        h = after_the_swap(autonomy_lineup=False)
+        h.app.rebalance_after_swap("RUN1", h.lg, swap_payload(),
+                                   write_result())
+        self.assertEqual(h.lg.read.asked, [])
+        self.assertEqual(h.lg.write.lineups, [])
+        self.assertEqual(h.store.rows, [])
+
+    # -- the roster changed and something went wrong ----------------------
+
+    def test_a_failed_re_read_is_surfaced_and_does_not_raise(self):
+        """The swap already happened. A failure here must not look like a
+        failed swap -- but it must not be silent either, because the lineup now
+        reflects a roster that no longer exists."""
+        h = after_the_swap()
+        h.lg.read.fail = {"roster"}
+        h.app.rebalance_after_swap("RUN1", h.lg, swap_payload(),
+                                   write_result())
+        self.assertEqual(h.lg.write.lineups, [])
+        self.assertEqual(len(h.ha.problems), 1)
+        title, message = h.ha.problems[0]
+        self.assertIn("not rebalanced", title)
+        self.assertIn("Better", message)
+
+    def test_an_infeasible_plan_is_loud(self):
+        """Everywhere else an unusable plan means "yesterday's lineup stands",
+        which is safe. Here it may mean starting a player who was just
+        dropped."""
+        h = after_the_swap()
+        plan = dataclasses.replace(moved_plan(), feasible=False)
+        h.app.plan_from_roster = lambda *a, **kw: lineup_work(plan)
+        h.app.rebalance_after_swap("RUN1", h.lg, swap_payload(),
+                                   write_result())
+        self.assertEqual(h.lg.write.lineups, [])
+        self.assertTrue(h.ha.problems)
+
+    def test_no_projections_at_all_is_loud(self):
+        """``plan`` is ``None`` when ESPN projected nobody -- a refusal to
+        plan, not a plan of zeroes. Same consequence as infeasible."""
+        h = after_the_swap()
+        h.app.plan_from_roster = lambda *a, **kw: lineup_work(None)
+        h.app.rebalance_after_swap("RUN1", h.lg, swap_payload(),
+                                   write_result())
+        self.assertEqual(h.lg.write.lineups, [])
+        self.assertTrue(h.ha.problems)
+
+    def test_a_failure_applying_the_lineup_does_not_escape(self):
+        """One caller is the approval loop. An exception escaping this would
+        stop every *other* pending approval from being executed, which is a
+        much worse outcome than one player on the bench for a night."""
+        h = after_the_swap()
+        h.app.plan_from_roster = lambda *a, **kw: lineup_work(moved_plan())
+
+        def boom(*a, **kw):
+            raise RuntimeError("database is locked")
+
+        h.app._apply_lineup = boom
+        h.app.rebalance_after_swap("RUN1", h.lg, swap_payload(),
+                                   write_result())
+        self.assertTrue(h.ha.problems)
+
+    # -- the roster changed and the lineup follows ------------------------
+
+    def test_an_already_optimal_lineup_writes_nothing(self):
+        """A pickup who belongs on the bench belongs on the bench. No moves
+        means no write and no notification -- not "rebalanced: 0 moves"."""
+        h = after_the_swap()
+        unchanged = dataclasses.replace(moved_plan(), moves=())
+        h.app.plan_from_roster = lambda *a, **kw: lineup_work(unchanged)
+        h.app.rebalance_after_swap("RUN1", h.lg, swap_payload(),
+                                   write_result())
+        self.assertEqual(h.lg.write.lineups, [])
+        self.assertEqual(h.store.rows, [])
+        self.assertEqual(h.ha.sent, [])
+
+    def test_it_plans_against_the_roster_it_just_read(self):
+        """The whole point. Planning against the roster the run started with
+        would re-derive the lineup that does not contain the pickup."""
+        h = after_the_swap()
+        seen = {}
+
+        def record(lg, settings, roster):
+            seen["roster"] = list(roster)
+            seen["settings"] = settings
+            return lineup_work(moved_plan())
+
+        h.app.plan_from_roster = record
+        h.app.rebalance_after_swap("RUN1", h.lg, swap_payload(),
+                                   write_result())
+        self.assertIn(90, [e.player_id for e in seen["roster"]])
+        self.assertIsNotNone(seen["settings"])
+
+    def test_the_new_lineup_is_written_and_journalled_under_the_run(self):
+        """Journalled under the run that proposed the swap, because that is the
+        decision this follows from -- even when the approval tap came hours
+        later."""
+        h = after_the_swap()
+        h.app.plan_from_roster = lambda *a, **kw: lineup_work(moved_plan())
+        h.app.rebalance_after_swap("RUN1", h.lg, swap_payload(),
+                                   write_result())
+
+        self.assertEqual(len(h.lg.write.lineups), 1)
+        wrote = h.lg.write.lineups[0]
+        self.assertEqual(wrote["target"][90], START)
+        self.assertEqual(wrote["target"][2], BENCH)
+        # The fresh roster, not the one the run started with: ``set_lineup``
+        # needs it to find the slot ids ESPN wants.
+        self.assertIn(90, [e.player_id for e in wrote["roster"]])
+
+        self.assertEqual(len(h.store.rows), 1)
+        row = h.store.rows[0]
+        self.assertEqual(row.kind, "LINEUP")
+        self.assertEqual(row.run_id, "RUN1")
+        self.assertTrue(row.completed)
+        self.assertEqual(h.ha.problems, [])
+
+
+class TestTheApprovalLoopRebalancesToo(unittest.TestCase):
+    """The tap path, which is the default one.
+
+    ``autonomy_add_drop`` is false out of the box, so in normal use the swap
+    does not happen during the run -- it happens when the user taps Approve,
+    which may be hours later. That is exactly why the rebalance cannot wait for
+    the next scheduled run: by then the games it was meant to win are over.
+    """
+
+    def _h(self, **kw):
+        h = after_the_swap(**kw)
+        # The real one reads the run's league out of SQLite; there is no
+        # database here, and whose roster a tap lands on is ``_execute``'s
+        # question, covered by ``tests/test_safety.py``.
+        h.app.league_for_run = lambda run_id: h.lg
+        h.app.plan_from_roster = lambda *a, **kw: lineup_work(moved_plan())
+        return h
+
+    def _queue(self, h, kind, payload):
+        row = h.store.propose("RUN1", kind, payload, rationale="r",
+                              auto_approve=False)
+        h.store.queued.append(row)
+        return row
+
+    def test_an_approved_swap_starts_the_man_it_just_added(self):
+        h = self._h()
+        swap = self._queue(h, "ADD_DROP", swap_payload())
+        asyncio.run(h.app.execute_approved())
+        self.assertTrue(swap.completed)
+        self.assertEqual(len(h.lg.write.calls), 1)
+        self.assertEqual(len(h.lg.write.lineups), 1)
+        self.assertEqual(h.lg.write.lineups[0]["target"][90], START)
+
+    def test_an_approved_lineup_is_not_rebalanced_again(self):
+        """A LINEUP proposal *is* the lineup. Re-planning after writing it
+        would be a second write of the same decision, and the roster it was
+        computed against has not changed."""
+        h = self._h()
+        self._queue(h, "LINEUP", {"target": {"1": START, "3": BENCH}})
+        asyncio.run(h.app.execute_approved())
+        self.assertEqual(len(h.lg.write.lineups), 1)
+        # No second proposal, which is what a rebalance would have journalled.
+        self.assertEqual(len(h.store.rows), 1)
+
+    def test_a_refused_swap_is_not_rebalanced(self):
+        """ESPN said no, so the roster is unchanged -- and the loop must carry
+        on to the next approval rather than die on this one."""
+        h = self._h(write=_Write(explode=True))
+        h.app.league_for_run = lambda run_id: h.lg
+        h.lg.read.fresh_roster = [player(1), player(90, name="Better")]
+        swap = self._queue(h, "ADD_DROP", swap_payload())
+        asyncio.run(h.app.execute_approved())
+        self.assertFalse(swap.completed)
+        self.assertEqual(h.lg.write.lineups, [])
+        self.assertTrue(h.ha.problems)
 
 
 if __name__ == "__main__":

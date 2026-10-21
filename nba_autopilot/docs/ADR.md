@@ -811,3 +811,78 @@ re-fetching the injuries page inside the review (the run already holds it, and
 two fetches is two chances to judge a swap against a report about someone else);
 and letting the judge's own words replace the computed rationale, which would
 void the `Move.rationale` invariant for the sake of a nicer-reading card.
+
+## ADR-020 — The lineup is re-optimized the moment an acquisition lands, not on the next run.
+
+**Status:** accepted.
+
+A pickup who sits on the bench is worth nothing. The day's lineup is written in
+the first half of `run_league`, against a roster that does not yet contain him,
+and `_consider_addrop` runs *after* that — deliberately, because the add/drop
+decision needs to know which players this run just started in order to protect
+them. So every successful acquisition leaves a lineup that was optimal for a
+roster that no longer exists.
+
+Deferring the fix to the next scheduled run costs a day of the gain the swap was
+approved for, and the default `run_times` is a single entry. In a week with three
+days left that is a third of the points. Worse, the common case is the *tap*
+path: `autonomy_add_drop` is false out of the box, so the swap usually executes
+in `execute_approved`, hours after the run that proposed it and with no run
+scheduled before the night's games.
+
+So `rebalance_after_swap` re-reads the roster from ESPN, re-plans, and writes.
+Both call sites use it — the autonomy branch of `_offer_addrop`, after its
+notification, and `execute_approved` after a successful tap. The notification
+order is the swap first and the lineup second, because the lineup change is a
+consequence of the swap and reading them the other way round is reading the
+answer before the question.
+
+**It re-reads rather than patching the roster in memory.** Simulating the swap —
+removing the dropped entry, appending the added one — would be cheaper by one
+HTTP request and would produce a lineup computed against a roster nobody ever
+confirmed. ESPN's response to an add/drop does not enumerate the resulting
+roster, slots are assigned by ESPN on acquisition, and `roster()` already filters
+the ghost entries ESPN leaves behind (ADR-016). The authority on what the roster
+is after a write is the read after the write.
+
+**`plan_from_roster` exists so there is one chain, not two.** `plan_lineup` takes
+eight arguments that each change the answer, and the inputs behind them are a
+calendar read, a pro-schedule read, an injuries join, a projections fetch and a
+games-used measurement. Two call sites assembling that by hand is two sets of
+eight chances to compute a different lineup for the same roster and never notice,
+because both would look like valid lineups. The three slow reads behind it are
+cached on the instance, so the second call costs one projections fetch rather
+than a second multi-megabyte season document.
+
+**Three results mean the roster did not change, and none of them rebalance.** A
+pending waiver claim — he is not ours until ESPN processes it overnight, and the
+drop has not happened either, so the lineup already standing is the correct one
+for the roster we actually have. `shadow_mode`, where the packet never left the
+process. And a refused write. All three would otherwise produce a confident log
+line about a rebalance that rebalanced nothing. The waiver test is on
+`payload["waiver"]`, not on `result.kind`: `add_drop` returns `ADD_DROP` for an
+instant free-agent pickup and for a `PENDING` claim alike (ADR-015), so the kind
+cannot tell them apart.
+
+**It honours `autonomy_lineup`.** That flag is the standing answer to "may this
+app move players without asking", and an add/drop approval is not a second
+answer to it — approving a swap says who should be on the roster, not who should
+be in the starting five. Note that `run_league`'s own lineup write does *not*
+consult the flag today; gating only the new path is deliberate, because making
+the flag work everywhere means a lineup approval card and is its own decision.
+
+**It never raises.** It runs after an irreversible, already-journalled
+transaction, and one of its two callers is the approval loop — an exception
+escaping would stop every *other* pending approval from executing. A bench spot
+for a night must not cost the queue. An unusable plan afterwards is the one case
+it is deliberately *loud* about, with a notification rather than a log line:
+everywhere else "no usable plan" means yesterday's lineup stands, which is safe,
+but here the roster underneath that lineup just changed and it may be starting a
+player who is no longer on the team.
+
+**Rejected:** rebalancing on the next scheduled run (the gain arrives after the
+games); patching the roster in memory; a second `plan_addrop` pass in the same
+breath, so a rebalance could cascade into another swap — one irreversible move
+per approval, and the N-swap funnel is a separate decision with its own
+acquisition accounting; and re-notifying when the plan came back unchanged,
+which would train the user to ignore the one notification that means something.
