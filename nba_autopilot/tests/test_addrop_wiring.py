@@ -960,6 +960,40 @@ def funnel_target():
     return {1: START, 2: START, 3: START, 4: BENCH, 5: BENCH, 6: BENCH}
 
 
+def open_funnel(*, max_moves=3, pool_means=None, **kw):
+    """A roster with a free spot and a deep pool, for counting reviews.
+
+    ``funnel`` cannot be used to count how many candidates the reviewer is
+    shown, because every swap there costs a drop and each block retires the
+    name it objected to: after three refusals there is nobody left to drop and
+    the loop ends for want of a drop candidate rather than for want of looks.
+
+    Here the roster is two players against a cap of six, so the branch taken is
+    the open-spot one, nothing goes out, and a block retires only the pickup.
+    The pool therefore survives being refused and the loop ends where the
+    review budget says, which is the thing under test.
+    """
+    means = pool_means or {90: 70.0, 91: 60.0, 92: 50.0,
+                           93: 40.0, 94: 30.0, 95: 20.0}
+    h = _Harness(
+        max_moves=max_moves,
+        st=settings(lineup_slot_counts={START: 3, BENCH: 3}),
+        read=_Read(
+            pool=[player(p, name="FA%d" % p, slot=BENCH) for p in sorted(means)],
+            pool_means=means,
+        ),
+        **kw
+    )
+    h.roster = [player(1), player(2)]
+    h.projections = {1: projection(1, 30.0), 2: projection(2, 20.0)}
+    h.values = {1: 30.0, 2: 20.0}
+    return h
+
+
+def open_funnel_target():
+    return {1: START, 2: START}
+
+
 class TestSeveralSwapsARun(unittest.TestCase):
     """*"i also think you should recomend multiple adds"*.
 

@@ -56,6 +56,18 @@ log = logging.getLogger("autopilot")
 #: every league in a single run cycle shares one request.
 INJURY_NOTE_TTL = timedelta(minutes=15)
 
+#: Candidates one run will put in front of the add/drop reviewer, per league.
+#: Separate from ``addrop_max_moves``, which caps the swaps that reach the user:
+#: a blocked swap is not a move, so it must not spend the move budget, or a run
+#: whose three best candidates are all vetoed stops with nothing to show while a
+#: fourth the reviewer would have approved sits unexamined. This is the bound on
+#: the other side -- the reviewer costs a request and several seconds each time,
+#: so a league where everything is rightly refused must not loop the pool.
+#:
+#: Blocking all five is a legitimate outcome and not an error. It is the reason
+#: the reviewer exists.
+MAX_ADDROP_REVIEWS = 5
+
 #: Distinguishes "not built yet" from "built, and the answer was None". Without
 #: it a failed calendar build would be retried on every league of every run,
 #: which means re-downloading a multi-megabyte season document to get the same
@@ -713,7 +725,19 @@ class Autopilot:
         # as a ``never_drop`` entry they are not.
         just_added: List[int] = []
 
-        for attempt in range(max(1, int(self.cfg.addrop_max_moves))):
+        wanted = max(1, int(self.cfg.addrop_max_moves))
+        # Never below ``wanted``, so raising the option can never be silently
+        # undone by this cap: a user who asks for five swaps and whose reviewer
+        # approves all five gets five.
+        budget = max(MAX_ADDROP_REVIEWS, wanted)
+        attempts = 0
+        # Set by every ``break`` below, so the note after the loop can tell
+        # "the reviewer used up its look" from "the pool ran dry" -- the two
+        # read identically from the outside and mean opposite things.
+        ended_early = False
+
+        while len(accepted) < wanted and attempts < budget:
+            attempts += 1
             decision = addrop_mod.plan_addrop(
                 settings,
                 sim_roster,
@@ -733,7 +757,7 @@ class Autopilot:
                 margin_pct=self.cfg.addrop_margin_pct,
                 churn_floor=self.cfg.addrop_churn_floor,
             )
-            if attempt == 0 and decision.acquisitions_left is not None:
+            if attempts == 1 and decision.acquisitions_left is not None:
                 # Once, from the real counter. Re-reporting it per attempt would
                 # print a countdown of a budget nothing has spent yet.
                 notes.append(
@@ -747,10 +771,18 @@ class Autopilot:
                 # notes of the attempts that *did* propose are kept below, with
                 # the swap they belong to.
                 notes.extend(decision.notes)
+                ended_early = True
                 break
             notes.extend(decision.notes)
 
-            if attempt:
+            # How many swaps this one is priced on top of -- the accepted ones,
+            # not the attempts. A blocked candidate is never applied to
+            # ``sim_roster``, so a swap found after one rejection is still
+            # priced against the real roster and must not claim otherwise. Using
+            # the attempt number here told the user a card assumed a swap "above
+            # it" that the reviewer had thrown away.
+            rank = len(accepted)
+            if rank:
                 # On the card, not only in the record. The gain was computed
                 # against a roster that only exists if the swaps above this one
                 # are approved, and a user tapping this one in isolation is
@@ -764,9 +796,9 @@ class Autopilot:
                     "assuming the %s above it %s approved."
                     % (
                         decision.rationale,
-                        _ordinal(attempt + 1),
-                        "swap" if attempt == 1 else "%d swaps" % attempt,
-                        "is" if attempt == 1 else "are",
+                        _ordinal(rank + 1),
+                        "swap" if rank == 1 else "%d swaps" % rank,
+                        "is" if rank == 1 else "are",
                     ),
                 )
 
@@ -785,6 +817,7 @@ class Autopilot:
                         "stopped looking for further swaps: the reviewer is "
                         "unreachable, so none of them could be shown either"
                     )
+                    ended_early = True
                     break
                 vetoed_adds.add(int(decision.add.player_id))
                 if decision.drop is not None:
@@ -802,6 +835,19 @@ class Autopilot:
             just_added.append(int(reviewed.add.player_id))
             if sim_used is not None:
                 sim_used[matchup_period] = sim_used.get(matchup_period, 0) + 1
+
+        if not ended_early and len(accepted) < wanted:
+            # Fell out of the loop having neither filled the order nor run out
+            # of candidates, which leaves only one explanation: the reviewer
+            # spent the run's looks refusing things. Said plainly, because the
+            # alternative -- an empty list and silence -- is indistinguishable
+            # from "the pool had nothing in it", and the two call for opposite
+            # responses from the user.
+            notes.append(
+                "stopped after %d candidate(s): the reviewer blocked %d of "
+                "them, and %d is the most one run will ask it about"
+                % (attempts, attempts - len(accepted), budget)
+            )
 
         return accepted, notes
 

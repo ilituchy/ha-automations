@@ -137,6 +137,24 @@ Two things cap the real total below `addrop_max_moves`:
   are held by the acquisitions. The status page's notes for the run say where
   the list stopped and why.
 
+A swap the reviewer blocks does **not** count against `addrop_max_moves`. The
+option limits how many swaps you are *asked about*, and a vetoed swap is not a
+swap — if it counted, a run whose three best candidates were all rightly refused
+would stop with nothing to show you while a fourth the reviewer would have
+approved sat unexamined. So the app keeps looking past a veto.
+
+What stops it instead is the review budget: **one run shows the reviewer at most
+five candidates per league.** Each review costs an API request and a few
+seconds, so a league where everything deserves refusing must not walk the whole
+free-agent pool to arrive at the same empty list. When a run ends this way the
+notes say so — *"stopped after 5 candidate(s): the reviewer blocked 5 of them,
+and 5 is the most one run will ask it about"* — which is worth telling apart
+from "there was nothing to find", because the two call for opposite responses
+from you.
+
+**Five blocked out of five is a normal outcome, not a fault.** It is the
+reviewer doing the thing it was added to do.
+
 Nobody the app picks up in a run is offered as a drop later in the same run.
 
 ### The add/drop review
@@ -421,6 +439,14 @@ you anything, and each pickup raises the bar for the next one. Check the run's
 notes on the status page — they say where the list stopped, whether it was the
 pool, the acquisition limit, or the reviewer. `addrop_max_moves` is the ceiling,
 not a target.
+
+**I got no add/drop suggestions at all, and the notes say the reviewer blocked
+every one.** Working as intended. The arithmetic proposes on this week's points
+alone, which makes a star having a quiet week look like the cheapest man on your
+roster to give away; the reviewer is the part that knows who he is. A run where
+all five candidates were refused is a run where the app wanted to make five bad
+trades and was stopped. Read the verdicts on the status page — if you disagree
+with one, add that player to `never_drop` so neither layer raises him again.
 
 **I got three suggestions and approved the last one, and the gain was smaller
 than the card said.** Expected, and the card says so. Each entry after the first

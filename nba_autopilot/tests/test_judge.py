@@ -44,6 +44,8 @@ from tests.test_addrop_wiring import (  # noqa: E402
     _Read,
     funnel,
     funnel_target,
+    open_funnel,
+    open_funnel_target,
     player,
 )
 
@@ -603,6 +605,77 @@ class TestTheReviewerSeesEverySwap(unittest.TestCase):
         self.assertEqual(
             h.app.judge.seen[1]["plan"].rationale, decisions[1].rationale
         )
+
+
+class TestABlockIsNotAMove(unittest.TestCase):
+    """*"lets give the judge a max of 5 possible options. the best options we
+    have. its totally fine if they say bad to all of them, thats why we have
+    the judge!"*
+
+    ``addrop_max_moves`` counts the swaps that reach the user. A veto is not a
+    swap, so it must not spend that budget -- and the bound on the other side
+    is a separate, larger count of how many candidates the reviewer is shown.
+    """
+
+    def test_a_blocked_swap_does_not_spend_a_move(self):
+        """Two moves asked for and the first candidate refused still yields
+        two. Charging the veto to the move budget would have shown one, and
+        the swap never offered was one the reviewer had approved.
+        """
+        h = funnel(max_moves=2, judge=_PerSwapJudge(
+            lambda p: judge_mod.Verdict(False, "no")
+            if p.add.name == "FA90" else judge_mod.Verdict(True, "ok")
+        ))
+        decisions, _notes = h.consider_all(target=funnel_target())
+        self.assertEqual([d.add.name for d in decisions], ["FA91", "FA92"])
+
+    def test_the_reviewer_is_shown_at_most_five_candidates(self):
+        """The counterweight. A pool deep enough and a reviewer that refuses
+        everything would otherwise walk the whole pool, at a request and
+        several seconds each, to arrive at the same empty list.
+        """
+        h = open_funnel(judge=_PerSwapJudge(
+            lambda p: judge_mod.Verdict(False, "not him either")
+        ))
+        decisions, notes = h.consider_all(target=open_funnel_target())
+        self.assertEqual(decisions, [])
+        self.assertEqual(len(h.app.judge.seen), 5)
+        # Six were available, so stopping was the budget and not the pool.
+        self.assertEqual(len(h.lg.read.pool), 6)
+        self.assertIn(
+            "stopped after 5 candidate(s): the reviewer blocked 5 of them",
+            " | ".join(notes),
+        )
+
+    def test_the_move_budget_still_ends_the_list_first(self):
+        """The review budget is a ceiling on looks, not a target. A reviewer
+        that approves everything must still stop at ``addrop_max_moves``.
+        """
+        h = open_funnel(max_moves=3, judge=_PerSwapJudge(
+            lambda p: judge_mod.Verdict(True, "ok")
+        ))
+        decisions, notes = h.consider_all(target=open_funnel_target())
+        self.assertEqual(len(decisions), 3)
+        self.assertEqual(len(h.app.judge.seen), 3)
+        self.assertNotIn("the reviewer blocked", " | ".join(notes))
+
+    def test_a_card_found_after_a_rejection_is_not_priced_on_it(self):
+        """The conditional-pricing line counts accepted swaps, not attempts.
+
+        A blocked candidate is never applied to the simulated roster, so the
+        swap found after one is still priced against the real roster. Counting
+        attempts told the user his first card assumed a swap "above it" that
+        the reviewer had thrown away -- a sentence that would make him discount
+        a number needing no discount, and look for a card that did not exist.
+        """
+        h = funnel(judge=_PerSwapJudge(
+            lambda p: judge_mod.Verdict(False, "no")
+            if p.add.name == "FA90" else judge_mod.Verdict(True, "ok")
+        ))
+        decisions, _notes = h.consider_all(target=funnel_target())
+        self.assertEqual([d.add.name for d in decisions], ["FA91", "FA92"])
+        self.assertNotIn("Priced as the", decisions[0].rationale)
+        self.assertIn("the swap above it is approved", decisions[1].rationale)
 
 
 if __name__ == "__main__":

@@ -976,3 +976,78 @@ continue past an unreachable reviewer so the user at least sees the unreviewed
 swaps — a timed-out request is not permission, which was already settled in
 ADR-019 and does not become permission in bulk; and a default of 1, which would
 have shipped the mechanism switched off.
+
+## ADR-022 — A blocked swap does not spend a move; the reviewer gets its own budget of five.
+
+**Context.** ADR-021 bounded the funnel with a single number: `addrop_max_moves`
+attempts, three by default. ADR-019 then put a reviewer in front of every
+candidate, and the two bounds turned out to be the same bound, which is wrong.
+The first live run with the reviewer switched on made it obvious — the
+Chairman's league spent all three attempts on candidates the reviewer refused
+(Towns for Braun, Simons for Kessler, KCP for Gordon, each correctly) and the
+run ended with an empty list. Any fourth candidate, however good, was never
+priced, because the budget had been spent on things the user was never shown.
+
+A veto is not a move. `addrop_max_moves` is the user's answer to "how many
+swaps am I willing to be asked about", and a swap nobody was asked about did
+not consume that.
+
+**Decision.** Two separate counters.
+
+`addrop_max_moves` now counts **accepted** swaps — the loop runs while
+`len(accepted) < wanted`, so a block costs nothing but the attempt. A run can
+therefore look at a fourth, fifth or sixth candidate to fill an order of three.
+
+`MAX_ADDROP_REVIEWS = 5` bounds the other side: candidates put in front of the
+reviewer, per league, per run. Not configurable, and deliberately a constant
+rather than a fourth add/drop option — it is a cost ceiling rather than a
+preference, and the user's stated intent was a number, not a dial: *"lets give
+the judge a max of 5 possible options. the best options we have. its totally
+fine if they say bad to all of them, thats why we have the judge!"*
+
+The effective budget is `max(MAX_ADDROP_REVIEWS, addrop_max_moves)`, so raising
+the option can never be silently undone by the cap — a user who asks for five
+swaps and whose reviewer approves all five gets five.
+
+**Blocking all five is a success, not an error.** No warning, no problem
+notification; an `INFO` note on the run saying what happened. The reviewer
+exists precisely because the points model cannot see a first-round pick having
+a quiet fortnight, and a run where it refused everything is a run where five
+bad trades were caught.
+
+**The three ways the list can end now read differently**, which they must,
+because they call for opposite responses:
+
+- the pool ran dry, or no candidate clears the hurdle — the ordinary outcome,
+  and the notes already said so;
+- the reviewer refused everything it was shown — *"stopped after 5
+  candidate(s): the reviewer blocked 5 of them, and 5 is the most one run will
+  ask it about"*. Without this the user sees an empty list and concludes there
+  was nothing to find, which is the opposite of what happened;
+- the reviewer was unreachable — unchanged from ADR-021: stop at once, because
+  the next candidate would be withheld for the same non-reason.
+
+The loop needed an explicit `ended_early` flag to tell the first two apart.
+Falling out of the `while` having neither filled the order nor broken out is
+the only way to reach the review ceiling, but "attempts == budget" on its own
+is also true of a pool that happened to run dry on the fifth look.
+
+**A latent bug this exposed.** The conditional-pricing line from ADR-021 was
+derived from the attempt index. With a reviewer in the loop that is not the
+same as the number of swaps the card is priced on top of: a blocked candidate
+is never applied to the simulated roster, so the swap found after one rejection
+is still priced against the real roster. The attempt index told the user his
+*first* card assumed a swap "above it" that the reviewer had thrown away —
+making him discount a number needing no discount, and go looking for a card
+that did not exist. It now counts `len(accepted)`.
+
+**Rejected:** making the review budget an add-on option (a fourth add/drop
+knob, for a number whose right value is a function of API cost rather than of
+how the user wants his team run); counting reviews across leagues in one run
+rather than per league (the second league would be rationed by the first
+league's luck); retrying a blocked candidate in a later run with no memory
+(that is what happens, and is correct — the reviewer reads current reporting,
+and a player blocked for being hurt should be reconsidered when he is not);
+and raising `addrop_max_moves`' schema ceiling to absorb the extra looks, which
+would have let a user ask for five swaps and get five reviews of refusals and
+call it a configuration error.

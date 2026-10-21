@@ -8,6 +8,24 @@ All notable changes to this app are documented here. The format follows
 
 ### Added
 
+- **A swap the reviewer blocks no longer uses up one of the run's moves.**
+  `addrop_max_moves` counts swaps that reach the user, and a vetoed swap is not
+  one. The first live run with the review switched on spent all three of its
+  moves on candidates the reviewer refused — correctly, in all three cases —
+  and ended with an empty list, never pricing a fourth it might have approved.
+  The funnel now keeps looking past a veto, bounded instead by a separate
+  budget of five candidates shown to the reviewer per league per run, since
+  each review costs a request and several seconds. Blocking all five is a
+  normal outcome and is recorded as one, with a note that tells it apart from
+  "the pool had nothing in it" — the two look identical from outside and call
+  for opposite responses. See ADR-022.
+
+  Fixes a related defect in the conditional-pricing line, which was derived
+  from the attempt number. A blocked candidate is never applied to the
+  simulated roster, so the swap found after a rejection is still priced against
+  the real roster — yet the first card could claim its number assumed a swap
+  "above it" that the reviewer had thrown away. It now counts approved swaps.
+
 - **A run can offer up to three swaps, each approved separately.** New
   `addrop_max_moves` option (1–5, default 3). Previously a run that found three
   worthwhile moves showed the best one and left the other two until tomorrow,
