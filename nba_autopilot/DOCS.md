@@ -91,7 +91,10 @@ A pickup is only proposed without a matching drop when there is genuinely
 somewhere to put him. An **empty IR slot does not count** — ESPN will only let a
 player into one if his own injury designation qualifies him, and someone worth
 picking up never does. So a roster whose active slots are all taken gets a
-paired add/drop or nothing, even when the IR slots are empty.
+paired add/drop or nothing, even when the IR slots are empty. For the same
+reason the player going out has to be one holding an active slot: dropping
+someone off IR frees an IR slot and leaves the pickup with nowhere to go, so
+when the roster is full he is left out of the running and the card says why.
 
 The matchup score is read every run and shown in the notes, but it is only ever
 used to *waive* the floor, never to raise it. ESPN publishes no projected final

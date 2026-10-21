@@ -370,6 +370,16 @@ class TestUnpairedAddNeedsAnActiveSpot(unittest.TestCase):
             sorted(i["type"] for i in http.last["items"]), ["ADD", "DROP"]
         )
 
+    def test_a_drop_off_ir_does_not_make_room_for_the_add_either(self):
+        """Pairing is not a formality -- the drop has to vacate an *active*
+        slot. Dropping the man on IR frees an IR slot, so the active count
+        does not move and ESPN refuses add+drop exactly as readily."""
+        w, _http = _writer(roster=self.FULL)
+        with self.assertRaises(PreflightError) as caught:
+            w.add_drop(add=50, drop=6, waiver=False)
+        self.assertIn("Hurt Guy", str(caught.exception))
+        self.assertIn("frees no active spot", str(caught.exception))
+
     def test_a_player_on_ir_leaves_his_active_spot_free(self):
         """Five players, one of them on IR, in a league with 5 active slots.
 

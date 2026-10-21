@@ -713,6 +713,18 @@ depends on nothing and so cannot see `IR_SLOT`. `espn/write.py`'s preflight
 repeats the check rather than trusting the decision layer: this one reached the
 user as a tap that failed, so the last line of defence has to be at the wire.
 
+**And a paired drop only counts if it vacates an active slot.** Fixing the cap
+alone left the same bug one level down, and the next live run walked straight
+into it: the Chairman's league paired its add with the man already on IR, who
+was the cheapest way out on points *and* the lowest `p_play` on the tie-break,
+so he was the drop of choice by two independent routes. Dropping him frees an IR
+slot; the active count does not move; ESPN refuses add+drop as readily as it
+refused the unpaired add. So `Candidate` carries one slot fact, `on_ir`, and when
+there is no active room the IR occupants come out of the droppable set with a
+stated reason on the card. They stay in it when there *is* room — the exclusion
+is about making room, not about protecting them, and a note explaining an
+absence of room must not be shown where there is room.
+
 **Rejected:** a discount rate converting keeper value into this week's points
 (invented number, changes decisions); a ranked list of the best several swaps
 (the acquisition budget is five to seven for a *week*, and a layer that proposed

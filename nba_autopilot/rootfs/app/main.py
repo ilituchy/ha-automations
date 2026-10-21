@@ -841,14 +841,20 @@ class Autopilot:
             auto_approve=auto,
         )
 
-        verb = "Dropping" if decision.drop is not None else "Adding"
+        # Both names, in that order, because a swap has two halves and a card
+        # headed with only one of them is a prompt the user cannot answer. The
+        # first version read "Dropping <the man coming in>", which named the
+        # right player under the wrong verb.
+        swap = decision.add.name
+        if decision.drop is not None:
+            swap = "%s for %s" % (decision.add.name, decision.drop.name)
         title = "%s: %s %s%s" % (
             lg.name,
             "add/drop" if auto else "approve add/drop?",
-            decision.add.name,
+            swap,
             " [shadow]" if self.cfg.shadow_mode else "",
         )
-        log.info("%s %s: %s", verb, decision.add.name, decision.rationale)
+        log.info("add/drop %s: %s", swap, decision.rationale)
 
         if not auto:
             # The one class of move that asks. The buttons carry the verb; the

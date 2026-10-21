@@ -192,6 +192,11 @@ class Candidate:
     #: True when acquiring him needs a waiver claim rather than an instant add.
     #: A property of the player, never of the league (ADR-017).
     waiver: bool = False
+    #: True when he currently sits in an IR slot. The one slot fact this type
+    #: carries, and it is here because dropping him frees an IR slot rather
+    #: than an active one -- so on a roster whose active slots are all taken,
+    #: he is not a way to make room for a healthy pickup.
+    on_ir: bool = False
 
     @property
     def startable_games(self) -> float:
@@ -488,6 +493,7 @@ def plan_addrop(
             games=len(days),
             p_play=p_play,
             waiver=e.must_claim_on_waivers,
+            on_ir=int(e.current_slot) == ids.IR_SLOT,
         )
 
     # -- who may go out ----------------------------------------------------
@@ -529,19 +535,31 @@ def plan_addrop(
             continue
         droppable.append(cand)
 
-    if blocked:
-        notes.append("not droppable: %s" % ", ".join(sorted(blocked)))
-
     # Non-IR slots against non-IR occupants: see ``ids.active_roster_cap``. The
     # pair has to be measured the same way on both sides, or a player parked on
     # IR reads as using up a slot he does not occupy.
     roster_cap = ids.active_roster_cap(settings.lineup_slot_counts)
     roster_use = ids.active_roster_use(e.current_slot for e in roster)
     open_spot = roster_use < roster_cap
+
+    # Dropping a man off IR frees an IR slot, not an active one. So when every
+    # active slot is taken he is no way to make room for a healthy pickup, and
+    # pairing the add with him would be refused at the wire exactly as the
+    # unpaired add was. He stays droppable when there is already room, because
+    # then the pairing is a choice rather than the thing making the add legal.
+    if not open_spot:
+        for c in droppable:
+            if c.on_ir:
+                blocked.append("%s (on IR, which frees no active spot)" % c.name)
+        droppable = [c for c in droppable if not c.on_ir]
+
+    if blocked:
+        notes.append("not droppable: %s" % ", ".join(sorted(blocked)))
+
     if not droppable and not open_spot:
         notes.append(
-            "roster is full (%d/%d active spots) and nobody is droppable, so a "
-            "pickup has nowhere to go" % (roster_use, roster_cap)
+            "roster is full (%d/%d active spots) and nobody holding one is "
+            "droppable, so a pickup has nowhere to go" % (roster_use, roster_cap)
         )
         return nothing()
 

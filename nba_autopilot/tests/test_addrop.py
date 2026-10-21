@@ -610,6 +610,40 @@ class TestIrIsNotRoom(unittest.TestCase):
         self.assertIsNotNone(plan.drop)
         self.assertNotEqual(plan.reason, addrop.REASON_OPEN)
 
+    def test_the_paired_drop_is_not_the_man_already_on_ir(self):
+        """The same bug one level down, and it survived the first fix.
+
+        Dropping someone off IR frees an *IR* slot: the active count does not
+        move, so ESPN refuses add+drop exactly as it refused the unpaired add.
+        Hurt is also the drop this fixture would otherwise choose -- he is the
+        cheapest way out on points and the lowest ``p_play`` on the tie-break
+        -- so "a drop was paired" is not enough to assert.
+        """
+        plan = self.chairmans().run()
+        self.assertIsNotNone(plan.drop)
+        self.assertNotEqual(plan.drop.name, "Hurt")
+        self.assertIn(
+            "Hurt (on IR, which frees no active spot)", " ".join(plan.notes)
+        )
+
+    def test_a_man_on_ir_is_not_reported_as_blocked_when_there_is_real_room(self):
+        """The exclusion is about making room, not about protecting him.
+
+        The same roster with one more bench slot. Nothing has to go out now, so
+        the plan is the unpaired add -- an open spot beats every swap on
+        ``_pair_key`` by construction, because nobody leaves. What has to be
+        true is that he is no longer *reported* as undroppable: that note
+        explains an absence of room, and claiming it where there is room would
+        be telling the user a reason that did not apply.
+        """
+        case = self.chairmans()
+        case.settings = settings(lineup_slot_counts={11: 10, 12: 4, 13: 3})
+        plan = case.run()
+        self.assertTrue(plan.proposed)
+        self.assertIsNone(plan.drop)
+        self.assertEqual(plan.reason, addrop.REASON_OPEN)
+        self.assertNotIn("on IR", " ".join(plan.notes))
+
     def test_no_active_room_and_nobody_droppable_says_so_in_active_spots(self):
         """And the count it reports is of active spots, not of roster slots.
 

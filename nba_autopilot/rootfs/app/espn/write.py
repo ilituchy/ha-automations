@@ -534,12 +534,31 @@ class EspnWrite:
             # Non-IR slots only: an open IR slot is not somewhere a healthy
             # pickup may go, and ESPN rejects the attempt at the wire. See
             # ``ids.active_roster_cap``.
+            #
+            # A paired drop only helps if it vacates an *active* slot. Dropping
+            # a player off IR frees an IR slot, so add+drop leaves the active
+            # count exactly where it was and ESPN refuses it just as readily as
+            # the unpaired add. The original requirement is explicit that
+            # pickups never happen without room, so either shape arriving here
+            # is a bug upstream rather than something to resolve by picking a
+            # different victim.
             roster_cap = ids.active_roster_cap(settings.lineup_slot_counts)
             roster_use = ids.active_roster_use(p.current_slot for p in current)
-            if drop is None and roster_use >= roster_cap:
+            frees_active = (
+                drop is not None
+                and int(by_id[drop].current_slot) != ids.IR_SLOT
+            )
+            if roster_use + 1 - (1 if frees_active else 0) > roster_cap:
+                if drop is None:
+                    why = "no drop was paired with this add"
+                else:
+                    why = (
+                        "the paired drop (%s) is on IR, which frees no active "
+                        "spot" % by_id[drop].name
+                    )
                 raise PreflightError(
-                    "roster is full (%d/%d active spots) and no drop was "
-                    "paired with this add" % (roster_use, roster_cap)
+                    "roster is full (%d/%d active spots) and %s"
+                    % (roster_use, roster_cap, why)
                 )
             self._check_acquisition_mode(add, waiver)
 
