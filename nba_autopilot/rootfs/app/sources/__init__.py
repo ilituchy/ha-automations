@@ -5,9 +5,14 @@ Every source exposes ``name``, ``max_staleness`` and ``fetch() -> SourceResult
 returns ``None`` and logs; it never raises into the pipeline. Its absence must
 be visible in the run record, never silently defaulted.
 
-Live-verification status as of 2026-10-20 (details in each module's docstring):
+Live-verification status as of 2026-10-20, except ``espn_injuries`` which was
+verified 2026-10-21 (details in each module's docstring):
 
 * ``nba_schedule`` -- OK. ESPN site API scoreboard, 200. Primary.
+* ``espn_injuries``-- OK. ESPN's injuries page, 200, ~900 KB, unauthenticated.
+  Structured status plus the beat reporter's own sentence, which is what
+  separates "probable" from "already ruled out" inside ESPN's single
+  ``Day-To-Day`` bucket.
 * ``sleeper``      -- OK. 200, ~2.5 MB, unauthenticated. Real ``GTD`` tier.
 * ``injury_report``-- Host reachable; today's report not yet published (403 =
   clean probe signal). Parser validated against real historical PDFs.
@@ -39,6 +44,7 @@ from .base import (
 )
 from .crosswalk import Crosswalk, CrosswalkResult, PlayerLink, normalize_name
 from .darko import Darko, DarkoPlayer, decode_sveltekit_data, decode_sveltekit_payload
+from .espn_injuries import EspnInjuries, InjuryNote, classify_comment
 from .injury_report import InjuryEntry, InjuryReport, normalize_pdf_text
 from .nba_schedule import GameRef, NbaSchedule, detect_back_to_backs
 from .sleeper import Sleeper, SleeperPlayer, normalize_status
@@ -70,6 +76,9 @@ __all__ = [
     "normalize_status",
     "InjuryReport",
     "InjuryEntry",
+    "EspnInjuries",
+    "InjuryNote",
+    "classify_comment",
     "normalize_pdf_text",
     "Crosswalk",
     "CrosswalkResult",

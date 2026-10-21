@@ -19,7 +19,15 @@ import logging
 import signal
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import (
+    Any,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 from zoneinfo import ZoneInfo
 
 import config as appconfig
@@ -31,12 +39,19 @@ from espn.read import EspnAuthError, EspnError, EspnRead, make_client
 from espn.write import EspnWrite
 import ha.bridge as bridge_mod
 from ha.bridge import Action, ActionEvent, HaBridge
+from sources.espn_injuries import EspnInjuries
 from solve import projections as projections_mod
 from solve import value as value_mod
 from solve.calendar import SeasonCalendar
 from state import Store
 
 log = logging.getLogger("autopilot")
+
+#: How long one fetch of ESPN's injuries page is reused. Short because the
+#: page is the late-breaking input -- a player ruled out at 6:40pm for a 7pm
+#: tip is exactly the case this source exists to catch -- and long enough that
+#: every league in a single run cycle shares one request.
+INJURY_NOTE_TTL = timedelta(minutes=15)
 
 #: Distinguishes "not built yet" from "built, and the answer was None". Without
 #: it a failed calendar build would be retried on every league of every run,
@@ -145,6 +160,11 @@ class Autopilot:
         # :meth:`season_calendar`.
         self._calendar: Any = _UNSET
         self._schedule: Optional[Dict[int, Dict[int, int]]] = None
+        # League-independent but *not* season-scoped: injuries move hourly, so
+        # this one carries a TTL rather than living for the process. See
+        # :meth:`injury_notes`.
+        self._injuries: Any = None
+        self._injuries_at: Optional[datetime] = None
 
     def league_for_run(self, run_id: str) -> Optional[League]:
         """Map a stored run back to its league, to execute an approved tap.
@@ -301,6 +321,86 @@ class Autopilot:
                 self._schedule = {}
         return self._schedule
 
+    def injury_notes(self) -> Optional[Any]:
+        """ESPN's injuries page, shared across leagues, refreshed on a TTL.
+
+        Unlike the calendar and the pro schedule this is not season-static --
+        a note can flip two hours before tip -- so caching it for the life of
+        the process would mean a lineup written at 7pm acted on the morning's
+        news. The TTL is short enough that every run inside one cycle shares
+        one fetch and the next cycle gets fresh data.
+
+        Returns the ``SourceResult`` or ``None``; ``None`` is a degraded run,
+        not a failed one, and the caller records it in ``sources_missing``.
+        """
+        now = datetime.now(timezone.utc)
+        if (
+            self._injuries is not None
+            and self._injuries_at is not None
+            and now - self._injuries_at < INJURY_NOTE_TTL
+        ):
+            return self._injuries
+        self._injuries = EspnInjuries().fetch()
+        self._injuries_at = now
+        return self._injuries
+
+    def _availability_overrides(
+        self, roster: Sequence[Any], injuries: Optional[Any]
+    ) -> Tuple[Dict[int, Tuple[str, str]], List[str]]:
+        """Build ``player_id -> (status, label)`` from the injuries page.
+
+        The join is a plain id match: ESPN's fantasy ``playerId`` and its site
+        ``athlete`` id are the same number (verified 2026-10-21 -- Mouhamed
+        Gueye is 4712863 in both the fantasy player list and the injuries
+        page), so this source needs no crosswalk. Players the page could not
+        give an id for fall back to a normalised-name lookup, which is why
+        both indexes are carried in the payload.
+
+        This **reports** disagreement rather than resolving it. ESPN's fantasy
+        ``injuryStatus`` stays the floor -- ``p_play_for`` only honours an
+        override that is *worse* -- so what comes back from here is a note
+        about what the beat reporters said, and the run record keeps both
+        readings.
+        """
+        if injuries is None:
+            return {}, []
+
+        payload = injuries.payload
+        by_id = payload.get("by_athlete_id") or {}
+        by_name = payload.get("by_name") or {}
+        from sources.crosswalk import normalize_name
+
+        overrides: Dict[int, Tuple[str, str]] = {}
+        notes: List[str] = []
+        for entry in roster:
+            note = by_id.get(str(entry.player_id))
+            matched_on = "id"
+            if note is None:
+                note = by_name.get(normalize_name(entry.name))
+                matched_on = "name"
+            if note is None:
+                continue
+
+            label = "espn-injuries" if not note.comment_matched else "espn-beat-report"
+            overrides[entry.player_id] = (note.bucket, label)
+
+            espn_status = entry.availability
+            if note.bucket != espn_status:
+                notes.append(
+                    "%s: ESPN fantasy says %s, injuries page says %s%s"
+                    % (
+                        entry.name,
+                        espn_status,
+                        note.bucket,
+                        " (%r)" % note.comment_phrase if note.comment_phrase else "",
+                    )
+                )
+            if matched_on == "name":
+                log.info(
+                    "espn_injuries: matched %s by name, not id", entry.name
+                )
+        return overrides, notes
+
     def _calendar_for(
         self, settings: Any
     ) -> Tuple[Optional[SeasonCalendar], int, List[str]]:
@@ -360,9 +460,25 @@ class Autopilot:
         if not schedule:
             sources_missing["pro-schedule"] = "unavailable"
 
+        injuries = self.injury_notes()
+        if injuries is None:
+            sources_missing["espn-injuries"] = "unavailable or stale"
+            notes.append(
+                "no injuries page this run: availability falls back to ESPN's "
+                "fantasy status alone"
+            )
+        else:
+            parse = injuries.payload.get("parse") or {}
+            sources_used["espn-injuries"] = "%d notes, %d refined by beat report" % (
+                parse.get("notes", 0),
+                parse.get("refined_by_comment", 0),
+            )
+        overrides, injury_notes = self._availability_overrides(roster, injuries)
+        notes.extend(injury_notes)
+
         splits = lg.read.player_projections([e.player_id for e in roster])
         projections, availability, skipped = projections_mod.build_projections(
-            roster, splits, as_of=datetime.now(timezone.utc)
+            roster, splits, as_of=datetime.now(timezone.utc), statuses=overrides
         )
         if skipped:
             notes.append(

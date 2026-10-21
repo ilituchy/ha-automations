@@ -99,10 +99,17 @@ NBA_SEASON_GAMES: int = 82
 #:
 #: Not 1.0, because a player who is going to miss a game usually carries a
 #: designation on the day, and we would then be counting the same absence twice.
-#: Not 0.0, because our designation feed is thin: ESPN publishes no
-#: QUESTIONABLE tier, DARKO's public snapshot is stale, and the official injury
-#: report 403s until it is published. The durability prior is the hedge against
-#: that thinness.
+#: Not 0.0, because our designation feed is thin: ESPN's fantasy feed publishes
+#: no QUESTIONABLE tier, DARKO's public snapshot is stale, and the official
+#: injury report 403s until it is published. The durability prior is the hedge
+#: against that thinness.
+#:
+#: ``sources/espn_injuries.py`` (2026-10-21) narrowed that gap: it recovers a
+#: real probable/questionable/doubtful split from the beat-report sentence, so
+#: the designation feed is no longer as thin as this weight was chosen for.
+#: The weight is left where it is until there is *measured* evidence to move
+#: it -- it only ever applies to a player with no designation at all, which is
+#: exactly the case the injuries page says nothing about.
 DURABILITY_WEIGHT: float = 0.5
 
 #: Stats to exclude from the production mean. The non-additive set plus the two

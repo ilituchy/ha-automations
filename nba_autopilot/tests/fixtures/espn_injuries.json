@@ -1,0 +1,582 @@
+{
+ "timestamp": "2026-10-21T16:32:48Z",
+ "status": "success",
+ "season": {
+  "year": 2027,
+  "type": 2,
+  "name": "Regular Season",
+  "displayName": "2026-27"
+ },
+ "injuries": [
+  {
+   "id": "1",
+   "displayName": "Atlanta Hawks",
+   "injuries": [
+    {
+     "id": "-58751",
+     "longComment": "Gueye will be re-evaluated by medical staff in 3-to-4 months, which means he'll miss all of training camp and preseason and likely the start of the 2026-27 regular season. It's a brutal blow for the fourth-year big man, given that the Hawks used the No. 23 overall pick of the 2026 NBA Draft to select St. John's product Zuby Ejiofor. Gueye's absence means Ejiofor will have more opportunities in the preseason, and the rookie could establish a key role off the bench behind Onyeka Okongwu and projected backup center Jock Landale (ankle).",
+     "shortComment": "Gueye underwent surgery Tuesday to repair a fractured left foot that he suffered during a workout last week, Brad Rowland of the Locked On Podcast Network reports.",
+     "status": "Out",
+     "date": "2026-10-19T19:38Z",
+     "athlete": {
+      "firstName": "Mouhamed",
+      "lastName": "Gueye",
+      "displayName": "Mouhamed Gueye",
+      "shortName": "M. Gueye",
+      "links": [
+       {
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/_/id/4712863/mouhamed-gueye",
+        "text": "Player Card"
+       },
+       {
+        "rel": [
+         "stats",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/stats/_/id/4712863/mouhamed-gueye",
+        "text": "Stats"
+       }
+      ],
+      "position": {
+       "name": "Forward",
+       "abbreviation": "F"
+      },
+      "team": {
+       "id": "1",
+       "slug": "atlanta-hawks",
+       "abbreviation": "ATL",
+       "displayName": "Atlanta Hawks"
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "4",
+      "name": "INJURY_STATUS_OUT",
+      "description": "out",
+      "abbreviation": "O"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "OUT",
+       "abbreviation": "OUT"
+      },
+      "type": "Foot",
+      "location": "Leg",
+      "detail": "Fracture",
+      "side": "Left",
+      "returnDate": "2026-11-20"
+     }
+    },
+    {
+     "id": "-57577",
+     "longComment": "Veesaar suffered the injury during a workout on Sept. 15, and an MRI confirmed the diagnosis. The No. 52 overall pick in the 2026 NBA Draft, Veesaar was expected to spend a lot of time with Atlanta's G League affiliate this season.",
+     "shortComment": "Veesaar was diagnosed with a torn right ACL and is expected to miss the 2026-27 season, the Hawks announced Monday.",
+     "status": "Out",
+     "date": "2026-09-21T19:50Z",
+     "athlete": {
+      "firstName": "Henri",
+      "lastName": "Veesaar",
+      "displayName": "Henri Veesaar",
+      "shortName": "H. Veesaar",
+      "links": [
+       {
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/_/id/5105571/henri-veesaar",
+        "text": "Player Card"
+       },
+       {
+        "rel": [
+         "stats",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/stats/_/id/5105571/henri-veesaar",
+        "text": "Stats"
+       }
+      ],
+      "position": {
+       "name": "Center",
+       "abbreviation": "C"
+      },
+      "team": {
+       "id": "1",
+       "slug": "atlanta-hawks",
+       "abbreviation": "ATL",
+       "displayName": "Atlanta Hawks"
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "4",
+      "name": "INJURY_STATUS_OUT",
+      "description": "out",
+      "abbreviation": "O"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "OFS",
+       "abbreviation": "OFS"
+      },
+      "type": "Knee",
+      "location": "Leg",
+      "side": "Right",
+      "returnDate": "2027-07-01"
+     }
+    }
+   ]
+  },
+  {
+   "id": "2",
+   "displayName": "Boston Celtics",
+   "injuries": [
+    {
+     "id": "535118",
+     "longComment": "Carter missed Boston's final three preseason games with the illness and is now expected to miss time to begin the regular season. He can be considered week-to-week until Boston provides an update on his progress. The 2024 first-rounder signed a two-way pact with the Celtics on Saturday and will provide backcourt depth for the club.",
+     "shortComment": "Carter has been diagnosed with mononucleosis and is without a timetable for a return, Gary Washburn of The Boston Globe reports.",
+     "status": "Out",
+     "date": "2026-10-18T14:49Z",
+     "athlete": {
+      "firstName": "Devin",
+      "lastName": "Carter",
+      "displayName": "Devin Carter",
+      "shortName": "D. Carter",
+      "links": [
+       {
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/_/id/4433188/devin-carter",
+        "text": "Player Card"
+       },
+       {
+        "rel": [
+         "stats",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/stats/_/id/4433188/devin-carter",
+        "text": "Stats"
+       }
+      ],
+      "position": {
+       "name": "Guard",
+       "abbreviation": "G"
+      },
+      "team": {
+       "id": "2",
+       "slug": "boston-celtics",
+       "abbreviation": "BOS",
+       "displayName": "Boston Celtics"
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "4",
+      "name": "INJURY_STATUS_OUT",
+      "description": "out",
+      "abbreviation": "O"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "OUT",
+       "abbreviation": "OUT"
+      },
+      "type": "Illness",
+      "location": "Other",
+      "returnDate": "2026-11-08"
+     }
+    }
+   ]
+  },
+  {
+   "id": "4",
+   "displayName": "Chicago Bulls",
+   "injuries": [
+    {
+     "id": "535221",
+     "longComment": "This is a new injury for Miller, though it sounds minor. The Bulls have quite a few injuries, so Miller could be in the mix for a rotation spot after a strong showing in the preseason.",
+     "shortComment": "Miller is probable for Wednesday's game against the Raptors with a right adductor strain.",
+     "status": "Day-To-Day",
+     "date": "2026-10-20T18:46Z",
+     "athlete": {
+      "firstName": "Leonard",
+      "lastName": "Miller",
+      "displayName": "Leonard Miller",
+      "shortName": "L. Miller",
+      "links": [
+       {
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/_/id/5044385/leonard-miller",
+        "text": "Player Card"
+       },
+       {
+        "rel": [
+         "stats",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/stats/_/id/5044385/leonard-miller",
+        "text": "Stats"
+       }
+      ],
+      "position": {
+       "name": "Forward",
+       "abbreviation": "F"
+      },
+      "team": {
+       "id": "4",
+       "slug": "chicago-bulls",
+       "abbreviation": "CHI",
+       "displayName": "Chicago Bulls"
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "6",
+      "name": "INJURY_STATUS_DAYTODAY",
+      "description": "day-to-day",
+      "abbreviation": "DD"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "GTD",
+       "abbreviation": "GTD"
+      },
+      "type": "Groin",
+      "location": "Groin",
+      "side": "Right",
+      "returnDate": "2026-10-21"
+     }
+    },
+    {
+     "id": "535219",
+     "longComment": "Swain wasn't expected to travel with the team, but the Bulls are at least leaving the door slightly open for Wednesday. Isaac Okoro (knee) and Patrick Williams should ultimately pick up a few extra minutes off the bench.",
+     "shortComment": "Swain (illness) is officially doubtful for Wednesday's season opener in Toronto.",
+     "status": "Day-To-Day",
+     "date": "2026-10-20T18:43Z",
+     "athlete": {
+      "firstName": "Dailyn",
+      "lastName": "Swain",
+      "displayName": "Dailyn Swain",
+      "shortName": "D. Swain",
+      "links": [
+       {
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/_/id/4848625/dailyn-swain",
+        "text": "Player Card"
+       },
+       {
+        "rel": [
+         "stats",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/stats/_/id/4848625/dailyn-swain",
+        "text": "Stats"
+       }
+      ],
+      "position": {
+       "name": "Guard",
+       "abbreviation": "G"
+      },
+      "team": {
+       "id": "4",
+       "slug": "chicago-bulls",
+       "abbreviation": "CHI",
+       "displayName": "Chicago Bulls"
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "6",
+      "name": "INJURY_STATUS_DAYTODAY",
+      "description": "day-to-day",
+      "abbreviation": "DD"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "GTD",
+       "abbreviation": "GTD"
+      },
+      "type": "Illness",
+      "location": "Other",
+      "returnDate": "2026-10-21"
+     }
+    },
+    {
+     "id": "-58856",
+     "longComment": "Hawkins is day-to-day but will not travel with the team ahead of Opening Night. The guard is on a two-way contract and is not projected to be in the rotation early on.",
+     "shortComment": "Hawkins (illness) is out for Wednesday's game against the Raptors, K.C. Johnson of Chicago Sports Network reports.",
+     "status": "Day-To-Day",
+     "date": "2026-10-20T18:33Z",
+     "athlete": {
+      "firstName": "Jordan",
+      "lastName": "Hawkins",
+      "displayName": "Jordan Hawkins",
+      "shortName": "J. Hawkins",
+      "links": [
+       {
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/_/id/4683750/jordan-hawkins",
+        "text": "Player Card"
+       },
+       {
+        "rel": [
+         "stats",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/stats/_/id/4683750/jordan-hawkins",
+        "text": "Stats"
+       }
+      ],
+      "position": {
+       "name": "Guard",
+       "abbreviation": "G"
+      },
+      "team": {
+       "id": "4",
+       "slug": "chicago-bulls",
+       "abbreviation": "CHI",
+       "displayName": "Chicago Bulls"
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "6",
+      "name": "INJURY_STATUS_DAYTODAY",
+      "description": "day-to-day",
+      "abbreviation": "DD"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "GTD",
+       "abbreviation": "GTD"
+      },
+      "type": "Illness",
+      "location": "Other",
+      "returnDate": "2026-10-21"
+     }
+    }
+   ]
+  },
+  {
+   "id": "5",
+   "displayName": "Cleveland Cavaliers",
+   "injuries": [
+    {
+     "id": "535205",
+     "longComment": "It sounds like Merrill is progressing well from an elbow injury. The Cavaliers are likely to release their first injury report Wednesday, and Merrill can be tentatively deemed questionable for Thursday's season opener against the Heat in the meantime.",
+     "shortComment": "Head coach Kenny Atkinson said Tuesday that Merrill (elbow) went through a full practice, per Danny Cunningham of Sports Radio 92.3 The Fan Cleveland.",
+     "status": "Day-To-Day",
+     "date": "2026-10-20T17:39Z",
+     "athlete": {
+      "firstName": "Sam",
+      "lastName": "Merrill",
+      "displayName": "Sam Merrill",
+      "shortName": "S. Merrill",
+      "links": [
+       {
+        "rel": [
+         "playercard",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/_/id/4066757/sam-merrill",
+        "text": "Player Card"
+       },
+       {
+        "rel": [
+         "stats",
+         "desktop",
+         "athlete"
+        ],
+        "href": "https://www.espn.com/nba/player/stats/_/id/4066757/sam-merrill",
+        "text": "Stats"
+       }
+      ],
+      "position": {
+       "name": "Guard",
+       "abbreviation": "G"
+      },
+      "team": {
+       "id": "5",
+       "slug": "cleveland-cavaliers",
+       "abbreviation": "CLE",
+       "displayName": "Cleveland Cavaliers"
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "6",
+      "name": "INJURY_STATUS_DAYTODAY",
+      "description": "day-to-day",
+      "abbreviation": "DD"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "GTD",
+       "abbreviation": "GTD"
+      },
+      "type": "Elbow",
+      "location": "Arm",
+      "detail": "Soreness",
+      "side": "Right",
+      "returnDate": "2026-10-22"
+     }
+    }
+   ]
+  },
+  {
+   "id": "13",
+   "displayName": "Los Angeles Lakers",
+   "injuries": [
+    {
+     "id": "535289",
+     "longComment": "Sexton did not play during the preseason due to a right soleus strain, but he was able to get through the Lakers' past two practices, so he's trending in the right direction. He'll likely have some minutes restrictions if he's cleared to play.",
+     "shortComment": "Sexton (calf) is questionable for Wednesday's regular-season opener against the Warriors.",
+     "status": "Day-To-Day",
+     "date": "2026-10-21T00:06Z",
+     "athlete": {
+      "firstName": "Collin",
+      "lastName": "Sexton",
+      "displayName": "Collin Sexton",
+      "shortName": "C. Sexton",
+      "links": [],
+      "position": {
+       "name": "Guard",
+       "abbreviation": "G"
+      },
+      "team": {
+       "id": "13",
+       "slug": "los-angeles-lakers",
+       "abbreviation": "LAL",
+       "displayName": "Los Angeles Lakers"
+      },
+      "status": {
+       "id": "1",
+       "name": "Active",
+       "type": "active",
+       "abbreviation": "Active"
+      }
+     },
+     "source": {
+      "id": "1",
+      "description": "basic/manual",
+      "state": "basic"
+     },
+     "type": {
+      "id": "6",
+      "name": "INJURY_STATUS_DAYTODAY",
+      "description": "day-to-day",
+      "abbreviation": "DD"
+     },
+     "details": {
+      "fantasyStatus": {
+       "description": "GTD",
+       "abbreviation": "GTD"
+      },
+      "type": "Calf",
+      "location": "Leg",
+      "side": "Right",
+      "returnDate": "2026-10-21"
+     }
+    }
+   ]
+  }
+ ]
+}

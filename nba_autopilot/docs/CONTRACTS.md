@@ -214,6 +214,12 @@ Required sources:
   real `GTD` tier that ESPN's feed does not emit.
 - `sources/injury_report.py` — official NBA injury report PDF from
   `ak-static.cms.nba.com`. `403` = not yet published (clean probe), `200` = parse.
+- `sources/espn_injuries.py` — ESPN's injuries page. Its structured `status`
+  carries only `Out` and `Day-To-Day`, so the per-game verdict is read from the
+  attributed beat-report sentence ESPN bundles alongside it, and a comment may
+  only refine a note **up to the ceiling that status allows** — nothing on this
+  page can be promoted to `ACTIVE`. Carries no cookies: it builds its own
+  client so the fantasy session physically cannot reach a public endpoint.
 - `sources/nba_schedule.py` — game dates, tipoff times, back-to-backs, pace.
   **`stats.nba.com` and `cdn.nba.com` are blocked from cloud egress** but fine
   from a residential IP; still, prefer ESPN's site API as primary.

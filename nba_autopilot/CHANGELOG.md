@@ -8,6 +8,53 @@ All notable changes to this app are documented here. The format follows
 
 ### Added
 
+- **Availability now reads the beat reports, not just the status field.**
+  `sources/espn_injuries.py` fetches ESPN's NBA injuries page and uses it in
+  two tiers. Tier 1 is the structured `status`, which turns out to have only
+  two values in practice — `Out` and `Day-To-Day` — and that second bucket was
+  hiding the whole decision: on the live page it covered players listed
+  probable, questionable, doubtful, *and* players already ruled out for that
+  night. Treating them alike means a `p_play` of 0.75 for a man who will not
+  play. Tier 2 recovers the distinction from `shortComment`, which is the beat
+  reporter's own attributed, timestamped sentence that ESPN bundles into the
+  feed ("Hawkins (illness) is out for Wednesday's game against the Raptors,
+  K.C. Johnson of Chicago Sports Network reports"). No scraping and no
+  language model: the wording is already structured enough for a regex, and
+  every refinement records the phrase it matched so it can be audited in the
+  run notes. Measured against the 80 live notes on 2026-10-21 it refined 25 of
+  28 `Day-To-Day` entries. The three it did not — practice updates carrying no
+  game-level verdict — fall back to the coarse status rather than guess.
+- A **ceiling rule** on that refinement: a comment may only improve a note up
+  to what its structured status allows (`Day-To-Day` tops out at `PROBABLE`,
+  `Out` at `OUT`). Being on the injuries page at all means ESPN does not
+  consider the player cleared, so no amount of optimistic wording can promote
+  a note to `ACTIVE`, and a comment reading "probable" beside a structured
+  `Out` is a mixed or stale note rather than permission to start someone.
+  Clamps are recorded on the note instead of applied silently.
+- The join needs **no crosswalk**: ESPN's fantasy `playerId` and its site
+  `athlete` id are the same number (verified 2026-10-21 — Mouhamed Gueye is
+  4712863 in both the fantasy player list and the injuries page). Players
+  whose links carry no id fall back to a normalised-name lookup and are listed
+  explicitly, per the contract's unmatched-list rule, rather than dropped.
+- The source **holds no cookies**. It builds its own client rather than
+  accepting the shared one, which is a deliberate inversion of this package's
+  convention: the fantasy session cookies live in the same process, and making
+  it impossible to hand them in is the only way to guarantee `espn_s2`/`SWID`
+  never reach a public endpoint.
+- `run_league` reports the page in `sources_used`/`sources_missing` and writes
+  every disagreement between ESPN's fantasy `injuryStatus` and the injuries
+  page into the run notes. It **reports** the disagreement rather than
+  resolving it: `p_play_for` still honours an override only when it is *worse*
+  than ESPN's reading, so a stale note can bench a player but never start one.
+  The page is cached for 15 minutes — long enough for every league in a cycle
+  to share one fetch, short enough that a 6:40pm scratch still lands before a
+  7pm tip.
+- `tests/fixtures/espn_injuries.json`, eight real notes trimmed from that live
+  page, so these tests fail when ESPN's feed changes rather than when an
+  invented example stops parsing. The fetch tests pin `base.utcnow`, because
+  staleness is measured against the wall clock and an unpinned fixture would
+  pass today and start failing on its own in a couple of days.
+
 - **The ingress status page actually exists**, in the sidebar, listing every
   proposal waiting on a decision with its rationale next to an Approve and a
   Reject button, plus the last eight runs and their notes. A notification is a
