@@ -43,11 +43,19 @@ options:
   # being careful about because the wrong season does not error -- ESPN serves
   # a finished season happily, with final standings, which looks like a
   # plausible late-season state rather than like a mistake.
+  #
+  # `keeper` says this league keeps players between seasons. It is asked here
+  # rather than read from ESPN because ESPN's own keeper flag describes a draft
+  # mechanic and reads the same in a dynasty league as in a redraft one -- only
+  # you know which roster you are building for next year. It changes one
+  # decision: in a keeper league a player out for the season is an asset worth
+  # holding, and in a redraft league he is a free roster spot.
   leagues:
     - league_id: 0
       team_id: 0
       label: ""
       season: 0
+      keeper: false
   espn_s2: null
   espn_swid: null
   ha_notify_device: mobile_app_iphone
@@ -61,6 +69,20 @@ options:
   autonomy_add_drop: false
   never_drop: []
   max_faab_bid: 0
+  # How much better per game a pickup has to be than the player going out
+  # before a swap is made on quality alone, in percent. 12 is the middle of
+  # the 10-15% range; lower proposes more moves, higher proposes fewer.
+  #
+  # This gate is about quality only. It never blocks a pickup who simply has
+  # more games left this week than the man he replaces -- those are free
+  # points, and they are decided by `addrop_churn_floor` instead.
+  addrop_margin_pct: 12
+  # The smallest projected gain, in fantasy points, worth making a permanent
+  # move for. Every roster has some swap available that gains a fraction of a
+  # point; taking all of them spends a whole week's acquisitions on noise.
+  # Waived automatically when the move would by itself erase the deficit in
+  # the current matchup.
+  addrop_churn_floor: 3
   shadow_mode: true
   log_level: info
 
@@ -70,6 +92,7 @@ schema:
       team_id: int(1,)
       label: str?
       season: int(0,2100)?
+      keeper: bool?
   espn_s2: password
   espn_swid: password
   ha_notify_device: str
@@ -84,5 +107,7 @@ schema:
   never_drop:
     - str
   max_faab_bid: int(0,1000)
+  addrop_margin_pct: float(0,100)
+  addrop_churn_floor: float(0,500)
   shadow_mode: bool
   log_level: list(trace|debug|info|notice|warning|error|fatal)

@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from espn import ids
 from espn.read import EspnConfig
+from solve import addrop
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +54,20 @@ class LeagueRef:
     #: leagues can also legitimately diverge -- a keeper league rolled over on
     #: a different date is enough.
     season: int = 0
+    #: Whether this league keeps players between seasons.
+    #:
+    #: Not read from ESPN. ``isKeeperLeague`` describes a draft mechanic and
+    #: both live leagues report the same value for it, so it does not tell the
+    #: two apart -- only the user knows which roster he is building for next
+    #: year. It changes exactly one decision, in ``solve/addrop.py``: whether a
+    #: player who is out for the season is a free drop or an asset with value
+    #: past this week that we are not in a position to price.
+    #:
+    #: Defaulted to redraft because the two failure modes are not symmetric.
+    #: Treating a keeper league as redraft proposes a drop the user can look at
+    #: and reject; treating a redraft league as keeper quietly protects dead
+    #: weight all season and never says so.
+    keeper: bool = False
 
     def display(self) -> str:
         return self.label or ("league %d" % self.league_id)
@@ -73,6 +88,16 @@ class Config:
     autonomy_add_drop: bool
     never_drop: Sequence[str]
     max_faab_bid: int
+    #: How much better per game a pickup must be than the player going out, in
+    #: percent, to justify a swap on quality alone. An option rather than a
+    #: constant because the requirement was stated as a range -- "10-15%" --
+    #: and the middle of a range is a choice, not a fact.
+    addrop_margin_pct: float
+    #: Minimum points gained before a swap is worth being permanent. Not zero:
+    #: every roster has some positive-gain swap available on any given day, and
+    #: taking all of them spends a five-a-week acquisition budget on rounding
+    #: error. Waived when the move would by itself erase the current deficit.
+    addrop_churn_floor: float
     shadow_mode: bool
     log_level: str
     season: int
@@ -87,6 +112,7 @@ class Config:
             espn_s2=self.espn_s2,
             swid=self.espn_swid,
             season=league.season or self.season,
+            keeper=league.keeper,
         )
 
     def redacted(self) -> Dict[str, Any]:
@@ -102,6 +128,7 @@ class Config:
                 "team_id": l.team_id,
                 "label": l.display(),
                 "season": l.season or self.season,
+                "keeper": l.keeper,
             }
             for l in self.leagues
         ]
@@ -120,6 +147,34 @@ def _normalize_swid(raw: str) -> str:
     if not s.endswith("}"):
         s = s + "}"
     return s
+
+
+#: Accepted spellings for a league-entry boolean, both ways.
+_TRUE = ("1", "true", "yes", "on")
+_FALSE = ("0", "false", "no", "off", "")
+
+
+def _league_bool(where: str, key: str, v: Any) -> bool:
+    """Parse a per-league flag, raising on a spelling we do not recognize.
+
+    Stricter than the top-level option reader, which treats anything it does
+    not recognize as false. That is fine for a flag whose wrong value shows up
+    in the next run's log; it is not fine for ``keeper``, whose wrong value is
+    *silent* -- it protects dead weight all season and never explains itself.
+    A typo should stop the app at startup, where it is findable.
+    """
+    if v is None:
+        return False
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in _TRUE:
+        return True
+    if s in _FALSE:
+        return False
+    raise ConfigError(
+        "%s: %s must be true or false, got %r" % (where, key, v)
+    )
 
 
 def _parse_leagues(opt: Any, req: Any) -> List[LeagueRef]:
@@ -205,6 +260,9 @@ def _parse_leagues(opt: Any, req: Any) -> List[LeagueRef]:
                 team_id=team_id,
                 label=str(entry.get("label") or "").strip(),
                 season=season,
+                keeper=_league_bool(
+                    "leagues[%d]" % i, "keeper", entry.get("keeper")
+                ),
             )
         )
     return out
@@ -241,6 +299,25 @@ def load(path: Optional[str] = None) -> Config:
             return v
         return str(v).strip().lower() in ("1", "true", "yes", "on")
 
+    def as_float(key: str, default: float) -> float:
+        """A non-negative number, or a startup failure naming the option.
+
+        Both add/drop thresholds are *brakes*: a negative margin or a negative
+        floor does not loosen them, it inverts them into a rule that proposes
+        swaps which lose points. Rejecting that at startup is cheaper than
+        discovering it in the activity feed.
+        """
+        v = opt(key)
+        if v is None or v == "":
+            return float(default)
+        try:
+            out = float(v)
+        except (TypeError, ValueError):
+            raise ConfigError("%s must be a number, got %r" % (key, v))
+        if out < 0.0:
+            raise ConfigError("%s must not be negative, got %r" % (key, v))
+        return out
+
     def as_list(v: Any) -> List[str]:
         if v is None:
             return []
@@ -270,6 +347,12 @@ def load(path: Optional[str] = None) -> Config:
         autonomy_add_drop=as_bool(opt("autonomy_add_drop"), False),
         never_drop=tuple(as_list(opt("never_drop", []))),
         max_faab_bid=int(opt("max_faab_bid", 0) or 0),
+        addrop_margin_pct=as_float(
+            "addrop_margin_pct", addrop.DEFAULT_MARGIN_PCT
+        ),
+        addrop_churn_floor=as_float(
+            "addrop_churn_floor", addrop.DEFAULT_CHURN_FLOOR
+        ),
         shadow_mode=as_bool(opt("shadow_mode"), True),
         log_level=str(opt("log_level", "info")).lower(),
         season=int(opt("season", 0) or 0) or ids.season_id(),

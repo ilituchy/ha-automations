@@ -6,22 +6,34 @@ problem. Over-count and the optimizer hoards a budget it has already been given;
 under-count and it overspends a hard cap and arrives at Sunday with players it
 is not allowed to start.
 
-ESPN offers two readings and, as of the live probe, neither is sufficient alone:
+ESPN offers two readings and both are now usable:
 
 * ``cumulativeScore.statBySlot`` under ``mMatchupScore`` is the per-matchup
-  figure the cap is enforced against. It came back ``None`` on **every** matchup
-  row of both leagues, even with individual players already showing a game
-  played. Its shape therefore cannot be trusted until games accumulate, and
-  possibly ESPN only populates it after the period closes.
+  figure the cap is actually enforced against. This module spent its first
+  weeks reporting that it "came back ``None`` on every matchup row of both
+  leagues", and that was wrong -- it was ``EspnRead.games_used`` reading a
+  field named ``score`` when ESPN sends ``value``. The real row is
+  ``{"15": {"statId": 42, "value": 2.0, "limitExceeded": false}}``, which also
+  settles the shape question: **one pooled entry at the team-total pseudo-slot**,
+  matching what ``solve/budget.py`` already assumes, not a figure per lineup
+  slot.
 * ``teams[].valuesByStat["42"]`` is season-to-date team games played. Confirmed
   shape, wrong horizon.
 
-So the weekly number is reconstructed as a difference of two season-to-date
-readings, which means remembering the one taken at the start of the week --
-hence ``gp_snapshots`` in ``state.py``. Both readings are computed on every run,
-logged, and cross-checked; when they disagree the larger wins, because the two
-errors are not symmetric: treating the budget as more spent than it is costs a
-marginal start, and treating it as less spent costs a legal lineup.
+The weekly number can therefore be *read*, and is also still reconstructed as a
+difference of two season-to-date readings -- which means remembering the one
+taken at the start of the week, hence ``gp_snapshots`` in ``state.py``. Both
+readings are computed on every run, logged, and cross-checked; when they
+disagree the larger wins, because the two errors are not symmetric: treating the
+budget as more spent than it is costs a marginal start, and treating it as less
+spent costs a legal lineup.
+
+Keeping the reconstruction after the direct reading started working is not
+redundancy for its own sake. The two agreed exactly on 2026-10-21 (1 and 1, 4
+and 4) -- but that was matchup period 1, where season-to-date and
+matchup-to-date are the same number by construction, so the agreement carried
+no information. The first informative comparison is the opening day of matchup
+period 2, and the cross-check is what will report it.
 
 Nothing here decides anything. It returns a measurement plus how much to
 believe it, and ``main.py`` is what declines to act on a bad one.
@@ -91,25 +103,56 @@ class _Snapshots(Protocol):
 
 
 def starts_from_stat_by_slot(by_slot: Mapping[int, int]) -> Optional[int]:
-    """Sum ``statBySlot`` over the *starting* slots only.
+    """Read this matchup period's games used out of ``statBySlot``.
 
-    Bench and IR are excluded because a benched player's game does not count
-    against the cap -- including them would inflate usage by the whole bench
-    and, on a 13-bench league, exhaust the budget on day one.
+    ESPN sends **one pooled entry, at the team-total pseudo-slot** -- the same
+    slot ``solve/budget.py`` reads the cap itself from, which is what makes the
+    two numbers comparable. Live, both leagues:
 
-    Returns ``None`` for an empty mapping: "ESPN sent no per-slot data" and
-    "ESPN says zero games" are different claims, and the first must not be
-    allowed to masquerade as the second.
+        {"15": {"statId": 42, "value": 2.0, "limitExceeded": false}}
+
+    So this reads ``ids.TEAM_TOTAL_LIMIT_SLOT`` specifically rather than
+    summing "the starting slots". The sum was the per-slot cap reading that
+    ``budget.py``
+    abandoned, and it only ever agreed with the pooled reading by accident:
+    ``ids.is_starting_slot(15)`` is True because 15 is not bench or IR, so the
+    one real entry fell inside the sum. Any genuine per-slot payload would have
+    been silently added up into a number the cap is not enforced against.
+
+    Other keys are logged and ignored rather than summed in or raised on. A
+    per-slot payload is the shape ``budget.matchup_cap`` refuses outright, but
+    refusing here would take down a run over the *measurement* while the cap
+    itself is still readable; this module's job is to return a number plus how
+    much to believe it and let ``main.py`` decline.
+
+    Returns ``None`` when the pooled entry is absent, including for an empty
+    mapping: "ESPN sent no per-slot data" and "ESPN says zero games" are
+    different claims, and the first must not masquerade as the second.
     """
     if not by_slot:
         return None
-    total = 0
+
+    pooled: Optional[int] = None
+    extra = []
     for slot, value in by_slot.items():
-        if value is None:
-            continue
-        if ids.is_starting_slot(int(slot)):
-            total += int(value)
-    return total
+        if int(slot) == ids.TEAM_TOTAL_LIMIT_SLOT:
+            if value is not None:
+                pooled = int(value)
+        elif value is not None:
+            extra.append((int(slot), int(value)))
+
+    if extra:
+        log.error(
+            "statBySlot carried entries at real lineup slot(s) %s alongside "
+            "%sthe pooled team-total slot %d. That is the per-slot cap shape "
+            "this codebase does not model (see budget.PooledCapUnsupported); "
+            "ignoring them, so games used may be under-read.",
+            ", ".join("%d (%s)=%d" % (s, ids.slot_name(s), v) for s, v in extra),
+            "" if pooled is not None else "no entry at ",
+            ids.TEAM_TOTAL_LIMIT_SLOT,
+        )
+
+    return pooled
 
 
 def measure(

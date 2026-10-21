@@ -375,5 +375,169 @@ class TestAcquisitionMode(unittest.TestCase):
         self.assertEqual(len(http.bodies), 1)
 
 
+# ---------------------------------------------------------------------------
+# read side: the matchup row, probed live on 2026-10-21
+# ---------------------------------------------------------------------------
+
+
+class _PayloadClient:
+    """Serves one fixed payload for every view. Records the views asked for."""
+
+    def __init__(self, payload):
+        self._payload = payload
+        self.views = []
+
+    def get(self, url, params=None, headers=None):
+        # ``params`` is a list of ``(key, value)`` pairs, because ESPN wants
+        # repeated ``view=`` keys rather than one comma-joined value.
+        self.views.append([v for k, v in (params or []) if k == "view"])
+        return _Resp(self._payload)
+
+    def post(self, *a, **k):
+        raise AssertionError("read path must not POST")
+
+
+def _side(team_id, *, points=None, by_period=None, gp=None, gp_field="value"):
+    side = {"teamId": team_id}
+    if points is not None:
+        side["totalPoints"] = points
+    if by_period is not None:
+        side["pointsByScoringPeriod"] = by_period
+    if gp is not None:
+        side["cumulativeScore"] = {
+            "statBySlot": {
+                str(ids.TEAM_TOTAL_LIMIT_SLOT): {
+                    "statId": ids.GP_STAT,
+                    gp_field: gp,
+                    "limitExceeded": False,
+                }
+            }
+        }
+    return side
+
+
+def _score_reader(schedule, *, teams=(), current_matchup=1):
+    cfg = EspnConfig(league_id=1, team_id=7, espn_s2="s2", swid="{X}", season=2027)
+    http = _PayloadClient({
+        "status": {"currentMatchupPeriod": current_matchup},
+        "schedule": schedule,
+        "teams": list(teams),
+    })
+    return EspnRead(cfg, http), http
+
+
+class TestGamesUsedWire(unittest.TestCase):
+    """``statBySlot`` carries ``value``, and ``schedule`` is the whole season.
+
+    Both of these shipped wrong. The field was read as ``score``, so every
+    lookup missed and ``games_used`` returned ``{}`` on every call since it was
+    written; and the season-long ``schedule`` was summed unfiltered, which was
+    invisible only because the first bug kept the loop from ever finding a
+    number to add. Caught by a live probe, not by reading the code -- the code
+    and its own docstring agreed with each other.
+    """
+
+    def test_reads_the_value_field_espn_actually_sends(self):
+        read, _ = _score_reader([
+            {"matchupPeriodId": 1,
+             "home": _side(7, gp=2.0),
+             "away": _side(4)},
+        ])
+        self.assertEqual(read.games_used(), {ids.TEAM_TOTAL_LIMIT_SLOT: 2})
+
+    def test_the_old_score_spelling_still_reads(self):
+        """Kept as a fallback rather than assuming one probe saw every shape."""
+        read, _ = _score_reader([
+            {"matchupPeriodId": 1, "home": _side(7, gp=3.0, gp_field="score")},
+        ])
+        self.assertEqual(read.games_used(), {ids.TEAM_TOTAL_LIMIT_SLOT: 3})
+
+    def test_other_matchup_periods_do_not_count_against_this_week(self):
+        """The failure this would have caused on the first day of week 2: last
+        week's games charged to this week's cap, arriving at Sunday unable to
+        start anyone."""
+        read, _ = _score_reader([
+            {"matchupPeriodId": 1, "home": _side(7, gp=38.0)},
+            {"matchupPeriodId": 2, "home": _side(7, gp=2.0)},
+        ], current_matchup=2)
+        self.assertEqual(read.games_used(), {ids.TEAM_TOTAL_LIMIT_SLOT: 2})
+        self.assertEqual(
+            read.games_used(matchup_period=1),
+            {ids.TEAM_TOTAL_LIMIT_SLOT: 38},
+        )
+
+    def test_an_unscored_row_contributes_nothing_not_zero(self):
+        read, _ = _score_reader([{"matchupPeriodId": 1, "home": _side(7)}])
+        self.assertEqual(read.games_used(), {})
+
+
+class TestMatchupScoreWire(unittest.TestCase):
+    def test_reads_both_sides_and_names_the_opponent(self):
+        read, _ = _score_reader(
+            [{"matchupPeriodId": 1,
+              "home": _side(7, points=110.0),
+              "away": _side(6, points=92.0)}],
+            teams=[{"id": 7, "name": "Us"},
+                   {"id": 6, "name": "Ryan's Remarkable Team"}],
+        )
+        got = read.matchup_score()
+        self.assertEqual(got.my_points, 110.0)
+        self.assertEqual(got.opp_points, 92.0)
+        self.assertEqual(got.opp_team_id, 6)
+        self.assertEqual(got.opp_name, "Ryan's Remarkable Team")
+        self.assertEqual(got.margin, 18.0)
+
+    def test_falls_back_to_the_per_period_breakdown(self):
+        """``totalPoints`` and the sum of ``pointsByScoringPeriod`` agreed on
+        every live row; the sum is for a row ESPN has not totalled yet."""
+        read, _ = _score_reader([
+            {"matchupPeriodId": 1,
+             "home": _side(7, by_period={"1": 20.0, "2": 25.0}),
+             "away": _side(4, by_period={"1": 30.0})},
+        ])
+        got = read.matchup_score()
+        self.assertEqual(got.my_points, 45.0)
+        self.assertEqual(got.opp_points, 30.0)
+
+    def test_a_bye_is_not_a_tie(self):
+        """One-sided row: there is no opponent, and valuing it as 0-0 would
+        make every marginal pickup look like it decides a matchup."""
+        read, _ = _score_reader([
+            {"matchupPeriodId": 1, "home": _side(7, points=50.0)},
+        ])
+        got = read.matchup_score()
+        self.assertIsNone(got.opp_team_id)
+        self.assertEqual(got.opp_points, 0.0)
+
+    def test_no_row_at_all_is_none(self):
+        read, _ = _score_reader([
+            {"matchupPeriodId": 1, "home": _side(3), "away": _side(4)},
+        ])
+        self.assertIsNone(read.matchup_score())
+
+
+class TestAcquisitionsUsedWire(unittest.TestCase):
+    def test_counts_are_keyed_by_matchup_period(self):
+        cfg = EspnConfig(league_id=1, team_id=7, espn_s2="s2", swid="{X}",
+                         season=2027)
+        http = _PayloadClient({"teams": [
+            {"id": 7, "transactionCounter": {
+                "acquisitions": 9,
+                "matchupAcquisitionTotals": {"1": 1, "2": 3},
+            }},
+        ]})
+        self.assertEqual(EspnRead(cfg, http).acquisitions_used(), {1: 1, 2: 3})
+
+    def test_an_empty_counter_means_none_used_not_unknown(self):
+        """Unlike the games-played cap: ESPN maintains this counter for every
+        team unconditionally, so absence is a real zero."""
+        cfg = EspnConfig(league_id=1, team_id=7, espn_s2="s2", swid="{X}",
+                         season=2027)
+        http = _PayloadClient({"teams": [
+            {"id": 7, "transactionCounter": {"matchupAcquisitionTotals": {}}},
+        ]})
+        self.assertEqual(EspnRead(cfg, http).acquisitions_used(), {})
+
+
 if __name__ == "__main__":
     unittest.main()

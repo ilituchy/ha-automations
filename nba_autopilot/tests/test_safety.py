@@ -31,6 +31,7 @@ from ha import bridge  # noqa: E402
 from espn.read import EspnConfig  # noqa: E402
 from espn.write import EspnWrite, PreflightError  # noqa: E402
 from models import LeagueSettings, RosterEntry  # noqa: E402
+from solve import addrop  # noqa: E402
 from state import APPROVED, EXECUTING, PROPOSED, REJECTED, Store  # noqa: E402
 
 PG, SG, SF, PF, C, G, F, UTIL, BE, IR = 0, 1, 2, 3, 4, 5, 6, 11, 12, 13
@@ -570,6 +571,71 @@ class TestLeagueConfig(unittest.TestCase):
         )
         blob = json.dumps(cfg.redacted())
         self.assertIn("2026", blob)
+
+    def test_keeper_is_per_league_and_defaults_to_redraft(self):
+        """The two live leagues differ on exactly this, and ESPN cannot tell
+        them apart -- its own keeper flag describes a draft mechanic and reads
+        the same in both. So the user says, per league."""
+        cfg = self._load(leagues=[
+            {"league_id": 111111111, "team_id": 2},
+            {"league_id": 222222222, "team_id": 7, "keeper": True},
+        ])
+        a, b = (cfg.espn(l) for l in cfg.leagues)
+        self.assertFalse(a.keeper)
+        self.assertTrue(b.keeper)
+
+    def test_an_unrecognized_keeper_spelling_is_refused_not_ignored(self):
+        """Stricter than the top-level options on purpose. A flag read wrong
+        here is silent: it protects dead weight all season and never explains
+        itself, so a typo has to stop the app where it is findable."""
+        for bad in ("maybe", "Y", "2"):
+            with self.assertRaises(appconfig.ConfigError, msg="accepted %r" % bad):
+                self._load(leagues=[
+                    {"league_id": 111111111, "team_id": 2, "keeper": bad}
+                ])
+        # And the spellings a human would reasonably type do work.
+        for good, want in (("yes", True), ("off", False), (True, True)):
+            cfg = self._load(leagues=[
+                {"league_id": 1, "team_id": 2, "keeper": good}
+            ])
+            self.assertEqual(cfg.leagues[0].keeper, want, "for %r" % good)
+
+    def test_which_leagues_are_keepers_reaches_the_log(self):
+        cfg = self._load(leagues=[
+            {"league_id": 111111111, "team_id": 2, "keeper": True},
+        ])
+        self.assertIn("keeper", json.dumps(cfg.redacted()))
+
+    def test_the_addrop_thresholds_default_to_the_modules_own(self):
+        """One default, not two. A config default that drifted from the
+        module's would make the tests and the app disagree about the rule."""
+        cfg = self._load(leagues=[{"league_id": 1, "team_id": 2}])
+        self.assertEqual(cfg.addrop_margin_pct, addrop.DEFAULT_MARGIN_PCT)
+        self.assertEqual(cfg.addrop_churn_floor, addrop.DEFAULT_CHURN_FLOOR)
+
+    def test_the_addrop_thresholds_are_overridable(self):
+        """"10-15%" is a range, so the number is a setting, not a constant."""
+        cfg = self._load(
+            leagues=[{"league_id": 1, "team_id": 2}],
+            addrop_margin_pct=15,
+            addrop_churn_floor=0,
+        )
+        self.assertEqual(cfg.addrop_margin_pct, 15.0)
+        self.assertEqual(cfg.addrop_churn_floor, 0.0)
+
+    def test_a_negative_threshold_is_refused(self):
+        """Both are brakes. A negative one does not loosen the rule, it inverts
+        it into one that proposes swaps which lose points."""
+        for bad in ({"addrop_margin_pct": -1}, {"addrop_churn_floor": -0.5}):
+            with self.assertRaises(appconfig.ConfigError, msg="accepted %r" % bad):
+                self._load(leagues=[{"league_id": 1, "team_id": 2}], **bad)
+
+    def test_a_non_numeric_threshold_is_refused_not_silently_defaulted(self):
+        with self.assertRaises(appconfig.ConfigError):
+            self._load(
+                leagues=[{"league_id": 1, "team_id": 2}],
+                addrop_margin_pct="twelve",
+            )
 
 
 class TestActionIdRoundTrip(unittest.TestCase):

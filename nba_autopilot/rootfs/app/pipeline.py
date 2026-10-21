@@ -122,10 +122,18 @@ def plan_lineup(
     by_id = {e.player_id: e for e in roster}
 
     model = value_mod.build_value_model(settings)
-    # No matchup score is available: ``cumulativeScore.statBySlot`` is null on
-    # every live matchup row, so the risk term has no margin to be signed by and
-    # is left inert. That is the documented default early in a matchup anyway.
-    notes.append("risk term inert: no matchup score available from ESPN")
+    # The risk term is left inert deliberately, and not for lack of a score:
+    # ``read.matchup_score`` does return one, and ``main.run_league`` reads it
+    # every run for the add/drop layer. What is missing is the *projected*
+    # final -- ESPN publishes no ``totalProjectedPointsLive`` for basketball on
+    # either side of a live row -- so an accumulated margin is not evidence of
+    # where the week is heading, and signing the risk term by it would make
+    # today's lineup chase a lead that may not exist. Changing this changes
+    # live lineup writes, so it is a separate decision from reading the number.
+    notes.append(
+        "risk term inert: ESPN publishes no projected final for basketball, "
+        "so the accumulated margin is not a lead to protect or chase"
+    )
 
     plays_today = {
         pid: bool((schedule.get(int(e.pro_team_id)) or {}).get(int(scoring_period)))

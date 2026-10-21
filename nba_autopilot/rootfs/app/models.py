@@ -218,6 +218,36 @@ class LeagueSettings:
     current_scoring_period: int
     current_matchup_period: int
     matchup_period_boundaries: Mapping[int, "MatchupWindow"]
+    #: ``acquisitionSettings.matchupAcquisitionLimit``, raw and un-rounded.
+    #: ``None`` means unlimited -- which is also what ESPN's separate
+    #: season-long ``acquisitionLimit`` field spells as ``-1``, on both
+    #: observed leagues.
+    #:
+    #: Stored raw for the same reason :class:`StatLimit` is: the value is
+    #: fractional and per *scoring* period, and the conversion to a per-matchup
+    #: integer is an interpretation rather than a reading. Observed live
+    #: 2026-10-21 -- ``0.7142857142857143`` (= 5/7) and ``1.0`` (= 7/7), both
+    #: alongside ``matchupLimitPerScoringPeriod: true``.
+    #:
+    #: Defaulted rather than required because this field was added after the
+    #: type was in use, and a league whose settings predate the parse change is
+    #: better off *uncapped* here than falsely capped: an unlimited reading
+    #: wastes a rejected tap at worst, while a spurious cap of zero would
+    #: silently switch acquisitions off altogether.
+    acquisition_limit: Optional[float] = None
+    #: ``acquisitionSettings.matchupLimitPerScoringPeriod``. True on both
+    #: observed leagues, and what makes
+    #: ``solve.addrop.acquisitions_per_matchup`` multiply the limit back up
+    #: rather than take it at face value.
+    acquisition_limit_per_scoring_period: bool = False
+    #: Per-league keeper/dynasty flag, from the app's own configuration rather
+    #: than from ESPN -- ESPN's ``isKeeperLeague`` describes a draft mechanic
+    #: and both observed leagues report the same value for it, so it does not
+    #: distinguish the two. It is carried here because it changes exactly one
+    #: decision, in ``solve/addrop.py``: whether a player who is out for the
+    #: season is a free drop (redraft) or an asset with value past this week
+    #: that we are not in a position to price (keeper).
+    keeper: bool = False
 
     @property
     def is_categories(self) -> bool:
@@ -236,6 +266,42 @@ class LeagueSettings:
     @property
     def uses_faab(self) -> bool:
         return self.faab_budget is not None
+
+
+@dataclass(frozen=True)
+class MatchupScore:
+    """This week's head-to-head score as ESPN has it *so far*.
+
+    Accumulated, not projected. ESPN publishes no projected total for
+    basketball -- there is no ``totalProjectedPointsLive`` on either side of a
+    live row -- so anything forward-looking has to be built by projecting both
+    rosters, and this type deliberately holds only the part that was read.
+
+    ``opp_team_id`` is ``Optional`` because a bye week has a row with one side.
+    A bye is not a 0-0 tie and must not be valued like one.
+    """
+
+    matchup_period: int
+    my_team_id: int
+    my_points: float
+    opp_team_id: Optional[int]
+    opp_name: str
+    opp_points: float
+
+    @property
+    def margin(self) -> float:
+        """Ours minus theirs. Positive means we are ahead."""
+        return self.my_points - self.opp_points
+
+    def describe(self) -> str:
+        if self.opp_team_id is None:
+            return "matchup period %d: %.0f points, no opponent (bye)" % (
+                self.matchup_period, self.my_points,
+            )
+        return "matchup period %d: %.0f-%.0f vs %s (%+.0f)" % (
+            self.matchup_period, self.my_points, self.opp_points,
+            self.opp_name or "team %d" % self.opp_team_id, self.margin,
+        )
 
 
 @dataclass(frozen=True)

@@ -40,6 +40,7 @@ from espn.write import EspnWrite
 import ha.bridge as bridge_mod
 from ha.bridge import Action, ActionEvent, HaBridge
 from sources.espn_injuries import EspnInjuries
+from solve import addrop as addrop_mod
 from solve import projections as projections_mod
 from solve import value as value_mod
 from solve.calendar import SeasonCalendar
@@ -434,6 +435,144 @@ class Autopilot:
         notes.append(cal.describe(matchup))
         return cal, matchup, notes
 
+    def _consider_addrop(
+        self,
+        lg: "League",
+        settings: Any,
+        roster: Any,
+        projections: Mapping[Any, Any],
+        plan: "pipeline.LineupPlan",
+        *,
+        cal: Optional[SeasonCalendar],
+        matchup_period: int,
+        schedule: Mapping[int, Mapping[int, int]],
+    ) -> Tuple[Optional["addrop_mod.AddDropPlan"], List[str]]:
+        """Price the pool and decide at most one swap. Reads only.
+
+        Every read here is wrapped, because none of them is worth a run. The
+        lineup has already been computed and written by the time this is called
+        -- the valuable, time-critical half of the run is done -- so a pool
+        fetch that fails must degrade to "no add/drop this run" and nothing
+        else. That ordering is the reason this is a separate method rather than
+        part of ``plan_lineup``.
+        """
+        notes: List[str] = []
+        if not settings.is_points:
+            # The gain is measured in points, and in a category league there is
+            # no such number. Declining is honest; converting category value
+            # into a points-looking float would not be.
+            notes.append(
+                "add/drop not considered: this is a %s league and the swap "
+                "arithmetic is in points" % settings.scoring_type
+            )
+            return None, notes
+
+        horizon = (
+            cal.remaining_periods(matchup_period, settings.current_scoring_period)
+            if cal is not None and cal.trustworthy
+            else []
+        )
+        if not horizon:
+            notes.append(
+                "add/drop not considered: no trustworthy horizon for matchup "
+                "period %d, so a pickup's games cannot be counted"
+                % matchup_period
+            )
+            return None, notes
+
+        try:
+            pool = lg.read.free_agents()
+        except Exception as exc:  # noqa: BLE001 - the lineup is already applied
+            log.error("could not read the free-agent pool: %s", exc)
+            notes.append("add/drop not considered: pool read failed (%s)" % exc)
+            return None, notes
+
+        model = value_mod.build_value_model(settings)
+        values = dict(plan.values)
+        pool_projections: Dict[Any, Any] = {}
+        if pool:
+            try:
+                splits = lg.read.player_projections([e.player_id for e in pool])
+            except Exception as exc:  # noqa: BLE001
+                log.error("could not project the free-agent pool: %s", exc)
+                notes.append(
+                    "add/drop not considered: pool projections failed (%s)" % exc
+                )
+                return None, notes
+            pool_projections, _pool_avail, unprojected = (
+                projections_mod.build_projections(
+                    pool, splits, as_of=datetime.now(timezone.utc)
+                )
+            )
+            for pid, proj in pool_projections.items():
+                values[pid] = float(model.conditional_value(proj))
+            if unprojected:
+                # Left at zero value rather than dropped, so they are
+                # unproposable instead of invisible -- the same convention the
+                # roster side uses.
+                notes.append(
+                    "%d of %d pool players have no usable projection and are "
+                    "valued at zero" % (len(unprojected), len(pool))
+                )
+
+        # Our own players need to be in ``projections`` too: the drop side is
+        # priced with exactly the same arithmetic as the add side.
+        everyone = dict(pool_projections)
+        everyone.update(projections)
+
+        matchup = None
+        try:
+            matchup = lg.read.matchup_score(matchup_period=matchup_period)
+        except Exception as exc:  # noqa: BLE001
+            log.error("could not read the matchup score: %s", exc)
+            notes.append("matchup score unavailable (%s)" % exc)
+        if matchup is None:
+            # A bye, or the preseason. Not an error, and specifically not a
+            # 0-0 tie -- see ``read.matchup_score``.
+            notes.append("no matchup row this period, so the score cannot "
+                         "waive the churn floor")
+
+        used: Optional[Mapping[int, int]] = None
+        try:
+            used = lg.read.acquisitions_used()
+        except Exception as exc:  # noqa: BLE001
+            log.error("could not read the acquisition counter: %s", exc)
+            notes.append("acquisition counter unavailable (%s)" % exc)
+
+        decision = addrop_mod.plan_addrop(
+            settings,
+            roster,
+            pool,
+            values,
+            everyone,
+            scoring_period=settings.current_scoring_period,
+            matchup_period=matchup_period,
+            horizon=horizon,
+            schedule=schedule,
+            lam=plan.lam,
+            # The lineup we are about to have in place, not the one ESPN had
+            # when the run started. A player the optimizer just started may
+            # already be tipping off, and a drop that empties a started slot
+            # cannot be undone.
+            starters=[
+                pid for pid, slot in plan.target.items()
+                if ids.is_starting_slot(int(slot))
+            ],
+            matchup=matchup,
+            acquisitions_used=used,
+            never_drop=self.cfg.never_drop,
+            margin_pct=self.cfg.addrop_margin_pct,
+            churn_floor=self.cfg.addrop_churn_floor,
+        )
+        notes.extend(decision.notes)
+        if decision.acquisitions_left is not None:
+            notes.append(
+                "%d acquisition(s) left in matchup period %d"
+                % (decision.acquisitions_left, matchup_period)
+            )
+        log.info("add/drop: %s", decision.describe())
+        return decision, notes
+
     def run_league(self, lg: "League") -> str:
         run_id = _ulid()
         settings = lg.read.league_settings()
@@ -566,6 +705,18 @@ class Autopilot:
             log.info("lineup already optimal; nothing to do")
             notes.append("no change needed")
 
+        # Deliberately after the lineup write. The lineup is the reversible,
+        # time-critical half; add/drop is the permanent half and needs several
+        # more ESPN reads. Doing it second means a pool fetch that hangs or
+        # fails costs the run nothing it had already earned.
+        decision, addrop_notes = self._consider_addrop(
+            lg, settings, roster, projections, plan,
+            cal=cal, matchup_period=matchup_period, schedule=schedule,
+        )
+        notes.extend(addrop_notes)
+        if decision is not None and decision.proposed:
+            self._offer_addrop(run_id, lg, decision, matchup_period)
+
         self._finish(run_id, sources_used, sources_missing, shadow_prices,
                      coefficients, notes)
         return run_id
@@ -651,6 +802,115 @@ class Autopilot:
             )
         except Exception as exc:  # noqa: BLE001 - a failed push is not a failed run
             log.error("could not deliver lineup notification: %s", exc)
+
+    def _offer_addrop(
+        self,
+        run_id: str,
+        lg: "League",
+        decision: "addrop_mod.AddDropPlan",
+        matchup_period: int,
+    ) -> None:
+        """Journal the swap and ask, or -- under autonomy -- journal and do it.
+
+        The payload carries both ids *and* both names. The ids are what the
+        write path needs; the names are what the approval card and the
+        notification show, and re-reading them at approval time would mean a
+        second ESPN round trip to answer a question we already knew the answer
+        to when we decided.
+
+        ``bid`` is always ``None``. A FAAB league never reaches here --
+        ``plan_addrop`` declines rather than bidding zero -- so there is no bid
+        to carry, and writing ``0`` would look like a deliberate minimum bid to
+        anyone reading the row later.
+        """
+        payload: Dict[str, Any] = {
+            "add": int(decision.add.player_id),
+            "add_name": decision.add.name,
+            "drop": int(decision.drop.player_id) if decision.drop else None,
+            "drop_name": decision.drop.name if decision.drop else None,
+            "bid": None,
+            "waiver": bool(decision.add.waiver),
+            "matchup_period": int(matchup_period),
+            "reason": decision.reason,
+        }
+        auto = bool(self.cfg.autonomy_add_drop)
+        proposal = self.store.propose(
+            run_id, "ADD_DROP", payload,
+            rationale=decision.rationale,
+            value_delta=decision.gain,
+            auto_approve=auto,
+        )
+
+        verb = "Dropping" if decision.drop is not None else "Adding"
+        title = "%s: %s %s%s" % (
+            lg.name,
+            "add/drop" if auto else "approve add/drop?",
+            decision.add.name,
+            " [shadow]" if self.cfg.shadow_mode else "",
+        )
+        log.info("%s %s: %s", verb, decision.add.name, decision.rationale)
+
+        if not auto:
+            # The one class of move that asks. The buttons carry the verb; the
+            # proposal id does not -- see ``ha.bridge.item_action_id``.
+            try:
+                self.ha.notify(
+                    title=title,
+                    message=decision.rationale,
+                    tag="autopilot-addrop-%d" % lg.ref.league_id,
+                    actions=(
+                        Action(
+                            action_id=bridge_mod.item_action_id(
+                                proposal.action_id, bridge_mod.APPROVE
+                            ),
+                            title="Approve",
+                        ),
+                        Action(
+                            action_id=bridge_mod.item_action_id(
+                                proposal.action_id, bridge_mod.REJECT
+                            ),
+                            title="Reject",
+                            destructive=True,
+                        ),
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 - the row is the record
+                log.error("could not deliver add/drop notification: %s", exc)
+                # Not fatal and not retried. The proposal is in the database and
+                # the status page lists it, so the move is still approvable by
+                # the surface that does not depend on push delivery.
+            return
+
+        # Autonomy. The claim is still taken, so a later tap on a stale
+        # notification cannot execute the same swap twice.
+        if not self.store.claim_for_execution(proposal.id):
+            log.warning("add/drop proposal %s already claimed",
+                        proposal.action_id)
+            return
+        try:
+            result = lg.write.add_drop(
+                add=payload["add"],
+                drop=payload["drop"],
+                bid=None,
+                waiver=payload["waiver"],
+            )
+            self.store.complete(proposal.id, bool(result and result.ok))
+        except Exception as exc:  # noqa: BLE001 - one league must not kill the rest
+            log.exception("add/drop write failed for %s", lg.name)
+            self.store.complete(proposal.id, False, str(exc))
+            self._notify_problem("Autopilot: add/drop failed",
+                                 "%s: %s" % (lg.name, str(exc)[:400]))
+            return
+        try:
+            self.ha.notify(
+                title=title,
+                message=decision.rationale,
+                tag="autopilot-addrop-%d" % lg.ref.league_id,
+                actions=(),
+                time_sensitive=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error("could not deliver add/drop notification: %s", exc)
 
     # -- approval loop -----------------------------------------------------
 

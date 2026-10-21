@@ -26,7 +26,7 @@ what it *would* have done without touching your ESPN team.
 | `espn_swid` | yes | — | Session cookie, see below |
 | `ha_notify_device` | yes | — | e.g. `mobile_app_ians_iphone` |
 | `ha_owner_user_id` | yes | — | Authorizes approval taps |
-| `ha_todo_entity` | no | `todo.fantasy_autopilot` | Where manual tasks are filed |
+| `ha_todo_entity` | no | `todo.fantasy_autopilot` | Reserved; nothing is filed here yet |
 | `timezone` | no | `America/Los_Angeles` | IANA name |
 | `run_times` | no | `["09:00"]` | Local `HH:MM`, one or more |
 | `autonomy_lineup` | no | `true` | Start/bench without asking |
@@ -34,6 +34,8 @@ what it *would* have done without touching your ESPN team.
 | `autonomy_add_drop` | no | `false` | Keep off; drops are irreversible |
 | `never_drop` | no | `[]` | Full player names |
 | `max_faab_bid` | no | `0` | 0–1000, whole dollars |
+| `addrop_margin_pct` | no | `12` | How much better a pickup must be, on quality alone |
+| `addrop_churn_floor` | no | `3` | Smallest points gain worth a permanent move |
 | `shadow_mode` | no | `true` | Compute + notify, never POST to ESPN |
 | `log_level` | no | `info` | `trace`…`fatal` |
 
@@ -47,6 +49,48 @@ mean it. Dropping a player is irreversible, and in an active league someone else
 can claim them within seconds. With it off you still get every suggested
 add/drop as a notification with an **Approve** button, so nothing is lost except
 the few seconds it takes you to tap.
+
+### How add/drop decides
+
+Two things have to be true before a swap is proposed, and they do different
+jobs.
+
+**It has to gain points this week.** A pickup is worth the points he would
+actually score *for you*, which is not his per-game average. On a night when
+more of your players have games than you have starting slots, a newcomer takes
+the place of whoever would otherwise have started, so he is only worth the
+difference. On a light night you cannot fill the lineup at all, a slot is free,
+and his whole line is gain — which is why games played drives this more than
+quality does. A 30-point player whose games all fall on your busiest nights can
+be worth less than a 15-point player on a night you'd otherwise start nobody.
+The games-played cap is priced in the same way: in a league where you are
+nowhere near the cap an extra game is free upside, and in one where the cap is
+binding, starting a mediocre pickup costs you a game you'd rather spend on
+someone better later in the week.
+
+`addrop_churn_floor` is the smallest gain worth making a permanent move for.
+Every roster has some swap available that gains a fraction of a point; taking
+all of them would spend a whole week's acquisitions on noise. The floor is
+**waived automatically** when the move would by itself erase the deficit in
+your current matchup — a 2-point gain is noise in general and is not noise when
+you are losing by one.
+
+**And it has to have a reason** — either of:
+
+- *Quality*: the pickup is at least `addrop_margin_pct` better per game than the
+  player going out.
+- *Games*: the pickup simply has more games left this week that you could start
+  him in. "Could start him in" and not "are on the NBA schedule": a player out
+  for the season still has games on the schedule and none you can use.
+
+Either reason is enough, and the points gain is required regardless — so a
+reason can never license a move that loses you points, and the quality bar can
+never block free ones.
+
+The matchup score is read every run and shown in the notes, but it is only ever
+used to *waive* the floor, never to raise it. ESPN publishes no projected final
+for basketball, so a lead you can see accumulated is not evidence the week is
+safe — there is no opponent projection behind it.
 
 ## Configuring your leagues
 
@@ -66,6 +110,7 @@ leagues:
   - league_id: 123456789
     team_id: 4
     label: Dynasty
+    keeper: true
   - league_id: 987654321
     team_id: 7
     label: Work league
@@ -74,6 +119,21 @@ leagues:
 `label` is optional and is only used in notification text. Set it anyway if you
 manage more than one team — a prompt that reads *"drop Smith"* is unactionable
 when two rosters are in play, whereas *"Dynasty: drop Smith"* is not.
+
+`keeper` says the league keeps players between seasons, and defaults to `false`.
+It is asked here rather than read from ESPN because ESPN's own keeper flag
+describes a draft mechanic and reads identically in a dynasty league and a
+redraft one — only you know which roster you are building for next year.
+
+It changes one decision. In a redraft league a player out for the season is a
+free roster spot, so he is the obvious drop. In a keeper league he is an asset,
+and the app will not propose dropping him however little he does for you this
+week; it goes after your genuinely weakest players instead — the bottom quarter
+of the roster by per-game value — and says which ones those were on the approval
+card. The default is `false` because the two mistakes are not equally bad:
+treating a keeper league as redraft proposes a drop you can look at and reject,
+while treating a redraft league as keeper quietly protects dead weight all
+season and never mentions it.
 
 **Each league is optimized on its own.** Category weights, the games-played
 budget and the roster are league-local; nothing is pooled across leagues except
@@ -187,8 +247,8 @@ For each one:
 2. It computes an optimal lineup and a list of candidate moves.
 3. Moves allowed by your autonomy settings are applied directly (unless
    `shadow_mode` is on).
-4. Anything else becomes a notification with **Approve** / **Dismiss** buttons,
-   naming the league, plus a task on `ha_todo_entity`.
+4. Anything else becomes a notification with **Approve** / **Reject** buttons,
+   naming the league, and is listed on the status page until it is decided.
 
 A league that errors out is logged and skipped; the remaining leagues still run.
 Results are written to the status UI and to SQLite at `/data/autopilot.db`,

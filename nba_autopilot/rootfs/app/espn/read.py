@@ -24,6 +24,7 @@ from espn import ids
 from models import (
     GameRef,
     LeagueSettings,
+    MatchupScore,
     MatchupWindow,
     RosterEntry,
     StatLimit,
@@ -56,6 +57,14 @@ class EspnConfig:
     espn_s2: str
     swid: str
     season: int
+    #: Ours, not ESPN's. Carried on the client config so that
+    #: :meth:`EspnRead.league_settings` can stamp it onto the settings object
+    #: the solver reads, which keeps every consumer asking one question --
+    #: "is this a keeper league?" -- of one place. Defaulted to False because
+    #: redraft is the assumption that makes the *reversible* mistake: treating
+    #: a keeper league as redraft proposes a drop the user can reject, while
+    #: the converse silently never proposes one at all.
+    keeper: bool = False
 
     def cookies(self) -> Dict[str, str]:
         """Read requests send both cookies; writes send only ``espn_s2``.
@@ -203,6 +212,18 @@ class EspnRead:
                 scoring_items[stat] = float(points)
             categories.add(stat)
 
+        # The acquisition cap, in the same fractional per-scoring-period units
+        # ESPN uses for the games-played cap. Anything non-positive collapses to
+        # None, i.e. *no cap*: ESPN spells "unlimited" as `-1` on the
+        # season-long `acquisitionLimit` sibling (both live leagues), and a
+        # limit of zero would describe a league where nobody may ever add
+        # anyone. Neither may be allowed to read as "a cap of zero" -- see the
+        # note on lineup_slot_stat_limits for why that distinction is load-
+        # bearing rather than pedantic.
+        acq_limit = _opt_float(acq.get("matchupAcquisitionLimit"))
+        if acq_limit is not None and acq_limit <= 0:
+            acq_limit = None
+
         scoring_type = str(s.get("scoringSettings", {}).get("scoringType")
                            or s.get("scoringType") or "UNKNOWN")
         # In a categories league the scoringItems *are* the category list; in a
@@ -242,6 +263,12 @@ class EspnRead:
             current_scoring_period=int(status.get("latestScoringPeriod") or 0),
             current_matchup_period=int(status.get("currentMatchupPeriod") or 0),
             matchup_period_boundaries=_matchup_windows(s),
+            acquisition_limit=acq_limit,
+            acquisition_limit_per_scoring_period=bool(
+                acq.get("matchupLimitPerScoringPeriod")
+            ),
+            # Not from ESPN. See the note on LeagueSettings.keeper.
+            keeper=bool(self.cfg.keeper),
         )
 
     # -- roster ------------------------------------------------------------
@@ -351,8 +378,10 @@ class EspnRead:
 
     # -- cap accounting ----------------------------------------------------
 
-    def games_used(self, team_id: Optional[int] = None) -> Dict[SlotId, int]:
-        """Starts consumed per slot, for the cap.
+    def games_used(
+        self, team_id: Optional[int] = None, matchup_period: Optional[int] = None
+    ) -> Dict[SlotId, int]:
+        """Games consumed against the cap this matchup period, by slot key.
 
         Two different numbers live in two different places and they are not
         interchangeable:
@@ -365,22 +394,154 @@ class EspnRead:
         read the matchup-scoped figure here and fall back to the season figure,
         because getting this backwards means either hoarding a budget you have
         already spent or spending one you have not.
+
+        **The per-stat field is ``value``, not ``score``.** This method read
+        ``score`` from its first line until 2026-10-21, so every lookup missed
+        and the method returned ``{}`` on every call -- which ``usage.measure``
+        correctly reported as "statBySlot was empty" and then quietly worked
+        around via the season delta. The real shape, live:
+
+            {"15": {"statId": 42, "value": 2.0,
+                    "limitExceeded": false, "exceededOnScoringPeriod": 0}}
+
+        That bug was invisible because we are in matchup period 1, where
+        season-to-date and matchup-to-date are the same number -- both readings
+        said 1 and 4 for the two leagues. It stops being invisible on the first
+        day of matchup period 2, when the fallback would start counting last
+        week's games against this week's cap.
+
+        **Filtered to the current matchup period**, because ``schedule``
+        carries the whole season and summing it would add up every week the team
+        has played. ``matchup_period`` defaults to ESPN's own
+        ``currentMatchupPeriod``; pass it explicitly to ask about another week.
+        Rows ESPN has not scored yet contribute nothing rather than zero, which
+        is the same distinction ``usage.starts_from_stat_by_slot`` preserves.
         """
         team_id = self.cfg.team_id if team_id is None else team_id
-        raw = self._get(self._league_url, ("mMatchupScore", "mTeam"))
+        raw = self._get(self._league_url, ("mMatchupScore", "mTeam", "mStatus"))
+        if matchup_period is None:
+            matchup_period = _opt_int(
+                (raw.get("status") or {}).get("currentMatchupPeriod")
+            )
         out: Dict[SlotId, int] = {}
         for match in raw.get("schedule") or []:
+            if matchup_period is not None and _opt_int(
+                match.get("matchupPeriodId")
+            ) != int(matchup_period):
+                continue
             for side in ("home", "away"):
                 entry = match.get(side) or {}
                 if int(entry.get("teamId", -1)) != int(team_id):
                     continue
                 by_slot = (entry.get("cumulativeScore") or {}).get("statBySlot") or {}
                 for slot, stats in by_slot.items():
-                    val = (stats or {}).get("score")
+                    val = (stats or {}).get("value")
+                    if val is None:
+                        # Pre-2026-10-21 this method read `score`, so accept it
+                        # as a fallback rather than assume the probe caught
+                        # every shape ESPN serves.
+                        val = (stats or {}).get("score")
                     if val is None:
                         continue
                     out[int(slot)] = out.get(int(slot), 0) + int(val)
         return out
+
+    def matchup_score(
+        self, team_id: Optional[int] = None, matchup_period: Optional[int] = None
+    ) -> Optional[MatchupScore]:
+        """This week's score so far: ours, theirs, and who they are.
+
+        ESPN sends **no projected total** for basketball -- there is no
+        ``totalProjectedPointsLive`` on either side of a live row, verified on
+        both leagues -- so a projected *final* has to be built by projecting the
+        opponent's roster the same way ours is. What this returns is the actual
+        accumulated score, which is the honest half of that.
+
+        ``totalPoints`` and ``sum(pointsByScoringPeriod)`` agreed exactly on
+        every live row, so the former is used and the latter is kept as the
+        fallback for a row ESPN has not totalled yet.
+
+        Returns ``None`` when no row for this team exists in the period, which
+        happens on a bye and during the preseason. A missing matchup is not an
+        error and must not read as a 0-0 tie.
+        """
+        team_id = self.cfg.team_id if team_id is None else int(team_id)
+        raw = self._get(self._league_url, ("mMatchupScore", "mTeam", "mStatus"))
+        if matchup_period is None:
+            matchup_period = _opt_int(
+                (raw.get("status") or {}).get("currentMatchupPeriod")
+            )
+        names = {
+            int(t["id"]): str(t.get("name") or t.get("abbrev") or t["id"]).strip()
+            for t in raw.get("teams") or []
+            if t.get("id") is not None
+        }
+
+        def total(side: Mapping[str, Any]) -> float:
+            pts = side.get("totalPoints")
+            if pts is not None:
+                return float(pts)
+            by_period = side.get("pointsByScoringPeriod") or {}
+            return sum(float(v or 0.0) for v in by_period.values())
+
+        for match in raw.get("schedule") or []:
+            if matchup_period is not None and _opt_int(
+                match.get("matchupPeriodId")
+            ) != int(matchup_period):
+                continue
+            sides = {s: (match.get(s) or {}) for s in ("home", "away")}
+            mine = next(
+                (v for v in sides.values()
+                 if _opt_int(v.get("teamId")) == team_id), None,
+            )
+            if mine is None:
+                continue
+            theirs = next(
+                (v for v in sides.values()
+                 if _opt_int(v.get("teamId")) != team_id), None,
+            )
+            opp_id = _opt_int((theirs or {}).get("teamId"))
+            return MatchupScore(
+                matchup_period=int(matchup_period or 0),
+                my_team_id=team_id,
+                my_points=total(mine),
+                opp_team_id=opp_id,
+                opp_name=names.get(opp_id or -1, "" if opp_id is None else str(opp_id)),
+                opp_points=0.0 if theirs is None else total(theirs),
+            )
+        return None
+
+    def acquisitions_used(self, team_id: Optional[int] = None) -> Dict[int, int]:
+        """``matchup_period -> acquisitions already made``, for the cap.
+
+        From ``transactionCounter.matchupAcquisitionTotals``, which is the only
+        per-matchup-period acquisition count ESPN publishes -- the sibling
+        ``acquisitions`` field is season-to-date and the transaction log carries
+        a ``scoringPeriodId`` with ``matchupPeriodId: null``, so neither answers
+        "how many have we used this week". Observed 2026-10-21: ``{"1": 1}`` in
+        the league where one add had been made, ``{}`` in the one where none
+        had.
+
+        An absent key means zero, so the caller gets a plain ``dict.get``. That
+        is safe here in a way it is not for the games-played cap: the counter is
+        maintained by ESPN for every team unconditionally, so an empty mapping
+        is "no acquisitions yet" rather than "no data".
+        """
+        team_id = self.cfg.team_id if team_id is None else int(team_id)
+        raw = self.league("mTeam")
+        for team in raw.get("teams") or []:
+            if int(team.get("id")) != team_id:
+                continue
+            totals = (team.get("transactionCounter") or {}).get(
+                "matchupAcquisitionTotals"
+            ) or {}
+            out: Dict[int, int] = {}
+            for period, count in totals.items():
+                p, c = _opt_int(period), _opt_int(count)
+                if p is not None and c is not None:
+                    out[p] = c
+            return out
+        return {}
 
     def season_games_played(self, team_id: Optional[int] = None) -> Optional[int]:
         team_id = self.cfg.team_id if team_id is None else team_id
@@ -542,6 +703,13 @@ class EspnRead:
 def _opt_int(v: Any) -> Optional[int]:
     try:
         return None if v is None else int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _opt_float(v: Any) -> Optional[float]:
+    try:
+        return None if v is None else float(v)
     except (TypeError, ValueError):
         return None
 

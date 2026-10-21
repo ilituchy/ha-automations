@@ -431,6 +431,31 @@ source survives contact:
 - `teams[].valuesByStat["42"]` is confirmed-shape team games played, but
   season-to-date. Right number, wrong horizon.
 
+**Amended 2026-10-21 — the first bullet was our bug, not ESPN's behaviour.**
+A live probe found the row populated all along:
+`{"15": {"statId": 42, "value": 2.0, "limitExceeded": false}}`. `games_used`
+read a field named `score`, so every lookup missed and the method returned `{}`
+on every call since it was written; `measure` then correctly reported
+"statBySlot was empty" and worked around it via the season delta, and the
+docstring wrote the workaround up as a fact about ESPN. Two further things the
+same probe settled: the row is **one pooled entry at the team-total pseudo-slot
+15**, matching the cap's own shape, so `starts_from_stat_by_slot` reads that
+slot rather than summing "the starting slots" (the old sum agreed only by
+accident — `is_starting_slot(15)` is True because 15 is neither bench nor IR);
+and `schedule` carries the **whole season**, so the read filters on
+`matchupPeriodId`. Nothing in the decision below changes — both readings are
+still computed and cross-checked — but the reason has inverted: the
+reconstruction is no longer load-bearing, it is the cross-check.
+
+Worth recording how this hid. We were in matchup period 1, where
+season-to-date and matchup-to-date are the *same number* by construction, so
+the two readings agreed exactly (1 and 1, 4 and 4) and the agreement carried no
+information. The unfiltered-`schedule` bug was invisible for a second reason:
+the field-name bug kept the loop from ever finding a number to add. Both would
+have surfaced together on the opening day of matchup period 2, as last week's
+games charged against this week's cap. No amount of code reading would have
+found it — the code and its own docstring agreed with each other.
+
 **Decision:** compute both on every run, cross-check them, and reconstruct the
 weekly figure as a difference of two season-to-date readings — which requires
 remembering the reading taken on the week's first day, hence `gp_snapshots`
@@ -607,3 +632,77 @@ suspected.
 
 This also means the not-yet-built `solve/addrop.py` must read
 `must_claim_on_waivers` per candidate rather than deciding once per league.
+
+## ADR-018 — A pickup is priced against two duals, and the keeper flag is a rank gate.
+
+`solve/addrop.py` had to answer "is this swap worth being permanent" in points,
+and the obvious answer — compare per-game projections — is wrong in both
+directions. A 30-point pickup whose games all land on nights our lineup is
+already full of better players is worth nothing; a 15-point pickup on a night we
+cannot fill a starting slot is worth the whole 15. The requirement said so in
+its own words: *"even if we pick up a player who gives us 15 points that 15
+points more than we would have had and that could decide a matchup."*
+
+**Decision:** price every candidate against both scarce things, each with the
+dual the rest of the codebase already computes —
+
+    surplus = sum over his game-days d of  p_play * max(v - max(lambda, theta_d), 0)
+
+where `lambda` is the games-played cap price from `budget.shadow_price` and
+`theta_d` is the day-`d` starting-slot price from `addrop.slot_prices`. Sharing
+`lambda` with the lineup plan rather than recomputing it is deliberate: pricing
+the same cap twice with two different numbers would let the two layers disagree
+about what a game is worth. Games played then drives the decision *by
+construction* rather than as a side condition, because `theta_d` collapses to
+zero on a light slate.
+
+Two consequences worth stating, because both look like bugs until you see the
+arithmetic:
+
+**`surplus` and `v` are different metrics with different jobs.** `surplus` is
+points this week and is what the gain is measured in; `v` is per-game quality
+and is what the 12% margin gate and the keeper gate are measured in. Keeping
+them apart is what lets a season-ending injury be a free drop in a redraft
+league (`surplus` 0, because `p_play` is 0) while remaining a protected asset in
+a keeper league (`v` unchanged, because the conditional value of a player who
+will not play is still his line).
+
+**The games comparison is on `p_play * games`, not on `games`.** The first
+version compared the schedule, and the schedule does not know who is hurt — a
+player out for the season still has three games on it, so neither the quality
+reason nor the games reason could fire and a season-ending injury came out
+permanently undroppable, contradicting the module's own docstring. The fix is
+one derived property, `Candidate.startable_games`. "Is he injured" still appears
+nowhere as a rule: the redraft drop is chosen by the lowest-`p_play` tie-break
+and justified as a games reason.
+
+**The keeper flag is a gate on the droppable set, by rank, not a price.** In a
+keeper league the honest thing would be to value future seasons, and that number
+would be fabricated. So only the bottom `DEFAULT_KEEPER_DROP_FRACTION` of the
+roster by `v` may be dropped at all, and the approval card says which players
+those were. The flag is **asked for in config, not read from ESPN**: ESPN's own
+keeper flag describes a draft mechanic and reads identically in a dynasty league
+and a redraft one. It defaults to `false` because the two mistakes are not
+symmetric — treating a keeper league as redraft proposes a drop you can look at
+and reject, while treating a redraft league as keeper quietly protects dead
+weight all season and never mentions it. For the same reason its parser is
+stricter than the top-level option reader: an unrecognized spelling stops the
+app at startup rather than silently reading as false.
+
+**The matchup score is used in one direction only.** ESPN publishes no
+projected final for basketball (ADR-010's reads confirm no
+`totalProjectedPointsLive`), so we know the score so far and nothing about where
+it is heading — our own roster we can project, the opponent's we cannot. That
+rules out any "this one is already decided" test, which needs exactly the number
+we do not have. So the score may **waive** the churn floor when we are behind by
+less than the move would gain, and may never raise it: an accumulated lead with
+no opponent projection behind it is not evidence the week is safe.
+
+**Rejected:** a discount rate converting keeper value into this week's points
+(invented number, changes decisions); a ranked list of the best several swaps
+(the acquisition budget is five to seven for a *week*, and a layer that proposed
+its five best ideas at once would spend the week on one run's view of the
+world); and bidding zero in a FAAB league rather than declining — it would
+submit, reliably lose, spend an acquisition, appear in the activity feed, and
+teach the user the feature is broken. Neither live league uses FAAB, so
+`plan_addrop` declines on `uses_faab` instead.

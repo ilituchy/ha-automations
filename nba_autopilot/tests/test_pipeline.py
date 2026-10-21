@@ -228,9 +228,23 @@ class TestGamesUsed(unittest.TestCase):
             scoring_period=period, matchup_period=matchup,
         )
 
-    def test_bench_and_ir_do_not_count_against_the_cap(self):
-        by_slot = {11: 6, ids.BENCH_SLOT: 4, ids.IR_SLOT: 2}
+    def test_reads_the_pooled_team_total_slot(self):
+        """The live shape: one entry, at the team-total pseudo-slot."""
+        by_slot = {ids.TEAM_TOTAL_LIMIT_SLOT: 6}
         self.assertEqual(usage_mod.starts_from_stat_by_slot(by_slot), 6)
+
+    def test_per_slot_entries_are_not_summed_into_the_pooled_figure(self):
+        """The old reading summed every non-bench slot, which would have turned
+        a genuine per-slot payload into a number the cap is not enforced
+        against. Real slots are ignored; the pooled entry still comes back."""
+        by_slot = {ids.TEAM_TOTAL_LIMIT_SLOT: 6, 0: 2, 11: 3, ids.BENCH_SLOT: 4}
+        with self.assertLogs(usage_mod.log, level="ERROR"):
+            self.assertEqual(usage_mod.starts_from_stat_by_slot(by_slot), 6)
+
+    def test_per_slot_only_payload_is_unknown_not_a_sum(self):
+        by_slot = {0: 2, 11: 3}
+        with self.assertLogs(usage_mod.log, level="ERROR"):
+            self.assertIsNone(usage_mod.starts_from_stat_by_slot(by_slot))
 
     def test_empty_stat_by_slot_is_unknown_not_zero(self):
         """The live failure mode: ESPN sent nothing, and nothing is not zero."""
@@ -260,7 +274,8 @@ class TestGamesUsed(unittest.TestCase):
         store = _FakeSnapshots()
         self.measure(_FakeReader({}, 10), store, period=1, matchup=1)
         got = self.measure(
-            _FakeReader({11: 9}, 14), store, period=4, matchup=1
+            _FakeReader({ids.TEAM_TOTAL_LIMIT_SLOT: 9}, 14),
+            store, period=4, matchup=1,
         )
         self.assertEqual(got.games, 9.0)
         self.assertEqual(got.from_season_delta, 4)
@@ -269,7 +284,10 @@ class TestGamesUsed(unittest.TestCase):
     def test_agreement_is_reported_as_such(self):
         store = _FakeSnapshots()
         self.measure(_FakeReader({}, 10), store, period=1, matchup=1)
-        got = self.measure(_FakeReader({11: 4}, 14), store, period=4, matchup=1)
+        got = self.measure(
+            _FakeReader({ids.TEAM_TOTAL_LIMIT_SLOT: 4}, 14),
+            store, period=4, matchup=1,
+        )
         self.assertEqual(got.source, usage_mod.SOURCE_BOTH)
 
     def test_no_reading_at_all_is_not_trustworthy(self):
