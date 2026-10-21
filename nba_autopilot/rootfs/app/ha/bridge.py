@@ -302,39 +302,81 @@ class HaBridge:
 
     # -- outbound notification --------------------------------------------
 
+    def own_slug(self) -> Optional[str]:
+        """This add-on's Supervisor slug, or ``None``.
+
+        Not knowable in advance: a store install is
+        ``<repo_hash>_nba_autopilot`` and a ``local_apps`` install is
+        ``local_nba_autopilot``.
+        """
+        try:
+            r = self.http.get("%s/addons/self/info" % SUPERVISOR_ROOT)
+            return ((r.json() or {}).get("data") or {}).get("slug") or None
+        except Exception as exc:  # noqa: BLE001 - diagnostic only
+            log.debug("could not resolve own slug: %s", exc)
+            return None
+
     def deep_link(self) -> Optional[str]:
         """Where tapping the notification *body* should go, or ``None``.
 
-        Resolved from ``/addons/self/info`` and cached, because the app's own
-        slug is not knowable in advance: a store install is
-        ``<repo_hash>_nba_autopilot`` and a ``local_apps`` install is
-        ``local_nba_autopilot``. ``/hassio/ingress/<slug>`` is the stable form
-        -- ``ingress_entry`` embeds a rotating session token and goes stale.
+        **The destination is asked for, not constructed.** An ingress add-on is
+        reachable at ``/hassio/ingress/<slug>`` *only while it has no sidebar
+        panel of its own*. This one declares ``panel_title``, so Supervisor
+        registers a top-level panel instead, and the frontend route becomes
+        ``/<slug>`` -- ``get_panels`` reported ``url_path`` of
+        ``d0cfb82c_nba_autopilot`` with ``config.addon`` naming this add-on, and
+        no ``/hassio/ingress/...`` route at all. The companion app, handed a
+        path that matches no route, silently falls back to the default
+        dashboard. Observed 2026-10-21: both lineup notifications landed on the
+        HA home page.
+
+        That is the second time a *constructed* URL has pointed at nothing here.
+        The first was a hardcoded ``/lovelace/fantasy``. So the slug is still
+        resolved from the Supervisor, but the route is now looked up in the
+        panel registry that builds the sidebar -- the same answer the sidebar
+        entry itself uses.
 
         Returns ``None`` rather than a guess, and callers then omit the ``url``
-        key entirely. This was a live bug: the url was hardcoded to
-        ``/lovelace/fantasy``, a dashboard that does not exist, so tapping the
-        notification dropped the user on their home dashboard with no error.
-        A tap that goes nowhere is better than a tap that goes somewhere wrong,
-        because only the first one is visibly broken.
+        key entirely. A tap that goes nowhere is no worse than a tap that goes
+        somewhere wrong, and it does not masquerade as a working link.
         """
         if self._deep_link is not _UNRESOLVED:
             return self._deep_link
         self._deep_link = None
-        try:
-            r = self.http.get("%s/addons/self/info" % SUPERVISOR_ROOT)
-            slug = ((r.json() or {}).get("data") or {}).get("slug")
-        except Exception as exc:
-            log.debug("could not resolve own ingress slug: %s", exc)
-            return None
-        if slug:
-            self._deep_link = "/hassio/ingress/%s" % slug
-            log.info("notification deep link: %s", self._deep_link)
-        else:
+
+        slug = self.own_slug()
+        if not slug:
             log.warning(
-                "no slug in /addons/self/info; notifications will have no "
-                "tappable destination (the action buttons still work)"
+                "could not resolve this add-on's slug; notifications will have "
+                "no tappable destination (the action buttons still work)"
             )
+            return None
+
+        try:
+            panels = asyncio.run(self._ws_command({"type": "get_panels"})) or {}
+        except Exception as exc:  # noqa: BLE001 - a dead link is survivable
+            log.warning("could not read the panel registry: %s. Notifications "
+                        "will have no tappable destination.", exc)
+            return None
+
+        for panel in panels.values():
+            if not isinstance(panel, Mapping):
+                continue
+            if ((panel.get("config") or {}) or {}).get("addon") != slug:
+                continue
+            path = panel.get("url_path")
+            if path:
+                self._deep_link = "/%s" % str(path).lstrip("/")
+                log.info("notification deep link: %s (panel %r)",
+                         self._deep_link, panel.get("title"))
+                return self._deep_link
+
+        # No panel claims this add-on, which is the shape an ingress add-on has
+        # when it declares no `panel_title`. Then -- and only then -- the
+        # ingress route is the real one.
+        self._deep_link = "/hassio/ingress/%s" % slug
+        log.info("notification deep link: %s (no sidebar panel)",
+                 self._deep_link)
         return self._deep_link
 
     def notify(

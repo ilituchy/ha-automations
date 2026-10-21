@@ -147,6 +147,32 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **Tapping a notification landed on the home dashboard, again.** The deep
+  link was *constructed* as `/hassio/ingress/<slug>`, which is only a frontend
+  route while an ingress add-on has no sidebar panel of its own. This one
+  declares `panel_title`, so Supervisor registers a top-level panel instead and
+  the route is `/<slug>` — `get_panels` on the Green returns `url_path` of
+  `d0cfb82c_nba_autopilot` and no `/hassio/ingress/...` route at all. Handed a
+  path matching no route, the companion app falls back to the default dashboard
+  without an error, which is exactly how the previous hardcoded
+  `/lovelace/fantasy` failed. The route is now *looked up* in the panel
+  registry that builds the sidebar, matched on `config.addon` against the
+  Supervisor's own slug; the constructed ingress path is kept only for the case
+  where no panel claims the add-on, where it is genuinely correct. An
+  unreadable registry omits the `url` rather than guessing. Reported from the
+  phone both times, because the tests had never asserted against what the
+  frontend says the route is — now they do.
+- **An empty approval queue no longer looks like a malfunction.** Tapping a
+  "2 move(s)" notification and finding "Nothing waiting" reads as a broken
+  page. Lineup and IR moves are applied without asking, so the empty state now
+  says so and points at Recent runs, where they are.
+- `sources_used["espn-injuries"]` now records **how many rostered players were
+  found on the page**, not just how many notes the page carried. Observed
+  on-device 2026-10-21: 80 notes, 61 refined, and exactly 2 of 24 rostered
+  players listed — both already `OUT` in ESPN's fantasy feed, so the run
+  produced no injury notes at all. Without the join count in the record, that
+  silence is indistinguishable from the join matching nobody because the two id
+  spaces drifted apart.
 - **No scheduled run could ever have executed.** The daily job was a `lambda`
   calling `asyncio.create_task`, and `AsyncIOScheduler` awaits a job on the
   event loop only when the job *is* a coroutine function — anything else it

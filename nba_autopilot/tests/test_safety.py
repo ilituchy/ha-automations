@@ -677,19 +677,40 @@ class TestActionIdRoundTrip(unittest.TestCase):
 
 
 class TestNotificationDeepLink(unittest.TestCase):
-    """Regression: the url was hardcoded to a dashboard that does not exist.
+    """Regression, twice over: the notification url pointed at no route.
 
-    Tapping the notification body followed `/lovelace/fantasy`, the companion
-    app could not resolve it, and it silently landed on the home dashboard.
-    Reported from the real phone, not caught by any test, because nothing here
-    had ever looked at what `notify` puts in `data["url"]`.
+    First it was hardcoded to `/lovelace/fantasy`, a dashboard that does not
+    exist. Then it was *constructed* as `/hassio/ingress/<slug>`, which is only
+    a route for an ingress add-on with no sidebar panel of its own -- this one
+    has one, so the real route is `/<slug>`. Both times the companion app could
+    not resolve the path and silently landed on the home dashboard, and both
+    times it was reported from the real phone rather than caught here, because
+    nothing had ever asserted on what the *frontend* says the route is.
+
+    So these tests feed in the panel registry's answer, not a string we think
+    it ought to be.
     """
 
-    def _bridge(self, response):
+    #: What `get_panels` actually returned from the Green on 2026-10-21, cut
+    #: down to the keys this code reads. Note `url_path` has no `hassio/`
+    #: prefix and no leading slash.
+    PANELS = {
+        "lovelace": {"url_path": "lovelace", "component_name": "lovelace",
+                     "title": None, "config": None},
+        "d0cfb82c_nba_autopilot": {
+            "url_path": "d0cfb82c_nba_autopilot",
+            "component_name": "app",
+            "title": "NBA Autopilot",
+            "config": {"addon": "d0cfb82c_nba_autopilot"},
+        },
+    }
+
+    def _bridge(self, response, panels=None, ws_raises=False):
         b = bridge.HaBridge.__new__(bridge.HaBridge)
         b._deep_link = bridge._UNRESOLVED
         b.notify_device = "mobile_app_iphone"
         b.sent = []
+        b.ws_calls = []
 
         class FakeHttp:
             def get(self, url):
@@ -697,6 +718,14 @@ class TestNotificationDeepLink(unittest.TestCase):
 
         b.http = FakeHttp()
         b.call_service = lambda d, s, data: b.sent.append((d, s, data))
+
+        async def fake_ws(msg):
+            b.ws_calls.append(dict(msg))
+            if ws_raises:
+                raise RuntimeError("websocket down")
+            return panels
+
+        b._ws_command = fake_ws
         return b
 
     @staticmethod
@@ -706,30 +735,73 @@ class TestNotificationDeepLink(unittest.TestCase):
                 return {"data": {"slug": slug}}
         return lambda url: R()
 
-    def test_slug_is_resolved_not_guessed(self):
-        """A store install is not `nba_autopilot`; it carries a repo hash."""
-        b = self._bridge(self._ok("a1b2c3d4_nba_autopilot"))
-        self.assertEqual(b.deep_link(), "/hassio/ingress/a1b2c3d4_nba_autopilot")
+    def test_the_route_comes_from_the_panel_registry(self):
+        """`/<slug>`, because this add-on registers its own sidebar panel.
 
-        local = self._bridge(self._ok("local_nba_autopilot"))
-        self.assertEqual(local.deep_link(), "/hassio/ingress/local_nba_autopilot")
+        The bug this replaces produced `/hassio/ingress/d0cfb82c_nba_autopilot`,
+        which looks right and resolves to nothing.
+        """
+        b = self._bridge(self._ok("d0cfb82c_nba_autopilot"), panels=self.PANELS)
+        self.assertEqual(b.deep_link(), "/d0cfb82c_nba_autopilot")
+        self.assertEqual([c["type"] for c in b.ws_calls], ["get_panels"])
+
+    def test_the_panel_is_matched_on_the_addon_slug_not_the_panel_key(self):
+        """A store install carries a repo hash, and the panel key is not it."""
+        panels = {
+            "autopilot-panel": {
+                "url_path": "autopilot-panel",
+                "config": {"addon": "a1b2c3d4_nba_autopilot"},
+            },
+        }
+        b = self._bridge(self._ok("a1b2c3d4_nba_autopilot"), panels=panels)
+        self.assertEqual(b.deep_link(), "/autopilot-panel")
+
+    def test_no_panel_means_the_ingress_route_is_the_real_one(self):
+        """An ingress add-on without `panel_title` is reached that way."""
+        b = self._bridge(self._ok("local_nba_autopilot"), panels=self.PANELS)
+        self.assertEqual(b.deep_link(), "/hassio/ingress/local_nba_autopilot")
+
+    def test_a_panel_for_a_different_addon_is_not_ours(self):
+        b = self._bridge(self._ok("local_nba_autopilot"),
+                         panels={"x": {"url_path": "x",
+                                       "config": {"addon": "a0d7b954_vscode"}}})
+        self.assertEqual(b.deep_link(), "/hassio/ingress/local_nba_autopilot")
+
+    def test_a_malformed_panel_registry_does_not_raise(self):
+        """`config` is null for most panels, and the values are not all dicts."""
+        b = self._bridge(
+            self._ok("local_nba_autopilot"),
+            panels={"a": None, "b": "nonsense", "c": {"config": None},
+                    "d": {"config": {"addon": "local_nba_autopilot"}}},
+        )
+        # "d" claims the add-on but carries no url_path, so it cannot be used.
+        self.assertEqual(b.deep_link(), "/hassio/ingress/local_nba_autopilot")
 
     def test_unresolvable_slug_omits_the_url_entirely(self):
         """No url beats a wrong url: only the former is visibly broken."""
         def boom(url):
             raise RuntimeError("supervisor unreachable")
 
-        b = self._bridge(boom)
+        b = self._bridge(boom, panels=self.PANELS)
+        self.assertIsNone(b.deep_link())
+        self.assertEqual(b.ws_calls, [], "no point asking for panels")
+        b.notify(title="t", message="m", tag="x")
+        _, _, payload = b.sent[0]
+        self.assertNotIn("url", payload["data"])
+
+    def test_an_unreadable_panel_registry_omits_the_url(self):
+        """Having the slug is not enough to know the route. Do not guess it."""
+        b = self._bridge(self._ok("d0cfb82c_nba_autopilot"), ws_raises=True)
         self.assertIsNone(b.deep_link())
         b.notify(title="t", message="m", tag="x")
         _, _, payload = b.sent[0]
         self.assertNotIn("url", payload["data"])
 
     def test_url_is_present_when_resolvable(self):
-        b = self._bridge(self._ok("local_nba_autopilot"))
+        b = self._bridge(self._ok("d0cfb82c_nba_autopilot"), panels=self.PANELS)
         b.notify(title="t", message="m", tag="x")
         _, _, payload = b.sent[0]
-        self.assertEqual(payload["data"]["url"], "/hassio/ingress/local_nba_autopilot")
+        self.assertEqual(payload["data"]["url"], "/d0cfb82c_nba_autopilot")
 
     def test_a_failed_lookup_is_cached_not_retried(self):
         """Otherwise every notification pays a timeout to the Supervisor."""
@@ -739,18 +811,25 @@ class TestNotificationDeepLink(unittest.TestCase):
             calls.append(url)
             raise RuntimeError("nope")
 
-        b = self._bridge(boom)
+        b = self._bridge(boom, panels=self.PANELS)
         for _ in range(5):
             b.notify(title="t", message="m", tag="x")
         self.assertEqual(len(calls), 1, "slug lookup should happen once")
         self.assertEqual(len(b.sent), 5, "notifications must still be sent")
+
+    def test_a_successful_lookup_is_cached_too(self):
+        b = self._bridge(self._ok("d0cfb82c_nba_autopilot"), panels=self.PANELS)
+        for _ in range(4):
+            b.notify(title="t", message="m", tag="x")
+        self.assertEqual(len(b.ws_calls), 1, "one panel lookup per process")
+        self.assertTrue(all("url" in s[2]["data"] for s in b.sent))
 
     def test_action_buttons_do_not_depend_on_the_link(self):
         """The approval path must survive an unresolvable deep link."""
         def boom(url):
             raise RuntimeError("nope")
 
-        b = self._bridge(boom)
+        b = self._bridge(boom, panels=self.PANELS)
         b.notify(
             title="t", message="m", tag="x",
             actions=(bridge.Action(

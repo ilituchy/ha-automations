@@ -225,7 +225,16 @@ def render(page: StatusPage, *, user: str = "") -> str:
 
     parts.append("<h2>Needs approval</h2>")
     if not pending:
-        parts.append("<div class='card empty'>Nothing waiting.</div>")
+        # Say *why* it is empty. Only add/drop needs a human, and lineup moves
+        # are applied without one, so an empty queue right after a notification
+        # that said "2 move(s)" reads as a broken page rather than as a working
+        # one. Reported from the phone: tapped the notification, found nothing
+        # to approve, reasonably assumed something had gone wrong.
+        parts.append(
+            "<div class='card empty'>Nothing waiting. Lineup and IR moves are "
+            "applied automatically and appear under Recent runs; only add/drop "
+            "asks first.</div>"
+        )
     for p in pending:
         parts.append("<div class=card>")
         parts.append("<div class=meta>%s</div>" % _e(p["league"]))

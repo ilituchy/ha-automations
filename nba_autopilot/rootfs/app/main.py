@@ -461,6 +461,8 @@ class Autopilot:
             sources_missing["pro-schedule"] = "unavailable"
 
         injuries = self.injury_notes()
+        overrides, injury_notes = self._availability_overrides(roster, injuries)
+        notes.extend(injury_notes)
         if injuries is None:
             sources_missing["espn-injuries"] = "unavailable or stale"
             notes.append(
@@ -469,12 +471,23 @@ class Autopilot:
             )
         else:
             parse = injuries.payload.get("parse") or {}
-            sources_used["espn-injuries"] = "%d notes, %d refined by beat report" % (
-                parse.get("notes", 0),
-                parse.get("refined_by_comment", 0),
+            # The join count is here, not just the page counts, because it is
+            # the only number that can tell a healthy quiet run from a broken
+            # one. Observed on-device 2026-10-21: 80 notes parsed, 61 refined,
+            # and exactly 2 of 24 rostered players on the page -- both already
+            # OUT in ESPN's fantasy feed, so the run produced no notes at all.
+            # Without "2 of 24" in the record, that silence looks identical to
+            # the join matching nobody because the id spaces drifted apart.
+            sources_used["espn-injuries"] = (
+                "%d notes, %d refined by beat report, %d of %d rostered "
+                "players on the page"
+                % (
+                    parse.get("notes", 0),
+                    parse.get("refined_by_comment", 0),
+                    len(overrides),
+                    len(roster),
+                )
             )
-        overrides, injury_notes = self._availability_overrides(roster, injuries)
-        notes.extend(injury_notes)
 
         splits = lg.read.player_projections([e.player_id for e in roster])
         projections, availability, skipped = projections_mod.build_projections(
