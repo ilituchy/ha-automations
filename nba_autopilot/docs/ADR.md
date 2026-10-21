@@ -322,15 +322,35 @@ Three readings of this, and what settles between them:
    seven days, and the acquisition limits in the same payload are divided the
    same way (5/7 and 7/7 against `matchupAcquisitionLimit`).
 
+**Confirmed against the ESPN settings page on 2026-10-20**, which is why this
+section states rather than hedges. Both leagues render a *Games Played Limits
+(Maximums)* table whose only row is labelled **“All Players”** — 40 and 44
+respectively. "All Players" is the pooled reading in ESPN's own words: there is
+no per-position breakdown, so reading 1 is dead on the page as well as in the
+payload. The period is settled by elimination, since a *season* cap of 40 games
+for a whole roster would mean fielding about four players a week for six
+months.
+
+One correction the page forces: the `× 7 ÷ starters = 4.000` coincidence is not
+a rule. The settings page shows a flat number a commissioner picked (or left at
+ESPN's default, which evidently scales with roster size). It was good evidence
+*against* the per-slot reading and is no evidence at all about how the number
+is chosen, so nothing in the code derives the cap from starter count — it is
+read, not computed.
+
 **Decision:** model it as reading 3 — one scalar `λ`, priced over the remaining
 days of the current matchup period, recovered by multiplying by
 `ids.SCORING_PERIODS_PER_MATCHUP`.
 
-This is honest about being an inference, so it is made falsifiable rather than
-assumed. `remaining_budget` logs at ERROR if observed usage exceeds the cap it
-computed, which is precisely what would happen in week two if the cap were in
-fact season-long. The alternative — silently clamping — would hide the one
-observation that could correct the model. `matchup_cap` likewise *raises* on
+The runtime checks stay in despite the confirmation. `remaining_budget` logs at
+ERROR if observed usage exceeds the cap it computed, which is precisely what
+would happen in week two if the cap were in fact season-long; the alternative —
+silently clamping — would hide the one observation that could correct the
+model. Keeping a falsification test after the hypothesis is confirmed is cheap,
+and the confirmation came from a rendered web page rather than from the API
+this code actually reads: a settings page can be redesigned, and ESPN can
+change what it sends, independently of each other. `matchup_cap` likewise
+*raises* on
 limits keyed at real lineup slots instead of coercing them, because the pooled
 and per-slot readings differ by an order of magnitude in how much they restrict
 and guessing permissively burns the real cap without ever noticing.

@@ -134,11 +134,16 @@ def probe(league_id: int, team_id: int, season: int, s2: str, swid: str,
                          as_fraction(lim.limit_value),
                          "" if known else "(slot absent from lineupSlotCounts"
                                           " -> league-wide, not per-slot)"))
-                # Two readings to compare against the settings page. If the
-                # value is per-scoring-period, x7 is the per-matchup cap; and
-                # if that number divides evenly by the number of starting
-                # slots, the league is almost certainly expressing "N games
-                # per starter per matchup" rather than a flat team total.
+                # x7 recovers the number the settings page shows under
+                # "Games Played Limits (Maximums)". Verified against both live
+                # leagues: 40 and 44, on the row labelled "All Players".
+                #
+                # The per-starter division is printed only as a sanity check.
+                # Both leagues happen to come out at exactly 4.000, which was
+                # useful evidence that the cap is a team total rather than a
+                # per-slot one -- a per-slot cap would not track roster shape.
+                # It is *not* a rule, and nothing derives the cap from it: the
+                # settings page shows a flat number the commissioner picked.
                 weekly = lim.limit_value * 7
                 print("        x7 = %.2f  (per-matchup cap if per-scoring-period)"
                       % weekly)
