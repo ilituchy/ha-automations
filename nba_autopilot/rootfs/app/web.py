@@ -43,6 +43,7 @@ import html
 import json
 import logging
 from typing import Any, Dict, List, Mapping, Optional
+from urllib.parse import parse_qs
 
 log = logging.getLogger("autopilot.web")
 
@@ -294,6 +295,49 @@ def render(page: StatusPage, *, user: str = "") -> str:
 
 # -- deciding --------------------------------------------------------------
 
+#: Two short fields of ``a=b&c=d``. The cap exists so an oversized body is
+#: refused instead of buffered; the endpoint is reachable only through
+#: authenticated ingress, so this is hygiene rather than a defence.
+MAX_FORM_BYTES = 4096
+
+
+async def read_form(request: Any) -> Dict[str, str]:
+    """Parse the urlencoded POST body. First value wins; missing keys are absent.
+
+    First rather than last because that is what Starlette's own ``FormData.get``
+    returns, and because for a field whose two legal values are APPROVE and
+    REJECT, "the earliest thing that was said" is the more conservative reading
+    of a body that repeats itself.
+
+    ``request.form()`` cannot be used. Starlette's form parser asserts on
+    ``python-multipart`` for *every* content type, not just
+    ``multipart/form-data``, because it borrows that package's Content-Type
+    parser before it dispatches -- so the assertion fires on a plain
+    ``application/x-www-form-urlencoded`` body too. That was found on the
+    device as a 500: ``AssertionError: The `python-multipart` library must be
+    installed to use form parsing``. Declaring the fields as ``Form(...)``
+    would have hit the same wall by a different route.
+
+    Adding the dependency would mean another wheel to resolve for musl and
+    another pin to keep current, to parse two fields that ``parse_qs`` -- which
+    is stdlib, and is what Starlette would ultimately have called -- handles
+    directly.
+    """
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > MAX_FORM_BYTES:
+        log.warning("refusing a %d-byte form body", declared)
+        return {}
+    raw = await request.body()
+    if len(raw) > MAX_FORM_BYTES:  # a chunked body declares no length
+        log.warning("refusing a %d-byte form body", len(raw))
+        return {}
+    parsed = parse_qs(raw.decode("utf-8", "replace"))
+    return {k: v[0] for k, v in parsed.items() if v}
+
+
 NOT_OWNER = (
     "This Home Assistant user is not the configured owner of this app, so it "
     "cannot approve roster moves."
@@ -375,15 +419,10 @@ def build_app(bot: Any):
 
     @app.post("/decide")
     async def decide(request: Request):
-        # The form is read off the request rather than declared with
-        # `Form(...)`, which would be the idiomatic FastAPI spelling. Declaring
-        # a Form parameter makes FastAPI require `python-multipart`, and that is
-        # not in requirements.txt -- the route would raise at the first POST,
-        # on the device, where it is least convenient to discover. Starlette
-        # parses `application/x-www-form-urlencoded` with no extra package, and
-        # these two fields do not need validation beyond "is it the owner" and
-        # "does it match a PROPOSED row", both of which happen below.
-        form = await request.form()
+        # Neither `Form(...)` nor `request.form()`; see `read_form`. The two
+        # fields need no validation beyond "is it the owner" and "does it match
+        # a PROPOSED row", both of which happen in `apply_decision`.
+        form = await read_form(request)
         uid, _ = identify(request)
         refusal = await apply_decision(
             bot,

@@ -311,6 +311,96 @@ class TestApplyDecision(unittest.TestCase):
         self.assertEqual(bot.executed, 1)
 
 
+class FakeRequest:
+    """Only what `read_form` touches, which is the point of it being module-level."""
+
+    def __init__(self, raw: bytes, content_length=None):
+        self.headers = {}
+        if content_length is not None:
+            self.headers["content-length"] = str(content_length)
+        elif content_length is None and raw is not None:
+            self.headers["content-length"] = str(len(raw))
+        self._raw = raw
+
+    async def body(self):
+        return self._raw
+
+
+class TestReadForm(unittest.TestCase):
+    """`request.form()` cannot be used; see `web.read_form`.
+
+    Starlette asserts on `python-multipart` for *every* content type, not just
+    multipart, so a plain urlencoded body 500s. That was found on the device.
+    These tests are the local version of that discovery, and they need neither
+    FastAPI nor the package in question.
+    """
+
+    def test_parses_the_two_fields(self):
+        form = asyncio.run(web.read_form(
+            FakeRequest(b"action_id=R1%3AADD%3A0&verb=APPROVE")
+        ))
+        self.assertEqual(form, {"action_id": "R1:ADD:0", "verb": "APPROVE"})
+
+    def test_missing_field_is_absent_not_empty(self):
+        form = asyncio.run(web.read_form(FakeRequest(b"verb=APPROVE")))
+        self.assertNotIn("action_id", form)
+
+    def test_first_value_wins(self):
+        """Matches Starlette's `FormData.get`, and is the safer verb to take."""
+        form = asyncio.run(web.read_form(
+            FakeRequest(b"verb=REJECT&verb=APPROVE")
+        ))
+        self.assertEqual(form["verb"], "REJECT")
+
+    def test_empty_body(self):
+        self.assertEqual(asyncio.run(web.read_form(FakeRequest(b""))), {})
+
+    def test_declared_oversize_is_refused_without_reading(self):
+        class Trap(FakeRequest):
+            async def body(self):
+                raise AssertionError("body must not be read past the cap")
+
+        with self.assertLogs("autopilot.web", level="WARNING"):
+            form = asyncio.run(web.read_form(
+                Trap(b"x", content_length=web.MAX_FORM_BYTES + 1)
+            ))
+        self.assertEqual(form, {})
+
+    def test_undeclared_oversize_is_refused(self):
+        """A chunked body declares no length, so the cap is checked twice."""
+        raw = b"verb=" + b"A" * (web.MAX_FORM_BYTES + 1)
+        with self.assertLogs("autopilot.web", level="WARNING"):
+            form = asyncio.run(web.read_form(FakeRequest(raw, content_length=0)))
+        self.assertEqual(form, {})
+
+    def test_garbage_content_length_does_not_raise(self):
+        form = asyncio.run(web.read_form(
+            FakeRequest(b"verb=APPROVE", content_length="not-a-number")
+        ))
+        self.assertEqual(form["verb"], "APPROVE")
+
+    def test_undecodable_bytes_do_not_raise(self):
+        form = asyncio.run(web.read_form(FakeRequest(b"verb=\xff\xfe")))
+        self.assertIn("verb", form)
+
+    def test_a_decision_from_a_parsed_form_is_a_rejection(self):
+        """End to end on the two functions the route composes.
+
+        A body with no recognizable verb must not approve anything -- this is
+        the composition the route performs, with the HTTP layer removed.
+        """
+        form = asyncio.run(web.read_form(FakeRequest(b"action_id=R1%3AADD%3A0")))
+        bot = FakeBot(cfg=FakeCfg(owner="owner-abc"))
+        asyncio.run(web.apply_decision(
+            bot,
+            action_id=str(form.get("action_id") or ""),
+            verb=str(form.get("verb") or ""),
+            user_id="owner-abc",
+        ))
+        self.assertEqual(bot.store.decisions, [("R1:ADD:0", False, "owner-abc")])
+        self.assertEqual(bot.executed, 0)
+
+
 class TestAnnotationsAreResolvable(unittest.TestCase):
     """`from __future__ import annotations` in web.py breaks every page load.
 
