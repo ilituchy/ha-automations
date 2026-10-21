@@ -384,6 +384,36 @@ class TestGamesDriveIt(unittest.TestCase):
         # his whole 36. The man going out was exactly at the slot price.
         self.assertAlmostEqual(plan.gain, 72.0)
 
+    def test_a_games_rationale_shows_enough_precision_to_be_believed(self):
+        """Seen on a live card: *"for the games, not the quality. 1.9 expected
+        game(s) against 1.9"* -- two players with the same scheduled games and
+        a three-point difference in availability, rendered at one decimal into
+        a sentence contradicting the clause before it.
+
+        The decision was right; the card was unreadable. So the near-tie is
+        shown at two decimals with the raw games and percentages behind it.
+        """
+        case = _Case(
+            # Two scheduled games each, so the count ties and only availability
+            # separates them -- which is the live case. They play opposite
+            # halves of the week because the pickup has to be worth something:
+            # on days 1 and 2 the three starters fill the three slots and a
+            # slot prices at 40, while on days 3 and 4 only two of them play,
+            # so a slot stands empty and the pickup keeps his whole 36.
+            horizon=[1, 2, 3, 4],
+            schedule={1: {1: 1, 2: 1, 3: 1, 4: 1}, 2: {1: 1, 2: 1},
+                      3: {3: 1, 4: 1}},
+            roster=[player(1, team=1), player(2, name="Shaky", team=2),
+                    player(3, team=1)],
+            pool=[player(90, name="Steady", team=3)],
+            values={1: 60.0, 2: 40.0, 3: 50.0, 90: 36.0},
+            p_play={2: 0.93, 90: 0.96},
+        )
+        plan = case.run()
+        self.assertEqual(plan.reason, addrop.REASON_GAMES)
+        self.assertIn("1.92 expected game(s) against 1.86", plan.rationale)
+        self.assertIn("2 x 96% against 2 x 93%", plan.rationale)
+
     def test_an_empty_slot_makes_any_body_worth_it(self):
         """*"even if we pick up a player who gives us 15 points that 15 points
         more than we would have had."*

@@ -1058,8 +1058,8 @@ class TestSeveralSwapsARun(unittest.TestCase):
         decisions, _notes = funnel().consider_all(target=funnel_target())
         self.assertNotIn("Priced as the", decisions[0].rationale)
         self.assertIn("second move of this run", decisions[1].rationale)
-        self.assertIn("the swap above it is approved", decisions[2 - 1].rationale)
-        self.assertIn("the 2 swaps above them are approved",
+        self.assertIn("the swap above it is approved", decisions[1].rationale)
+        self.assertIn("the 2 swaps above it are approved",
                       decisions[2].rationale)
 
     def test_the_first_card_is_priced_against_the_real_roster(self):

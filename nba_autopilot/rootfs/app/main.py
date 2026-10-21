@@ -757,13 +757,16 @@ class Autopilot:
                 # entitled to know the number assumes company.
                 decision = dataclasses.replace(
                     decision,
+                    # "above it" in both cases: the pronoun is this card's own
+                    # swap, which is singular however many are stacked on top
+                    # of it. Only the verb agrees with the count.
                     rationale="%s\n\nPriced as the %s move of this run, "
-                    "assuming the %s above %s approved."
+                    "assuming the %s above it %s approved."
                     % (
                         decision.rationale,
                         _ordinal(attempt + 1),
                         "swap" if attempt == 1 else "%d swaps" % attempt,
-                        "it is" if attempt == 1 else "them are",
+                        "is" if attempt == 1 else "are",
                     ),
                 )
 

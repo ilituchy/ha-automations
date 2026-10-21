@@ -796,11 +796,18 @@ def _rationale(
                margin_pct, gain, add.surplus, out.surplus)
         )
     else:
+        # Two decimals, and the raw games and play probability behind them.
+        # ``startable_games`` is games times ``p_play``, so two players with the
+        # same number of games and a three-point difference in availability come
+        # out 1.92 against 1.86 -- which one decimal renders as "1.9 expected
+        # game(s) against 1.9", a sentence that reads as a contradiction of the
+        # clause before it. Seen on a live card.
         lines.append(
-            "Add %s, drop %s -- for the games, not the quality. %.1f expected "
-            "game(s) against %.1f, worth %+.1f points over the rest of the "
-            "week (%+.1f in, %+.1f out)."
+            "Add %s, drop %s -- for the games, not the quality. %.2f expected "
+            "game(s) against %.2f (%d x %.0f%% against %d x %.0f%%), worth "
+            "%+.1f points over the rest of the week (%+.1f in, %+.1f out)."
             % (add.name, out.name, add.startable_games, out.startable_games,
+               add.games, add.p_play * 100.0, out.games, out.p_play * 100.0,
                gain, add.surplus, out.surplus)
         )
     lines.append(
