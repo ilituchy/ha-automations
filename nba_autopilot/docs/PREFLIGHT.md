@@ -44,8 +44,11 @@ league's public activity feed. Only a `PENDING` waiver claim can be withdrawn.
 | 6 | Add is paired with a drop when the roster is full | The original requirement is explicit that pickups never happen without a paired drop. A full roster plus no drop is an upstream bug, not something to resolve here by picking a victim. |
 | 7 | `0 ≤ bid ≤ max_faab_bid` | User-configured ceiling. |
 | 8 | `bid ≤ league faab_budget` | — |
-| 9 | Not empty | — |
-| 10 | Human approval | Enforced by `state.py`, not here — `claim_for_execution` is the gate. |
+| 9 | Add target exists in ESPN's player pool | `player_in_pool()` returns `None` for an id ESPN has no row for. Refusing to acquire a player we cannot identify is cheaper than finding out what ESPN does with it. |
+| 10 | Add target is not on another team's roster | `acquisition_status == "ONTEAM"`. |
+| 11 | Add mode matches the player's `acquisition_status` | An instant add of a `WAIVERS` player is impossible (`TRAN_PLAYER_NOT_FREEAGENT`). This is per-player and not derivable from league settings — see ADR-017. The reverse (claiming a free agent) is logged, not blocked. |
+| 12 | Not empty | — |
+| 13 | Human approval | Enforced by `state.py`, not here — `claim_for_execution` is the gate. |
 
 ## After the write
 
@@ -62,16 +65,35 @@ harmless; a replayed waiver claim double-spends FAAB. A timeout raises
 `Store.stuck_writes()` surfaces it. `startup_checks` refuses to run while any
 unreconciled indeterminate write exists.
 
-## Unverified write surfaces
+## Write surfaces: verified and still unverified
 
-Honest list. The lineup path's packet shape is the best-documented one; these
-four have **never been observed executing** against a live league:
+Probed against a throwaway league on 2026-10-20. **Verified executing**, each
+through this codebase's own `EspnWrite` rather than a hand-rolled request:
+
+| Surface | Result |
+| --- | --- |
+| Standalone `ROSTER`-type drop | `200 EXECUTED` |
+| `WAIVER` claim, with and without a paired drop | `200 PENDING`, UUID id |
+| `CANCEL` of a pending claim | `200 CANCELED`, claim gone from `mPendingTransactions` |
+| `roster()` after a drop | ghost entry correctly excluded |
+
+Three of these were **broken** when first exercised; see ADR-015, ADR-016 and
+the changelog. The probe paid for itself on the first request.
+
+Still **never observed executing**:
 
 1. IR move rejection code for an ineligible player.
-2. Executing `FREEAGENT` (instant add).
-3. A standalone `ROSTER`-type drop.
-4. Any GP-cap / position-limit `TRAN_*` rejection code.
+2. Executing `FREEAGENT` (instant add). The *rejection* path is observed —
+   `TRAN_PLAYER_NOT_FREEAGENT`, and `TRAN_INVALID_ITEM_TYPE_COUNT` /
+   `TRAN_INVALID_MOVETYPE` for bad item sets — but no instant add has
+   succeeded, because the throwaway league's entire pool was on waivers.
+3. Any GP-cap / position-limit `TRAN_*` rejection code.
+4. Whether ESPN accepts a `WAIVER` claim for a player whose status is
+   `FREEAGENT`. This is why that case is logged rather than blocked.
 
 This is why `shadow_mode` defaults to **true** and why the recommended sequence
-is: discovery run → shadow runs → enable lineup/IR writes → only then gate-approve
-add/drops. Probing items 1–4 belongs in a throwaway league, not on a live roster.
+is: discovery run → shadow runs → enable lineup/IR writes → only then
+gate-approve add/drops. Probing what remains belongs in a throwaway league, not
+on a live roster — and note that an unexecutable transaction is still
+informative, since ESPN reports a bad item set and a bad player with different
+error codes.

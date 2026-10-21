@@ -258,21 +258,20 @@ class EspnWrite:
         is the strictest in the module.
 
         ``waiver=True`` submits a claim (``PENDING``, cancellable, spends FAAB);
-        ``waiver=False`` is an instant free-agent add. Which one is correct
-        depends on the league's waiver settings, so the caller must decide and
-        the preflight cross-checks it against ``faab_budget``.
+        ``waiver=False`` is an instant free-agent add. Which one is correct is a
+        property of the *target player*, not of the league -- see
+        ``acquisition_status`` on :class:`RosterEntry` -- so the caller must
+        decide and the preflight cross-checks it.
 
-        UNVERIFIED SURFACE: unlike the lineup path, the executing add/drop
-        packet has not been observed against a live league. The shapes below
-        follow the documented ``items`` grammar, but the first real execution
-        should happen in a throwaway league, not on the user's roster. The
-        ``shadow_mode`` default of True exists for exactly this reason.
+        Verified against a throwaway league on 2026-10-20: executed ADD,
+        executed DROP, ``PENDING`` waiver claim with and without a drop, and
+        cancellation of both.
         """
         team_id = self.cfg.team_id if team_id is None else int(team_id)
         current = list(roster if roster is not None else self.read.roster(team_id))
         settings = self.read.league_settings()
 
-        self._preflight_add_drop(team_id, current, add, drop, bid, settings)
+        self._preflight_add_drop(team_id, current, add, drop, bid, settings, waiver)
 
         items: List[Dict[str, Any]] = []
         if add is not None:
@@ -294,9 +293,23 @@ class EspnWrite:
                 }
             )
 
+        # ESPN gates the permitted items against `type`; see ids.TRAN_*. A lone
+        # DROP is the odd one out -- it is a ROSTER mutation, not an
+        # acquisition, and sending it as FREEAGENT (which this did until it was
+        # run against a live league) is refused outright with
+        # TRAN_INVALID_ITEM_TYPE_COUNT. The converse holds too: ROSTER cannot
+        # carry an ADD, so the branch has to be on the item set, not on
+        # `waiver` alone.
+        if waiver:
+            tran_type = ids.TRAN_WAIVER
+        elif add is None:
+            tran_type = ids.TRAN_ROSTER
+        else:
+            tran_type = ids.TRAN_FREEAGENT
+
         body: Dict[str, Any] = {
             "teamId": int(team_id),
-            "type": "WAIVER" if waiver else "FREEAGENT",
+            "type": tran_type,
             "memberId": self.cfg.swid,
             "scoringPeriodId": int(settings.current_scoring_period),
             "executionType": ids.EXEC_EXECUTE,
@@ -313,12 +326,48 @@ class EspnWrite:
         return self._post(body, kind)
 
     def cancel(self, transaction_id: str, *, team_id: Optional[int] = None) -> WriteResult:
-        """Withdraw a ``PENDING`` transaction. Executed ones cannot be undone."""
+        """Withdraw a ``PENDING`` transaction. Executed ones cannot be undone.
+
+        **A cancel is a new transaction, not a mutation of the old one.** ESPN
+        creates a fresh record with its own ``id``, ``status: CANCELED``, and a
+        ``relatedTransactionId`` pointing at the withdrawn claim -- which is
+        where the target id has to go. Putting it in ``id`` (the obvious
+        reading, and what this method did until it was run against a live
+        league) gets ``409 "Transaction with ID null could not be found"``:
+        ESPN was reporting a null ``relatedTransactionId`` the whole time,
+        while the ``id`` we sent was being discarded and replaced.
+
+        ``type`` and ``scoringPeriodId`` are mandatory too, and are read off
+        the live claim rather than assumed: omitting ``type`` gives
+        ``TRAN_INVALID_TYPE`` (with an unsubstituted ``%s`` in the message),
+        and omitting ``scoringPeriodId`` gives "can only be executed in the
+        current scoring period". ``items`` may be empty -- ESPN back-fills them
+        from the related transaction.
+
+        Looking the claim up first also makes this fail closed: if it is not
+        pending, there is nothing to withdraw and we say so instead of posting.
+        """
         team_id = self.cfg.team_id if team_id is None else int(team_id)
         self._require_ownership(team_id)
+
+        txn_id = str(transaction_id)
+        pending = {
+            str(t.get("id")): t for t in self.read.pending_transactions(team_id)
+        }
+        live = pending.get(txn_id)
+        if live is None:
+            raise PreflightError(
+                "transaction %s is not pending for team %d (pending: %s). Only "
+                "a PENDING transaction can be withdrawn; an executed add or "
+                "drop is permanent."
+                % (txn_id, team_id, sorted(pending) or "none")
+            )
+
         body = {
             "teamId": int(team_id),
-            "id": str(transaction_id),
+            "relatedTransactionId": txn_id,
+            "type": str(live.get("type")),
+            "scoringPeriodId": int(live.get("scoringPeriodId") or 0),
             "memberId": self.cfg.swid,
             "executionType": ids.EXEC_CANCEL,
             "items": [],
@@ -452,6 +501,7 @@ class EspnWrite:
         drop: Optional[PlayerId],
         bid: Optional[int],
         settings: Any,
+        waiver: bool = True,
     ) -> None:
         self._require_ownership(team_id)
 
@@ -487,6 +537,7 @@ class EspnWrite:
                     "roster is full (%d/%d) and no drop was paired with this add"
                     % (len(current), roster_cap)
                 )
+            self._check_acquisition_mode(add, waiver)
 
         if bid is not None:
             if bid < 0:
@@ -501,6 +552,52 @@ class EspnWrite:
                     "bid %d exceeds league FAAB budget %d"
                     % (bid, settings.faab_budget)
                 )
+
+    def _check_acquisition_mode(self, add: PlayerId, waiver: bool) -> None:
+        """Is an instant add even legal for this player?
+
+        Whether a pickup is an instant add or a waiver claim is a property of
+        the *player*, not the league: on 2026-10-20 one live league had all 300
+        of its available players on waivers while the other had 299 free agents
+        and one on waivers. So there is no league-level setting to read, and
+        getting it wrong means the add simply never happens.
+
+        The ``WAIVERS``-but-instant case is a hard error -- ESPN refuses it with
+        ``TRAN_PLAYER_NOT_FREEAGENT``, so we are only converting a remote
+        rejection into a local message that names the fix.
+
+        The reverse (a claim on a free agent) is **only logged**. It is
+        certainly suboptimal, since it defers until the next waiver run a
+        pickup that could have been instant, but whether ESPN accepts it has
+        not been observed, and refusing it outright would block a legitimate
+        add on an unverified belief.
+        """
+        target = self.read.player_in_pool(add)
+        if target is None:
+            raise PreflightError(
+                "ESPN has no player row for id %d in league %d; refusing to "
+                "acquire a player we cannot identify" % (add, self.cfg.league_id)
+            )
+        status = target.acquisition_status
+        if status == "ONTEAM":
+            raise PreflightError(
+                "%s (%d) is on a roster in this league, not available"
+                % (target.name, add)
+            )
+        if target.must_claim_on_waivers and not waiver:
+            raise PreflightError(
+                "%s (%d) is on waivers, so an instant add is impossible -- "
+                "submit a claim instead (waiver=True). ESPN would reject this "
+                "with TRAN_PLAYER_NOT_FREEAGENT."
+                % (target.name, add)
+            )
+        if waiver and status == "FREEAGENT":
+            log.warning(
+                "submitting a waiver claim for %s (%d), who ESPN reports as a "
+                "free agent -- an instant add would have been possible and "
+                "immediate",
+                target.name, add,
+            )
 
 
 def _str_or_none(v: Any) -> Optional[str]:

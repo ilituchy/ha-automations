@@ -47,13 +47,31 @@ class ExplodingClient:
 
 
 class FakeRead:
-    def __init__(self, roster, settings, owned=(7,)):
+    def __init__(self, roster, settings, owned=(7,), pool=None):
         self._roster = roster
         self._settings = settings
         self._owned = set(owned)
+        #: ``player_id -> RosterEntry`` for the acquirable pool. Defaults to
+        #: "every unknown id is a free agent", which keeps the add/drop tests
+        #: focused on what they are each actually asserting; the acquisition
+        #: mode itself is tested explicitly in TestAcquisitionMode.
+        self._pool = dict(pool or {})
 
     def roster(self, team_id=None):
         return list(self._roster)
+
+    def player_in_pool(self, player_id):
+        if player_id in self._pool:
+            return self._pool[player_id]
+        return RosterEntry(
+            player_id=player_id,
+            name="Pool Player %d" % player_id,
+            current_slot=BE,
+            eligible_slots=frozenset({UTIL, BE}),
+            pro_team_id=1,
+            injury_status="ACTIVE",
+            acquisition_status="FREEAGENT",
+        )
 
     def league_settings(self):
         return self._settings

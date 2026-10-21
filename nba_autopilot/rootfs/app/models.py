@@ -138,10 +138,31 @@ class RosterEntry:
     #: infer this from injury status -- ESPN's eligibility rule is its own and
     #: guessing it produces rejected writes.
     ir_eligible: bool = False
+    #: ESPN's ``playerPoolEntry.status``: ``ONTEAM``, ``FREEAGENT``,
+    #: ``WAIVERS``, or ``""`` when not reported.
+    #:
+    #: This decides *how* a player may be acquired, and it is a property of the
+    #: player rather than of the league. On 2026-10-20 one live league had its
+    #: entire available pool on waivers while the other had 299 free agents and
+    #: exactly one player on waivers -- so "does this league use waivers" is
+    #: the wrong question, and only this field answers the right one. An
+    #: instant add of a ``WAIVERS`` player is refused with
+    #: ``TRAN_PLAYER_NOT_FREEAGENT``.
+    acquisition_status: str = ""
 
     @property
     def availability(self) -> str:
         return self.injury_status if self.injury_status in P_PLAY_PRIOR else "ACTIVE"
+
+    @property
+    def must_claim_on_waivers(self) -> bool:
+        """True when acquiring this player needs a claim, not an instant add.
+
+        An unreported status counts as *not* requiring a claim: the field is
+        absent exactly on roster reads, where acquisition does not apply, and
+        the caller should not be pushed into submitting claims there.
+        """
+        return self.acquisition_status == "WAIVERS"
 
 
 @dataclass(frozen=True)

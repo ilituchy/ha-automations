@@ -246,6 +246,25 @@ INJURY_NORMALIZE: Dict[str, str] = {
 EXEC_EXECUTE = "EXECUTE"
 EXEC_CANCEL = "CANCEL"
 
+#: ``type`` on a transaction. **This is not a free-form label -- ESPN gates the
+#: permitted ``items`` against it**, and picking the wrong one fails the whole
+#: transaction. Established empirically against a throwaway league on
+#: 2026-10-20; see ADR-015.
+#:
+#: ``FREEAGENT`` accepts **exactly one ADD item**. It is not "the type for
+#: instant moves": a lone DROP sent as ``FREEAGENT`` is refused with
+#: ``TRAN_INVALID_ITEM_TYPE_COUNT`` ("may only contain one item for MoveType:
+#: ADD"), and so is an instant add-and-drop pair.
+#:
+#: ``ROSTER`` is the type a lone DROP needs -- the same type lineup moves use,
+#: which reads oddly until you see that ESPN models a drop as a roster
+#: mutation rather than as an acquisition.
+#:
+#: ``WAIVER`` accepts one ADD or an ADD+DROP pair, and lands ``PENDING``.
+TRAN_FREEAGENT = "FREEAGENT"
+TRAN_WAIVER = "WAIVER"
+TRAN_ROSTER = "ROSTER"
+
 
 def slot_name(slot: SlotId) -> str:
     return SLOT_NAMES.get(slot, "slot%d" % slot)

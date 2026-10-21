@@ -83,7 +83,16 @@ one mistake ESPN honours silently (see `my_team_ids`).
 
 ### What the live leagues actually return
 
-Four findings from probing both leagues, each of which changed code:
+Findings from probing the live leagues, each of which changed code:
+
+* **A dropped player lingers in the roster `entries` array**, still carrying
+  his old `lineupSlotId`. The only fields that say otherwise are
+  `playerPoolEntry.status` (`WAIVERS`) and `onTeamId` (`0`). So `len(entries)`
+  is **not** a roster count, and `roster()` filters on positive evidence of
+  departure — see ADR-016. Confirmed not to be read-host caching (8 polls over
+  25s, identical).
+* **`playerPoolEntry.status` is the only answer to "how can this player be
+  acquired".** It is per-player, not per-league: see §3.
 
 * **`scheduleSettings.matchupPeriods` is self-referential.** All 22 entries map
   period *n* to `[n]`, so it carries no week structure at all.
@@ -129,11 +138,54 @@ Host `lm-api-writes.fantasy.espn.com`. Single `/transactions/` POST.
    caller to re-read `pending_transactions` + `roster` and reconcile.
 
 ```python
-def set_lineup(self, team_id: int, target: Mapping[PlayerId, SlotId]) -> WriteResult
-def add_drop(self, team_id: int, add: PlayerId | None, drop: PlayerId | None,
-             bid: int | None = None) -> WriteResult
-def cancel(self, team_id: int, transaction_id: str) -> WriteResult
+def set_lineup(self, target: Mapping[PlayerId, SlotId], *,
+               roster: Sequence[RosterEntry] | None = None,
+               scoring_period: int | None = None,
+               team_id: int | None = None) -> WriteResult
+def add_drop(self, *, add: PlayerId | None = None, drop: PlayerId | None = None,
+             bid: int | None = None, waiver: bool = True,
+             roster: Sequence[RosterEntry] | None = None,
+             team_id: int | None = None) -> WriteResult
+def cancel(self, transaction_id: str, *, team_id: int | None = None) -> WriteResult
 ```
+
+### What ESPN actually accepts
+
+All four write surfaces were exercised against a throwaway league on
+2026-10-20. Each of the following was wrong in the code until a real request
+said so; see ADR-015 and ADR-016.
+
+**`type` is not a label — ESPN gates the permitted `items` against it.**
+
+| `type` | permitted items | result |
+| --- | --- | --- |
+| `FREEAGENT` | at most one `ADD`, optional `DROP` | executes immediately |
+| `WAIVER` | one `ADD`, optional `DROP` | lands `PENDING`, cancellable |
+| `ROSTER` | `DROP` only (and lineup moves) | executes immediately |
+
+A lone `DROP` sent as `FREEAGENT` is refused with
+`TRAN_INVALID_ITEM_TYPE_COUNT` ("may only contain one item for MoveType:
+ADD"). That message is easy to misread as "one item total": it is not, and an
+`ADD`+`DROP` pair under `FREEAGENT` is accepted. Conversely `ROSTER` cannot
+carry an `ADD` — `TRAN_INVALID_MOVETYPE`. So the branch is on the item set,
+not on the waiver flag.
+
+**A cancel is a new transaction, not a mutation.** ESPN creates a fresh record
+with its own `id`, `status: CANCELED`, and `relatedTransactionId` pointing at
+the withdrawn claim — which is where the target id must go. Putting it in `id`
+gets `409 "Transaction with ID null could not be found"`: ESPN was reporting a
+null `relatedTransactionId` the whole time while discarding the `id` sent.
+`type` and `scoringPeriodId` are also mandatory and are read off the live
+claim. `items` may be `[]`; ESPN back-fills them.
+
+**Transaction ids are UUID strings**, not integers.
+
+**Whether a pickup is an instant add or a waiver claim is a property of the
+player, not the league.** One live league had all 300 available players on
+`WAIVERS`; the other had 299 `FREEAGENT` and one on `WAIVERS`. There is no
+league setting that answers this — only `RosterEntry.acquisition_status`.
+An instant add of a `WAIVERS` player is refused with
+`TRAN_PLAYER_NOT_FREEAGENT`, so `_check_acquisition_mode` blocks it locally.
 
 ## 4. `sources/` — projection + availability inputs
 

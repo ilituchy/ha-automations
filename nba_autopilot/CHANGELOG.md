@@ -81,6 +81,37 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **The add/drop and cancel write paths were all three wrong**, and are now
+  verified end to end against a throwaway ESPN league rather than against the
+  documented grammar. Every item below was found by a real request on the first
+  attempt to use it.
+  - **The transaction `type` was chosen from the waiver flag**, so a drop was
+    sent as `FREEAGENT` and refused with `TRAN_INVALID_ITEM_TYPE_COUNT`. ESPN
+    gates the permitted `items` against `type`: a lone `DROP` needs `ROSTER`,
+    and `ROSTER` in turn cannot carry an `ADD`. This would have broken *every*
+    add/drop the app made. See ADR-015.
+  - **`cancel()` addressed the claim by `id`**, which ESPN discards and
+    replaces — the target belongs in `relatedTransactionId`, because a cancel
+    is a *new* transaction rather than a mutation of the old one. The 409 read
+    `"Transaction with ID null could not be found"`, which was ESPN describing
+    its own null field, not ours. `type` and `scoringPeriodId` are mandatory
+    too and are now read off the live claim; `cancel()` also looks the claim up
+    first, so cancelling something that is not pending no longer reaches the
+    network.
+  - **An instant add of a player on waivers** is now blocked in preflight with
+    a message naming the fix, instead of being sent and rejected.
+- **A dropped player stays in the roster read**, keeping his old
+  `lineupSlotId`, and `roster()` returned him. `len(entries)` is not a roster
+  count. Left unfixed this would have assigned a lineup slot to someone no
+  longer on the team — which ESPN rejects, losing the whole day's lineup — and
+  made the exact-capacity matching infeasible for a reason nothing logged would
+  explain. Exclusion now requires positive evidence of departure, and is logged
+  per player. See ADR-016.
+- **`free_agents()` could not distinguish a free agent from a player on
+  waivers**, because `RosterEntry` had nowhere to put it. This is per-player,
+  not per-league: one live league had all 300 available players on waivers
+  while the other had 299 free agents and one on waivers. `acquisition_status`
+  and `must_claim_on_waivers` now carry it. See ADR-017.
 - **`scheduleSettings.matchupPeriods` was being trusted.** Both live leagues
   send a self-referential map — all 22 entries map period *n* to `[n]` — which
   read literally says every matchup period is one day long. That would have

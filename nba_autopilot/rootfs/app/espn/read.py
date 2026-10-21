@@ -249,6 +249,18 @@ class EspnRead:
     def roster(
         self, team_id: Optional[int] = None, scoring_period: Optional[int] = None
     ) -> List[RosterEntry]:
+        """Players actually on the team right now.
+
+        **A dropped player lingers in ``entries``.** Observed live: after a
+        successful ``DROP``, the entry stays in the array still carrying its
+        old ``lineupSlotId``, and only ``playerPoolEntry.status`` (``WAIVERS``)
+        and ``onTeamId`` (``0``) say otherwise. So ``len(entries)`` is not a
+        roster count, and taking it as one is not a cosmetic error: the
+        optimizer would assign a lineup slot to someone who is not on the
+        team -- which ESPN rejects, losing the whole day's lineup -- and the
+        exact-capacity matching in ``pipeline.py`` would fit 13 players into
+        13 slots when one of them is a ghost.
+        """
         team_id = self.cfg.team_id if team_id is None else team_id
         params = {"scoringPeriodId": scoring_period} if scoring_period else None
         raw = self._get(self._league_url, ("mRoster", "mTeam"), params=params)
@@ -256,7 +268,24 @@ class EspnRead:
             if int(team.get("id")) != int(team_id):
                 continue
             entries = (team.get("roster") or {}).get("entries") or []
-            return [_parse_entry(e) for e in entries]
+            kept, dropped = [], []
+            for e in entries:
+                if _is_on_team(e, int(team_id)):
+                    kept.append(_parse_entry(e))
+                else:
+                    dropped.append(e)
+            if dropped:
+                # Worth a line each: this is rare, and when it happens it
+                # explains a roster that is one player short of its slots.
+                for e in dropped:
+                    ppe = e.get("playerPoolEntry") or {}
+                    log.info(
+                        "excluding player %s from team %d's roster: status=%r "
+                        "onTeamId=%r (dropped, awaiting waiver processing)",
+                        e.get("playerId"), team_id, ppe.get("status"),
+                        ppe.get("onTeamId"),
+                    )
+            return kept
         raise EspnError("team %d not found in league %d" % (team_id, self.cfg.league_id))
 
     def my_team_ids(self) -> Set[int]:
@@ -305,6 +334,20 @@ class EspnRead:
         }
         raw = self._get(self._league_url, ("kona_player_info",), fantasy_filter=flt)
         return [_parse_entry(p) for p in (raw.get("players") or [])]
+
+    def player_in_pool(self, player_id: PlayerId) -> Optional[RosterEntry]:
+        """One player from the league pool, for his ``acquisition_status``.
+
+        ``free_agents()`` is sorted and truncated, so a specific target may not
+        be in it; this asks about him directly. Returns ``None`` when ESPN has
+        no row for the id at all, which is the honest answer to give a caller
+        about to try acquiring him.
+        """
+        flt = {"players": {"filterIds": {"value": [int(player_id)]}}}
+        raw = self._get(self._league_url, ("kona_player_info",), fantasy_filter=flt)
+        for p in raw.get("players") or []:
+            return _parse_entry(p)
+        return None
 
     # -- cap accounting ----------------------------------------------------
 
@@ -503,6 +546,34 @@ def _opt_int(v: Any) -> Optional[int]:
         return None
 
 
+def _is_on_team(entry: Mapping[str, Any], team_id: int) -> bool:
+    """Is this roster entry a player who is still actually on ``team_id``?
+
+    Deliberately asymmetric: an entry is excluded only on **positive evidence**
+    that the player has left -- a ``status`` that is present and not
+    ``ONTEAM``, or an ``onTeamId`` that is present and not ours. When ESPN
+    omits both fields the entry is kept.
+
+    The asymmetry is the point. Wrongly keeping a departed player costs one
+    rejected lineup write, which is loud and recoverable. Wrongly *excluding*
+    a real player would silently shrink the roster below its slot count and
+    leave him unmanaged, which is quiet and would be blamed on the optimizer.
+    Both live leagues report ``ONTEAM`` plus a matching ``onTeamId`` for every
+    player, so the common path is unaffected either way.
+    """
+    ppe = entry.get("playerPoolEntry") or {}
+
+    status = ppe.get("status")
+    if status is not None and str(status).upper() != "ONTEAM":
+        return False
+
+    on_team = _opt_int(ppe.get("onTeamId"))
+    if on_team is not None and on_team != int(team_id):
+        return False
+
+    return True
+
+
 def _parse_entry(raw: Mapping[str, Any]) -> RosterEntry:
     """Handle both roster entries and free-agent player wrappers.
 
@@ -540,6 +611,11 @@ def _parse_entry(raw: Mapping[str, Any]) -> RosterEntry:
         injury_status=status,
         lineup_locked=bool(raw.get("lineupLocked") or raw.get("playerPoolEntry", {}).get("lineupLocked")),
         ir_eligible=ir_ok,
+        # ``pool`` already normalized the two payload shapes above, which is
+        # what makes one line enough: on ``mRoster`` this reads
+        # ``playerPoolEntry.status``, and on ``kona_player_info`` the same
+        # field sits on the wrapper that ``pool`` fell back to.
+        acquisition_status=str(pool.get("status") or "").upper(),
     )
 
 

@@ -502,3 +502,108 @@ eligibility, IR eligibility, per-slot capacity, whole-roster-benched. It is a
 deliberate duplicate of the write-path preflight. A failure returns
 `feasible=False` with the *current* lineup as the target, so an unsound plan is
 a reported non-event rather than an exception or, worse, a write.
+
+## ADR-015 — The transaction `type` is chosen from the items, not from the waiver flag.
+
+ESPN's `/transactions/` endpoint takes a `type` alongside an `items` array, and
+the two are not independent: **ESPN validates the permitted item types against
+the transaction type** and refuses the whole transaction on a mismatch. This
+was not documented anywhere we could find, and the code shipped with
+`"WAIVER" if waiver else "FREEAGENT"` — which is wrong for any drop.
+
+Established by probing a throwaway league, since a rejected POST changes
+nothing and so each variant is a free no-op:
+
+| `type` | permitted items | result |
+| --- | --- | --- |
+| `FREEAGENT` | at most one `ADD`, optional `DROP` | immediate |
+| `WAIVER` | one `ADD`, optional `DROP` | `PENDING` |
+| `ROSTER` | `DROP` only | immediate |
+
+A lone `DROP` as `FREEAGENT` is refused with `TRAN_INVALID_ITEM_TYPE_COUNT`:
+*"TransactionType FREEAGENT may only contain one item for MoveType: ADD."*
+That drop needs `ROSTER` — the same type lineup moves use, which reads oddly
+until you notice ESPN models a drop as a roster mutation rather than as an
+acquisition. Symmetrically, `ROSTER` cannot carry an `ADD`
+(`TRAN_INVALID_MOVETYPE`).
+
+**A misread worth recording.** We first took that message to mean "exactly one
+item total" and concluded `FREEAGENT` could not express an add-and-drop pair.
+It can: the constraint is on the count of `ADD` items. The corrected reading
+was only reachable because ESPN reports the two failures with *different*
+codes — `TRAN_INVALID_ITEM_TYPE_COUNT` for a bad item set versus
+`TRAN_PLAYER_NOT_FREEAGENT` for a bad player — which makes a rejection
+informative about which rule was tripped even when the transaction can never
+succeed. That discriminator is what let us map the table without executing
+most of it.
+
+So the branch is on the item set. The consequence of getting this wrong was
+not subtle: **every** add/drop the app made would have been rejected, and the
+first one was.
+
+Also settled here: a timed-out add/drop still must not be retried, and this
+makes the reason sharper. The failure modes are now distinguishable by error
+code, so a reconciling read can tell "ESPN refused the shape" from "ESPN
+refused the player" without guessing.
+
+## ADR-016 — A dropped player stays on the roster read, so `roster()` filters.
+
+After a successful `DROP`, ESPN keeps the player in the team's `roster.entries`
+array — **still carrying his old `lineupSlotId`** — until waivers process. The
+only fields that distinguish him are `playerPoolEntry.status` (`WAIVERS`) and
+`onTeamId` (`0`). This is not read-host caching: 8 polls over 25 seconds
+returned the identical payload.
+
+`EspnRead.roster()` previously returned every entry. That is a bug with teeth
+in two places. The optimizer would assign a lineup slot to a player who is not
+on the team, which ESPN rejects — losing the whole day's lineup, not just that
+one move. And the exact-capacity matching of ADR-014 would be fitting 13
+players into 13 slots when one of them is a ghost, which is infeasible for a
+reason nothing in the logs would explain.
+
+So `roster()` filters, and `_is_on_team()` is **deliberately asymmetric**: an
+entry is excluded only on *positive evidence* of departure — a `status` present
+and not `ONTEAM`, or an `onTeamId` present and not ours. When ESPN omits both
+fields the entry is kept.
+
+The asymmetry follows from the costs, which are not symmetric. Wrongly keeping
+a departed player costs one rejected write: loud, immediate, recoverable.
+Wrongly *excluding* a real player silently shrinks the roster below its slot
+count and leaves him unmanaged all week — quiet, and it would be blamed on the
+optimizer. Both live leagues report `ONTEAM` plus a matching `onTeamId` for
+every player, so the common path is identical either way and the asymmetry only
+decides the ambiguous case.
+
+Each exclusion is logged with the player id and the fields that triggered it.
+This is rare enough to be worth a line, and when it happens it is the
+explanation for a roster that is one short of its slots.
+
+## ADR-017 — Acquisition mode is a property of the player, not the league.
+
+Whether a pickup is an instant add or a waiver claim looks like a league
+setting. It is not. On 2026-10-20 one live league had **all 300** of its
+available players on `WAIVERS`, while the other had **299 `FREEAGENT` and one
+on `WAIVERS`** — within a single league, in the same read.
+
+`acquisitionSettings` cannot answer this. Both leagues report
+`acquisitionType: WAIVERS_TRADITIONAL`; the difference is entirely in each
+player's own `playerPoolEntry.status`, which changes as players clear waivers.
+Any league-level inference would be wrong in the second league immediately and
+in the first one by the weekend.
+
+So `RosterEntry` carries `acquisition_status`, populated from the same field on
+both roster and player-pool reads, and `_check_acquisition_mode()` consults the
+*target player* before an add. An instant add of a `WAIVERS` player raises
+`PreflightError` locally, converting a remote `TRAN_PLAYER_NOT_FREEAGENT` into
+a message that names the fix.
+
+The reverse — a claim on a free agent — is **logged, not blocked.** It is
+certainly suboptimal, deferring to the next waiver run a pickup that could have
+been instant. But whether ESPN accepts it has not been observed, and the
+throwaway league had no free agents to test it with. Refusing a legitimate add
+on the strength of an unverified belief is the worse error, so the asymmetry
+here matches ADR-016's: block what is known to fail, report what is merely
+suspected.
+
+This also means the not-yet-built `solve/addrop.py` must read
+`must_claim_on_waivers` per candidate rather than deciding once per league.
