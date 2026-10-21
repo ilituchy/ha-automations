@@ -381,3 +381,124 @@ inverts the Bernoulli gate rather than merely dividing by `p_play`, because the
 `p(1−p)E[X]²` term is availability risk rather than game-to-game variance, and
 leaving it in would double-count it against the risk model that is already
 pricing availability.
+
+## ADR-012 — The week comes from the NBA calendar, not from ESPN's `matchupPeriods`.
+
+**Context:** the games-played cap is per matchup period, so pricing it needs to
+know which scoring periods are left in the current week. `scheduleSettings.
+matchupPeriods` is the obvious source and is what the first draft read.
+
+Probing both live leagues shows it is **self-referential**: all 22 entries map
+period *n* to `[n]`. Read literally it says every week is one day long, which
+would make the remaining-games horizon exactly "today" and collapse `λ` to the
+value of today's marginal game. The optimizer would then spend the whole weekly
+budget by Tuesday while reporting a perfectly plausible shadow price. That is
+the worst failure mode available here: wrong, confident, and invisible.
+
+Two other probe findings bound the alternatives. Scoring periods **are** daily
+and linear in US Eastern, so a calendar is one anchor date plus an offset. And
+ESPN does report `currentMatchupPeriod` as a plain integer.
+
+**Decision:** derive matchup periods from Monday–Sunday weeks anchored on the
+season opener (`solve/calendar.py`), and discard `matchupPeriods` at the parse
+boundary — `_matchup_windows()` detects the degenerate shape, logs it once, and
+returns `{}` rather than letting a 1-day "week" reach the optimizer.
+
+The derived model is then checked against ESPN on every run.
+`SeasonCalendar.verify()` recomputes `currentMatchupPeriod` from
+`currentScoringPeriod` and compares. This is the point of the design: a model
+of someone else's calendar is a hypothesis, and this one reports its own
+refutation. On disagreement the caller prices **no** cap rather than pricing a
+wrong one — `λ = 0` plus a note naming the reason. An unpriced cap overspends
+by at most the slack in one week and is visible in the notes; a mispriced cap
+is silent.
+
+`from_period_dates` likewise *records* nonlinearity in `linearity_errors` and
+exposes `trustworthy`, instead of repairing the sequence. Repairing would mean
+inventing a calendar, and the whole point is to notice when we no longer have
+one. The All-Star break is the obvious candidate to break linearity later in
+the season; this is how we will find out rather than guess.
+
+## ADR-013 — Games used is reconstructed, cross-checked, and allowed to say "I don't know".
+
+**Context:** `λ` needs games used so far this matchup period. Neither ESPN
+source survives contact:
+
+- `cumulativeScore.statBySlot` under `mMatchupScore` is the per-matchup figure
+  the cap is actually enforced against, and it came back `None` on **every**
+  matchup row of both leagues — including rows where individual players already
+  showed a game played. Possibly it is only populated after a period closes.
+- `teams[].valuesByStat["42"]` is confirmed-shape team games played, but
+  season-to-date. Right number, wrong horizon.
+
+**Decision:** compute both on every run, cross-check them, and reconstruct the
+weekly figure as a difference of two season-to-date readings — which requires
+remembering the reading taken on the week's first day, hence `gp_snapshots`
+(`state.py`). The snapshot is written `INSERT OR IGNORE` so the **earliest**
+reading of a week wins; a later run must not overwrite the baseline with a
+mid-week total.
+
+Three asymmetries drive the details:
+
+**On disagreement, take the larger.** Over-counting usage costs one marginal
+start. Under-counting a hard cap costs a *legal lineup* later in the week.
+Those are not comparable, so the tie is not split.
+
+**An empty `statBySlot` is unknown, not zero.** `starts_from_stat_by_slot`
+returns `None` for `{}`. "ESPN sent no per-slot data" and "ESPN says zero games
+played" are different claims, and the first masquerading as the second would
+read as a full budget and overspend immediately.
+
+**A missing baseline is reported, not assumed.** If the add-on was down on
+Monday, or was installed mid-week, the week has no baseline and the delta would
+under-count by however many games were already played. `measure` refuses a
+mid-week baseline explicitly and returns `trustworthy=False`.
+
+`trustworthy=False` is a real answer that propagates: `pipeline.plan_lineup`
+prices the cap only when the calendar **and** the usage reading are both
+trustworthy, and otherwise runs plain daily maximization with a note saying
+which input was missing. `usage.py` measures and never decides; declining to
+act on a bad measurement is `main.py`'s job.
+
+## ADR-014 — Today's lineup is a perfect matching, not a top-N selection.
+
+**Context:** the natural reading of "set the optimal lineup" is: value every
+player, take the best ten, bench the rest. The first draft of the weight
+construction followed it, including only players with a game today.
+
+Real roster shapes rule it out. League A has 10 starting slots, 3 bench slots
+and 13 non-IR players — capacity equals roster size **exactly**. On opening
+night only 4 of those 13 had an NBA game. There is no arrangement in which the
+other 9 are benched; there are only 3 bench slots. Any plan that omits them
+produces a non-total `target`, and `set_lineup` requires a slot for every
+rostered player.
+
+**Decision:** build the day's decision as a max-weight bipartite matching over
+**every** (movable player, eligible slot in the capacity map) pair, and let
+gameless players occupy starting slots at weight 0. That is not a workaround —
+it is correct. The cap counts games *played*, so a starter with no game
+consumes nothing, and there is no reason to prefer benching him.
+
+Two consequences that were bugs before they were notes:
+
+**Weights must be shifted strictly positive.** `max_weight_assignment` treats
+both constraints as `<=` and may leave a row unassigned at cost 0, so a
+negative-weight player — anyone below `λ` under a binding cap — would be
+dropped from the result entirely, making `target` non-total and discarding the
+whole day's lineup. The shift is `max(0, -min(rc)) + ε`, neutral to the optimum
+because every player is assigned exactly once, and `ε` also carries the
+stickiness tiebreak that prevents churn between equal-value arrangements.
+`λ = +inf` is handled before the shift, since shifting by infinity is not a
+thing.
+
+**Locked players consume capacity wherever they are, bench included.** Routing
+locked players through `locked=` rather than simply excluding them from the
+matrix is what keeps a 4th locked bench player from being planned into a
+3-slot bench.
+
+`validate_target` then re-derives every constraint independently of the solver
+that just satisfied them — totality, phantom players, locked movement,
+eligibility, IR eligibility, per-slot capacity, whole-roster-benched. It is a
+deliberate duplicate of the write-path preflight. A failure returns
+`feasible=False` with the *current* lineup as the target, so an unsound plan is
+a reported non-event rather than an exception or, worse, a write.

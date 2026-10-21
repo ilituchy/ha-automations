@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from datetime import date
 from typing import Dict, FrozenSet, Optional
+from zoneinfo import ZoneInfo
 
 SlotId = int
 StatId = int
@@ -53,11 +54,26 @@ SLOT_NAMES: Dict[SlotId, str] = {
 #: in both. A cap on one slot would not track another league's starter count.
 TEAM_TOTAL_LIMIT_SLOT: SlotId = 15
 
-#: Days in a scoring period's week. ``lineupSlotStatLimits`` values arrive
-#: divided by this (``matchupLimitPerScoringPeriod: true``), which is why they
-#: show up as repeating decimals rather than the round numbers on the settings
-#: page. Multiply by this to recover the per-matchup cap.
+#: The divisor ESPN applies to ``lineupSlotStatLimits``
+#: (``matchupLimitPerScoringPeriod: true``), which is why those values arrive as
+#: repeating decimals rather than the round numbers on the settings page.
+#: Multiply by this to recover the per-matchup cap: ``40/7 * 7 = 40``.
+#:
+#: It is a **fixed divisor, not the length of any particular matchup period.**
+#: Matchup periods are Monday-Sunday weeks, so a season that opens on a Tuesday
+#: has a six-day first week -- and its cap is still 40, because the cap is per
+#: matchup period. Reading this constant as "days in this week" and recomputing
+#: from it would shrink the opening week's budget by a seventh.
 SCORING_PERIODS_PER_MATCHUP: int = 7
+
+#: Timezone to resolve a tipoff instant into the US game date ESPN groups by.
+#:
+#: Load-bearing, and the UTC default is wrong: a 19:30 Pacific tipoff is already
+#: past midnight UTC, so a UTC date pushes every west-coast late game onto the
+#: following day. Verified across all 156 game days of the 2026-27 season --
+#: in Eastern, every scoring period resolves to exactly one date; in UTC, around
+#: thirty of them straddle two.
+GAME_DATE_TZ = ZoneInfo("America/New_York")
 
 #: Slots that produce no fantasy scoring. This is one of only two semantic
 #: assumptions in this module -- ESPN does not flag it in the payload, so it

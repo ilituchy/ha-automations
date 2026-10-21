@@ -8,6 +8,28 @@ All notable changes to this app are documented here. The format follows
 
 ### Added
 
+- **The solver runs.** `run_league()` is wired end to end: projections →
+  per-player value → games-played shadow price → assignment → proposal →
+  journal → notification. Previously it read the league and stopped, recording
+  `"read-only run: solver pipeline not yet wired"`. `shadow_mode` is still the
+  default and is enforced inside `EspnWrite`, so a run computes and reports a
+  lineup without sending anything to ESPN. Verified against both live leagues.
+- `pipeline.py` — assembles the day's decision as a max-weight matching over
+  every eligible (player, slot) pair. Emits a `LineupPlan` whose `target` is
+  **total** (one slot per rostered player), plus the moves, `λ`, the
+  utilization ratio and the notes explaining them. See ADR-014.
+- `solve/calendar.py` — Monday–Sunday matchup periods derived from the NBA
+  calendar, with `verify()` cross-checking the model against ESPN's own
+  `currentMatchupPeriod` on every run. See ADR-012.
+- `usage.py` and the `gp_snapshots` table — games used this matchup period,
+  reconstructed as a difference of season-to-date readings against a baseline
+  captured on the week's first day, cross-checked against `statBySlot` where
+  ESPN populates it. See ADR-013.
+- The run record now reports the matchup-period window and game-day count, the
+  games-used reading and its provenance, `λ`, the utilization ratio, and any
+  rostered player ESPN gives **no NBA team** (`proTeamId 0`) — who is
+  unstartable all week and invisible to the cap, which is correct but worth
+  saying out loud. Two players were in that state on the first live run.
 - **Multiple leagues.** The `leagues` option takes one entry per team you
   manage (`league_id`, `team_id`, optional `label`). Each league is optimized
   independently — roster, player values and games-played budget are
@@ -59,6 +81,20 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **`scheduleSettings.matchupPeriods` was being trusted.** Both live leagues
+  send a self-referential map — all 22 entries map period *n* to `[n]` — which
+  read literally says every matchup period is one day long. That would have
+  priced the games-played cap over a one-day horizon and spent the whole weekly
+  budget by Tuesday, with a plausible-looking shadow price the whole time. The
+  degenerate shape is now detected at the parse boundary, logged once, and
+  discarded in favour of the derived calendar. See ADR-012.
+- Dates are now produced in exactly one place, in one timezone.
+  `scoring_period_map()` derived them in UTC — which puts a scoring period on
+  the wrong day for every evening game on the US west coast — and
+  `pro_team_game_days()` derived them a second, inconsistent way. Both are
+  replaced by `scoring_period_dates()` in US Eastern.
+- `player_projections` sent a `limit` without a sort, which ESPN rejects with
+  `400 FILTER_LIMIT_MISSING_SORT`.
 - **Four league-settings fields were parsed wrongly**, all found by the first
   read of a real league:
   - `lineupSlotStatLimits` is `{slot: {statId, limitValue}}`, not

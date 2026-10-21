@@ -350,13 +350,25 @@ class EspnRead:
 
     # -- schedule ----------------------------------------------------------
 
-    def scoring_period_map(self) -> Dict[str, int]:
-        """``YYYY-MM-DD -> scoringPeriodId``, from ESPN's own calendar.
+    def scoring_period_dates(self) -> Dict[int, date]:
+        """``scoringPeriodId -> US game date``, from ESPN's own period keys.
 
-        Never computed from a date arithmetic rule. ESPN's scoring periods do
-        not map cleanly onto calendar days around the All-Star break and the
-        season edges, and a one-off offset there would write a lineup to the
-        wrong day.
+        ESPN's ``proGamesByScoringPeriod`` key is the authority on which period
+        a game belongs to; this method only has to recover the *date* of each
+        period, and the one thing that matters is the timezone it converts in.
+
+        A tipoff is a UTC instant, and a 19:30 Pacific game is already past
+        midnight UTC. Taking the UTC date therefore pushes every west-coast
+        late game onto the following day. Probed across all 156 game days of
+        the 2026-27 season: converting in **US Eastern** yields exactly one
+        date per scoring period, with no period spanning two. Converting in UTC
+        splits 30-odd of them.
+
+        The predecessor of this method inverted the mapping to
+        ``date -> period`` and resolved collisions with ``setdefault``, so the
+        UTC spillover meant the winner depended on the iteration order of
+        ESPN's team list -- a nondeterministic calendar, which is a bad thing
+        for something that decides which day a lineup is written to.
         """
         url = "%s/apis/v3/games/%s/seasons/%d" % (
             ids.READ_HOST,
@@ -364,42 +376,64 @@ class EspnRead:
             self.cfg.season,
         )
         raw = self._get(url, ("proTeamSchedules_wl",))
-        out: Dict[str, int] = {}
+        seen: Dict[int, Set[date]] = {}
         for team in (raw.get("settings") or {}).get("proTeams") or []:
-            by_period = ((team.get("proGamesByScoringPeriod")) or {})
-            for period, games in by_period.items():
+            for period, games in ((team.get("proGamesByScoringPeriod")) or {}).items():
                 for g in games or []:
-                    ts = g.get("date")
+                    ts = (g or {}).get("date")
                     if ts is None:
                         continue
-                    day = datetime.fromtimestamp(
-                        int(ts) / 1000.0, tz=timezone.utc
-                    ).date().isoformat()
-                    out.setdefault(day, int(period))
+                    when = datetime.fromtimestamp(int(ts) / 1000.0, tz=timezone.utc)
+                    seen.setdefault(int(period), set()).add(
+                        when.astimezone(ids.GAME_DATE_TZ).date()
+                    )
+
+        out: Dict[int, date] = {}
+        for period, days in seen.items():
+            if len(days) > 1:
+                # Would mean the Eastern-date finding above has stopped holding.
+                # Take the earliest and say so loudly rather than pick silently.
+                log.error(
+                    "scoring period %d spans %d US dates (%s); the calendar "
+                    "model assumes one. Taking the earliest.",
+                    period, len(days), sorted(days),
+                )
+            out[period] = min(days)
         return out
 
-    def pro_team_game_days(self) -> Dict[int, List[str]]:
-        """``proTeamId -> sorted list of YYYY-MM-DD it plays``."""
+    def pro_team_scoring_periods(self) -> Dict[int, Dict[int, int]]:
+        """``proTeamId -> {scoringPeriodId: games that period}``.
+
+        The horizon the games-played budget is spent over, and the only form of
+        the NBA schedule the optimizer consults, for two reasons:
+
+        * ``proGamesByScoringPeriod`` is **already keyed by scoring period**, so
+          no date arithmetic is involved and the All-Star break and season edges
+          cannot introduce an off-by-one.
+        * the keys are fantasy ``proTeamId``, the same id space as
+          ``RosterEntry.pro_team_id``. Joining through the site API's team ids or
+          through abbreviations would be a second mapping to keep correct.
+
+        The predecessor of this method keyed by a date derived from the game's
+        UTC timestamp, which is a day late for every west-coast evening tipoff.
+        Dates are now only produced by :meth:`scoring_period_dates`, in one
+        place, in one timezone.
+        """
         url = "%s/apis/v3/games/%s/seasons/%d" % (
             ids.READ_HOST,
             ids.GAME,
             self.cfg.season,
         )
         raw = self._get(url, ("proTeamSchedules_wl",))
-        out: Dict[int, List[str]] = {}
+        out: Dict[int, Dict[int, int]] = {}
         for team in (raw.get("settings") or {}).get("proTeams") or []:
             tid = int(team.get("id"))
-            days: Set[str] = set()
-            for games in ((team.get("proGamesByScoringPeriod")) or {}).values():
-                for g in games or []:
-                    ts = g.get("date")
-                    if ts is not None:
-                        days.add(
-                            datetime.fromtimestamp(
-                                int(ts) / 1000.0, tz=timezone.utc
-                            ).date().isoformat()
-                        )
-            out[tid] = sorted(days)
+            by_period: Dict[int, int] = {}
+            for period, games in ((team.get("proGamesByScoringPeriod")) or {}).items():
+                n = len([g for g in (games or []) if g])
+                if n:
+                    by_period[int(period)] = n
+            out[tid] = by_period
         return out
 
     # -- transactions ------------------------------------------------------
@@ -435,7 +469,14 @@ class EspnRead:
         wanted = [int(p) for p in player_ids]
         if not wanted:
             return {}
-        flt = {"players": {"filterIds": {"value": wanted}, "limit": len(wanted)}}
+        # No ``limit`` here, deliberately. ESPN rejects a limit that is not
+        # accompanied by a sort with
+        #     400 FILTER_LIMIT_MISSING_SORT
+        #     "Filter: Limit request must be accompanied by a sort"
+        # which is what this method did on every call until it was run against a
+        # live league. ``filterIds`` already bounds the result set to exactly the
+        # players asked for, so the limit was redundant as well as fatal.
+        flt = {"players": {"filterIds": {"value": wanted}}}
         raw = self._get(self._league_url, ("kona_player_info",), fantasy_filter=flt)
         out: Dict[PlayerId, Dict[str, Dict[StatId, float]]] = {}
         for p in raw.get("players") or []:
@@ -503,14 +544,28 @@ def _parse_entry(raw: Mapping[str, Any]) -> RosterEntry:
 
 
 def _matchup_windows(settings: Mapping[str, Any]) -> Dict[int, MatchupWindow]:
-    """``matchupPeriod -> (first, last) scoringPeriodId``.
+    """``matchupPeriod -> (first, last) scoringPeriodId``, when ESPN says.
 
-    Read from ``scheduleSettings.matchupPeriods`` rather than derived, for the
-    same reason as ``scoring_period_map``.
+    Returns ``{}`` on both live leagues, and that is the correct answer rather
+    than a parse failure. ``scheduleSettings.matchupPeriods`` arrives
+    **self-referential** -- ``{"1": [1], "2": [2], ...}`` alongside
+    ``matchupPeriodLength: 1`` -- which decodes to "every matchup period is one
+    scoring period long". It is not: matchup periods are Monday-Sunday weeks, and
+    a one-day period could not accommodate a 40-game cap with ten starting
+    slots. ESPN appears to use this field only in leagues whose weeks are
+    explicitly configured.
+
+    So a self-referential payload is detected and dropped here, at the parse
+    boundary, instead of being handed on as 22 plausible-looking one-day
+    ``MatchupWindow`` objects. The consumer is ``solve/calendar.py``, which
+    models the weeks from the NBA calendar and cross-checks against ESPN's own
+    ``currentMatchupPeriod``; a populated-but-wrong mapping here would silently
+    win over a model that is actually verified.
     """
     sched = settings.get("scheduleSettings") or {}
+    raw = sched.get("matchupPeriods") or {}
     out: Dict[int, MatchupWindow] = {}
-    for period, members in (sched.get("matchupPeriods") or {}).items():
+    for period, members in raw.items():
         vals = [int(m) for m in (members or [])]
         if not vals:
             continue
@@ -519,4 +574,17 @@ def _matchup_windows(settings: Mapping[str, Any]) -> Dict[int, MatchupWindow]:
             first_scoring_period=min(vals),
             last_scoring_period=max(vals),
         )
+
+    degenerate = [
+        w for w in out.values()
+        if w.first_scoring_period == w.last_scoring_period == w.matchup_period
+    ]
+    if out and len(degenerate) == len(out):
+        log.info(
+            "scheduleSettings.matchupPeriods is self-referential (%d entries, "
+            "each period mapping to itself); ignoring it and deriving matchup "
+            "periods from the NBA calendar instead",
+            len(out),
+        )
+        return {}
     return out

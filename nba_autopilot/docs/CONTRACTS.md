@@ -53,20 +53,64 @@ class EspnRead:
     def __init__(self, cfg: EspnConfig, http: httpx.Client) -> None: ...
 
     def league_settings(self) -> LeagueSettings
-    def roster(self, team_id: int, scoring_period: int | None = None) -> list[RosterEntry]
+    def roster(self, team_id: int | None = None,
+               scoring_period: int | None = None) -> list[RosterEntry]
     def free_agents(self, limit: int = 200) -> list[RosterEntry]
-    def games_used(self, team_id: int) -> dict[SlotId, int]   # per matchup period
-    def schedule_map(self) -> ScheduleMap        # date <-> scoringPeriodId, per-team game dates
-    def pending_transactions(self, team_id: int) -> list[dict]
     def my_team_ids(self) -> set[int]            # teams whose owners[] contains our SWID
+    def pending_transactions(self, team_id: int | None = None) -> list[Mapping]
+    def player_projections(self, player_ids) -> Mapping[PlayerId, Mapping[str, Any]]
+
+    # Games-played cap inputs. Neither is sufficient alone -- see below.
+    def games_used(self, team_id: int | None = None) -> dict[SlotId, int]
+    def season_games_played(self, team_id: int | None = None) -> int | None
+
+    # Calendar primitives. Dates are produced here and nowhere else.
+    def scoring_period_dates(self) -> dict[int, date]
+    def pro_team_scoring_periods(self) -> dict[ProTeamId, dict[int, int]]
 ```
+
+`team_id` defaults to the configured team on every method that takes it, so a
+caller never has to restate it and cannot accidentally restate it *wrong* — the
+one mistake ESPN honours silently (see `my_team_ids`).
 
 `LeagueSettings` must expose, verbatim from ESPN (no defaults invented):
 `scoring_type`, `lineup_slot_counts: dict[SlotId,int]`,
-`lineup_slot_stat_limits: dict[SlotId,int] | None` (the GP cap — **absent means
-no cap, which is a different thing from a cap of zero**), `scoring_items`
-(statId -> points or category flag), `waiver_mode`, `faab_budget`,
-`roster_lock_mode`, `matchup_period_boundaries`.
+`lineup_slot_stat_limits: dict[SlotId, StatLimit] | None` (the GP cap —
+**absent means no cap, which is a different thing from a cap of zero**),
+`scoring_items` (statId -> points or category flag), `categories`,
+`waiver_mode`, `faab_budget`, `roster_lock_mode`, `current_scoring_period`,
+`current_matchup_period`, `matchup_period_boundaries`.
+
+### What the live leagues actually return
+
+Four findings from probing both leagues, each of which changed code:
+
+* **`scheduleSettings.matchupPeriods` is self-referential.** All 22 entries map
+  period *n* to `[n]`, so it carries no week structure at all.
+  `matchup_period_boundaries` is therefore **empty** in practice —
+  `_matchup_windows()` detects the degenerate shape and discards it rather than
+  letting a 1-day "week" reach the optimizer. Week structure comes from
+  `solve/calendar.py` instead, cross-checked against ESPN's own
+  `currentMatchupPeriod` on every run.
+* **Scoring periods are daily and linear** in US Eastern. That makes the
+  calendar a single anchor date plus an offset, and makes it falsifiable:
+  `SeasonCalendar.from_period_dates` validates every probed period against the
+  model and records (never repairs) disagreements.
+* **Both team-level games-played sources are untrustworthy.**
+  `cumulativeScore.statBySlot` came back `None` on every matchup row of both
+  leagues, and team `valuesByStat["42"]` is season-to-date, not per-matchup. So
+  `games_used()` returns the per-slot shape when ESPN populates it, and
+  `usage.py` reconciles it against a season-to-date delta measured from a
+  baseline snapshot. See §`usage.py`.
+* **Only stat split `"10"`** (season projection, per-game) is populated in
+  October. The split key is `f"{statSourceId}{statSplitTypeId}"`.
+
+`lineup_slot_stat_limits` is keyed at slot **15** in both leagues — a
+pseudo-slot that appears in neither league's `lineupSlotCounts` — with
+`limitValue` **divided by seven** alongside `matchupLimitPerScoringPeriod:
+true`. It is one pooled, team-wide, per-matchup-period budget, not a per-slot
+one; `budget.matchup_cap()` raises `PooledCapUnsupported` rather than guess if
+a league ever keys it at a real slot.
 
 ## 3. `espn/write.py` — `EspnWrite`
 
@@ -134,35 +178,111 @@ Pure functions. No I/O, no clock, no config reads. Fully unit-testable.
 def max_weight_assignment(
     weights: Mapping[tuple[PlayerId, SlotId], float],
     slot_capacity: Mapping[SlotId, int],
+    *, locked: Mapping[PlayerId, SlotId] | None = None,
 ) -> dict[PlayerId, SlotId]
 ```
-Exact. Both constraints are `<=`, not `=` — benching is free and sometimes
-optimal. Ineligible or no-game pairs are **absent from `weights`**, which is
-not the same as weight 0. (ADR-002.)
+Exact (Jonker-Volgenant, pure Python). Both constraints are `<=`, not `=`, so
+the routine may leave a row unassigned at cost 0. Ineligible pairs are
+**absent from `weights`**, which is not the same as weight 0 (ADR-002).
+`locked` players are pre-placed and consume their slot's capacity — including
+on the bench, which is easy to forget and produces an infeasible plan when
+forgotten.
+
+**Consequence callers must respect:** because an unassigned row costs 0, any
+caller that needs a *total* assignment must shift all weights strictly
+positive. `pipeline.py` does. Skipping the shift silently drops
+negative-valued players and discards the whole day's lineup.
 
 ```python
 # solve/budget.py
-def shadow_prices(
-    candidates: Mapping[SlotId, list[float]],   # future candidate start values
-    remaining:  Mapping[SlotId, int],           # remaining GP budget per slot
-) -> dict[SlotId, float]                        # lambda_s
+def matchup_cap(settings) -> float | None                 # raises PooledCapUnsupported
+def remaining_budget(settings, games_used: float) -> GamesBudget | None
+def shadow_price(candidates: Sequence[tuple[float, float]],
+                 budget: GamesBudget | None) -> float     # one scalar lambda
+def utilization_ratio(candidates, budget) -> float        # rho = remaining / opportunities
 ```
-`lambda_s` = the `remaining[s]`-th largest element of `candidates[s]`, or `0.0`
-when budget exceeds opportunities. Decision rule: start p in s iff `v > lambda_s`.
+One pooled `lambda`, not a per-slot vector: the cap is team-wide (see §2).
+`candidates` are `(conditional_value, p_play)` per startable player-game left
+in the week. `lambda` is the value of the marginal game the budget reaches —
+`0.0` when slack, `+inf` when exhausted. Decision rule: **start p iff
+`v > lambda`**, where `v` is conditional on playing. `p_play` cancels out of
+the threshold (it scales benefit and cost alike) but still scales the reduced
+cost, so it orders the assignment. `rho >= 1` means the cap is not binding;
+`rho < 1` is where playable players get benched on purpose, and surfacing it in
+the run record is what makes that explicable instead of looking like a bug.
 
 ```python
-# solve/weights.py
-def category_weights(
-    my_totals: Mapping[StatId, float], opp_totals: Mapping[StatId, float],
-    my_var: Mapping[StatId, float],   opp_var: Mapping[StatId, float],
-) -> dict[StatId, float]                        # w_k = phi(z_k)/s_k
-
-def player_value(proj: Projection, w: Mapping[StatId, float],
-                 risk: Mapping[StatId, float]) -> float
+# solve/value.py
+def build_value_model(settings, matchup=None) -> PointsValue | CategoryValue
+    #  .conditional_value(projection) -> float     # value GIVEN he plays
 ```
-A tossup category is worth ~90x a decided one at the margin. Punting and
-clinch-detection are emergent — there is no special-case code for either, and
-adding any is a bug.
+Both leagues are `H2H_POINTS`, so `PointsValue` is the live path and value is
+exactly linear: `sum(projected per-game stat * points per stat)`. A points
+league is a degenerate one-category league, so `CategoryValue` reuses the same
+risk model with "the category" being fantasy points. A tossup category is worth
+~90x a decided one at the margin. Punting and clinch-detection are emergent —
+there is no special-case code for either, and adding any is a bug.
+
+The risk term needs a live matchup score to sign the margin, and
+`cumulativeScore` is null on every live matchup row, so it is currently
+**inert** and says so in the run notes.
+
+```python
+# solve/calendar.py
+@dataclass(frozen=True)
+class SeasonCalendar:
+    def date_of(period) / period_of(day)
+    def matchup_period_of(period) -> int
+    def periods_in_matchup(mp) -> list[int]       # includes gameless days
+    def remaining_periods(mp, from_period) -> list[int]
+    def verify(espn_scoring_period, espn_matchup_period) -> str | None
+    trustworthy: bool                             # False if periods aren't linear
+
+def team_games_in(periods, schedule, pro_team_id) -> int
+```
+Weeks are Monday–Sunday, derived from the NBA calendar because ESPN's own
+`matchupPeriods` is useless (§2). `verify()` reproduces ESPN's
+`currentMatchupPeriod` and is the self-falsifying check: on disagreement the
+caller prices **no** cap rather than pricing a wrong one.
+
+`team_games_in` scores an unknown team **zero** — `proTeamId 0` is ESPN's "no
+NBA team" sentinel, so an unsigned player correctly gets no games. That
+exclusion is total and otherwise invisible, so `pipeline.py` reports it.
+
+```python
+# usage.py  (not in solve/ -- it reads ESPN and the DB)
+def measure(read, store, *, league_id, team_id, calendar,
+            scoring_period, matchup_period) -> GamesUsed
+    # .games: float  .trustworthy: bool  .source: str
+```
+Reconciles the two untrustworthy ESPN sources (§2). The weekly figure is a
+difference of two season-to-date readings, so it needs a baseline captured on
+the week's **first day** — hence `gp_snapshots`, written `INSERT OR IGNORE` so
+the earliest reading of a week wins. On disagreement it takes the **larger**:
+over-counting costs a marginal start, under-counting a hard cap costs a legal
+lineup. `trustworthy=False` is a real answer and must never be rounded to
+"zero games used".
+
+```python
+# pipeline.py
+def plan_lineup(settings, roster, projections, *, scoring_period,
+                matchup_period, schedule, calendar,
+                games_used=None, availability=None) -> LineupPlan
+    # .target: Mapping[PlayerId, SlotId]   TOTAL -- every rostered player
+    # .moves / .lam / .utilization / .feasible / .notes
+```
+**The lineup is a perfect matching, not a top-N selection.** Slot capacity
+equals non-IR roster size exactly (e.g. 10 starters + 3 bench = 13 players), so
+on a light slate you *cannot* bench the gameless players — there is nowhere to
+put them. They occupy starting slots for free, because the cap counts games
+*played*. A planner that picked "the best ten" would emit a map ESPN rejects.
+
+The cap is priced only when **both** the calendar and the usage reading are
+trustworthy; otherwise `lam = 0` and a note says why. `validate_target` then
+re-checks the result independently (totality, eligibility, locked movement, IR
+eligibility, per-slot capacity) and a failure returns `feasible=False` with the
+*current* lineup as the target — a bad plan is a reported non-event, never an
+exception and never a write.
 
 ## 6. `state.py` — approval state machine
 

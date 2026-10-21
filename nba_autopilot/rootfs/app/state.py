@@ -92,6 +92,32 @@ CREATE TABLE IF NOT EXISTS journal (
 );
 
 CREATE INDEX IF NOT EXISTS idx_journal_outcome ON journal(outcome);
+
+-- Games-played baselines, one row per (team, matchup period).
+--
+-- ESPN publishes season-to-date team games played (``valuesByStat["42"]``) but
+-- the per-matchup-period figure the cap is actually enforced against
+-- (``cumulativeScore.statBySlot``) came back ``null`` on every matchup row of
+-- both live leagues. So the weekly number is reconstructed as a difference of
+-- two season-to-date readings, which requires remembering the one taken at the
+-- start of the week -- there is no endpoint that will tell us later.
+--
+-- ``is_baseline`` records whether the reading was actually taken on the first
+-- scoring period of the week. A row written mid-week is kept (it is still
+-- evidence, and it is what the next week's delta is *not* allowed to use) but
+-- flagged, because subtracting a Thursday reading from a Sunday one
+-- under-counts the week and under-counting a hard cap is how you arrive at
+-- Sunday with no legal lineup.
+CREATE TABLE IF NOT EXISTS gp_snapshots (
+    league_id       INTEGER NOT NULL,
+    team_id         INTEGER NOT NULL,
+    matchup_period  INTEGER NOT NULL,
+    scoring_period  INTEGER NOT NULL,
+    season_gp       INTEGER NOT NULL,
+    is_baseline     INTEGER NOT NULL DEFAULT 0,
+    taken_at        TEXT    NOT NULL,
+    PRIMARY KEY (league_id, team_id, matchup_period)
+);
 """
 
 
@@ -213,6 +239,53 @@ class Store:
                     run_id,
                 ),
             )
+
+    # -- games-played baselines --------------------------------------------
+
+    def record_gp_snapshot(
+        self,
+        *,
+        league_id: int,
+        team_id: int,
+        matchup_period: int,
+        scoring_period: int,
+        season_gp: int,
+        is_baseline: bool,
+    ) -> None:
+        """Remember season-to-date games played for a matchup period.
+
+        First write for a ``(league, team, matchup period)`` wins and later
+        calls are no-ops. That is deliberate and it is the whole point of the
+        table: the useful reading is the *earliest* one in the week, and a run
+        later the same week must not be allowed to overwrite it with a number
+        that already includes games we are trying to count.
+        """
+        with self._lock, self.db:
+            self.db.execute(
+                "INSERT OR IGNORE INTO gp_snapshots (league_id, team_id, "
+                "matchup_period, scoring_period, season_gp, is_baseline, taken_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    int(league_id),
+                    int(team_id),
+                    int(matchup_period),
+                    int(scoring_period),
+                    int(season_gp),
+                    1 if is_baseline else 0,
+                    _now(),
+                ),
+            )
+
+    def gp_snapshot(
+        self, league_id: int, team_id: int, matchup_period: int
+    ) -> Optional[Mapping[str, Any]]:
+        with self._lock:
+            row = self.db.execute(
+                "SELECT * FROM gp_snapshots WHERE league_id=? AND team_id=? "
+                "AND matchup_period=?",
+                (int(league_id), int(team_id), int(matchup_period)),
+            ).fetchone()
+        return dict(row) if row else None
 
     # -- proposals ---------------------------------------------------------
 

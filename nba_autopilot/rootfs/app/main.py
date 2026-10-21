@@ -18,19 +18,31 @@ import json
 import logging
 import signal
 import sys
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import config as appconfig
 import discover as discovery
+import pipeline
+import usage as usage_mod
+from espn import ids
 from espn.read import EspnAuthError, EspnError, EspnRead, make_client
 from espn.write import EspnWrite
 import ha.bridge as bridge_mod
 from ha.bridge import Action, ActionEvent, HaBridge
+from solve import projections as projections_mod
+from solve import value as value_mod
+from solve.calendar import SeasonCalendar
 from state import Store
 
 log = logging.getLogger("autopilot")
+
+#: Distinguishes "not built yet" from "built, and the answer was None". Without
+#: it a failed calendar build would be retried on every league of every run,
+#: which means re-downloading a multi-megabyte season document to get the same
+#: failure.
+_UNSET = object()
 
 
 def _ulid() -> str:
@@ -93,6 +105,10 @@ class Autopilot:
             owner_user_id=cfg.ha_owner_user_id,
             todo_entity=cfg.ha_todo_entity,
         )
+        # Season-scoped, league-independent, and expensive to fetch. See
+        # :meth:`season_calendar`.
+        self._calendar: Any = _UNSET
+        self._schedule: Optional[Dict[int, Dict[int, int]]] = None
 
     def league_for_run(self, run_id: str) -> Optional[League]:
         """Map a stored run back to its league, to execute an approved tap.
@@ -218,6 +234,66 @@ class Autopilot:
                 log.exception("league %s raised", lg.name)
         return run_ids
 
+    def season_calendar(self) -> Optional[SeasonCalendar]:
+        """The NBA calendar, built once per process.
+
+        Derived from the pro schedule, not from any league's settings, so it is
+        the same object for every configured league -- and the payload it comes
+        from is multi-megabyte, which is the practical reason it is cached
+        rather than the conceptual one.
+        """
+        if self._calendar is _UNSET:
+            try:
+                dates = self.leagues[0].read.scoring_period_dates()
+                self._calendar = SeasonCalendar.from_period_dates(dates)
+            except EspnError as exc:
+                log.error("could not build the season calendar: %s", exc)
+                self._calendar = None
+        return self._calendar
+
+    def pro_schedule(self) -> Mapping[int, Mapping[int, int]]:
+        """``proTeamId -> {scoringPeriod: games}``, built once per process."""
+        if self._schedule is None:
+            try:
+                self._schedule = self.leagues[0].read.pro_team_scoring_periods()
+            except EspnError as exc:
+                log.error("could not read the pro schedule: %s", exc)
+                self._schedule = {}
+        return self._schedule
+
+    def _calendar_for(
+        self, settings: Any
+    ) -> Tuple[Optional[SeasonCalendar], int, List[str]]:
+        """The calendar, this league's matchup period, and any complaints.
+
+        The cross-check runs here rather than in a test because it is checking
+        ESPN's behaviour, not ours. If the week convention ever changes, the
+        model keeps returning plausible numbers and only this comparison
+        notices; a calendar that fails it is downgraded to ``None``, which
+        switches cap pricing off rather than letting it be wrong.
+        """
+        notes: List[str] = []
+        cal = self.season_calendar()
+        if cal is None:
+            return None, int(settings.current_matchup_period), [
+                "no season calendar: the games-played cap cannot be priced"
+            ]
+        problem = cal.verify(
+            settings.current_scoring_period, settings.current_matchup_period
+        )
+        if problem:
+            log.error(
+                "league %d: season calendar disagrees with ESPN -- %s. "
+                "Not pricing the games-played cap this run.",
+                settings.league_id, problem,
+            )
+            return None, int(settings.current_matchup_period), [
+                "calendar cross-check failed: %s" % problem
+            ]
+        matchup = cal.matchup_period_of(settings.current_scoring_period)
+        notes.append(cal.describe(matchup))
+        return cal, matchup, notes
+
     def run_league(self, lg: "League") -> str:
         run_id = _ulid()
         settings = lg.read.league_settings()
@@ -230,25 +306,182 @@ class Autopilot:
         log.info("=== run %s | %s | scoring period %d ===", run_id,
                  settings.name, settings.current_scoring_period)
 
-        # NOTE: the projection + solve + propose pipeline is wired in the next
-        # phase. Until it is, a run performs the read-only half -- which is
-        # exactly what shadow mode is for, and what validates the ESPN read
-        # layer against the real leagues before anything can write.
+        notes: List[str] = []
+        sources_used: Dict[str, str] = {"espn": "ok"}
+        sources_missing: Dict[str, str] = {}
+
         roster = lg.read.roster()
         log.info("roster: %d players, %d locked", len(roster),
                  sum(1 for p in roster if p.lineup_locked))
-        if settings.has_gp_cap:
-            log.info("games used: %s", lg.read.games_used())
 
+        cal, matchup_period, cal_notes = self._calendar_for(settings)
+        notes.extend(cal_notes)
+        schedule = self.pro_schedule()
+        if not schedule:
+            sources_missing["pro-schedule"] = "unavailable"
+
+        splits = lg.read.player_projections([e.player_id for e in roster])
+        projections, availability, skipped = projections_mod.build_projections(
+            roster, splits, as_of=datetime.now(timezone.utc)
+        )
+        if skipped:
+            notes.append(
+                "no projection for: %s" % ", ".join(e.name for e in skipped)
+            )
+        if not projections:
+            # Every value would be zero, so the "optimal" lineup would be
+            # whatever the tie-breaks happened to produce. Writing that is worse
+            # than leaving yesterday's lineup alone.
+            sources_missing["espn-projection"] = "no players projected"
+            notes.append("aborting: no usable projections for any player")
+            self._finish(run_id, sources_used, sources_missing, {}, {}, notes)
+            self._notify_problem(
+                "Autopilot: no projections",
+                "%s: ESPN returned no usable projections, so no lineup was "
+                "computed. Yesterday's lineup is untouched." % lg.name,
+            )
+            return run_id
+
+        games_used = usage_mod.measure(
+            lg.read,
+            self.store,
+            league_id=lg.ref.league_id,
+            team_id=lg.ref.team_id,
+            calendar=cal,
+            scoring_period=settings.current_scoring_period,
+            matchup_period=matchup_period,
+        ) if settings.has_gp_cap else None
+        if games_used is not None:
+            log.info("games used: %s", games_used.describe())
+            notes.append(games_used.describe())
+
+        plan = pipeline.plan_lineup(
+            settings,
+            roster,
+            projections,
+            scoring_period=settings.current_scoring_period,
+            matchup_period=matchup_period,
+            schedule=schedule,
+            calendar=cal,
+            games_used=games_used,
+            availability=availability,
+        )
+        notes.extend(plan.notes)
+        for line in pipeline.summarize(plan, roster).splitlines():
+            log.info("  %s", line)
+
+        coefficients = getattr(
+            value_mod.build_value_model(settings), "coefficients", {}
+        )
+        # Keyed by the pseudo-slot ESPN hangs the pooled cap on, so the stored
+        # dual is self-describing when it is read back out of the journal.
+        shadow_prices = (
+            {ids.TEAM_TOTAL_LIMIT_SLOT: plan.lam} if plan.cap else {}
+        )
+
+        if not plan.feasible:
+            self._finish(run_id, sources_used, sources_missing, shadow_prices,
+                         coefficients, notes)
+            self._notify_problem(
+                "Autopilot: lineup not applied",
+                "%s: the computed lineup failed its own validation, so nothing "
+                "was sent to ESPN. Reasons:\n%s"
+                % (lg.name, "\n".join(n for n in plan.notes
+                                      if n.startswith("invalid target"))),
+            )
+            return run_id
+
+        if plan.changed:
+            self._apply_lineup(run_id, lg, plan, roster, settings)
+        else:
+            log.info("lineup already optimal; nothing to do")
+            notes.append("no change needed")
+
+        self._finish(run_id, sources_used, sources_missing, shadow_prices,
+                     coefficients, notes)
+        return run_id
+
+    def _finish(
+        self,
+        run_id: str,
+        sources_used: Mapping[str, str],
+        sources_missing: Mapping[str, str],
+        shadow_prices: Mapping[int, float],
+        category_weights: Mapping[int, float],
+        notes: List[str],
+    ) -> None:
         self.store.finish_run(
             run_id,
-            sources_used={"espn": "ok"},
-            sources_missing={},
-            shadow_prices={},
-            category_weights={},
-            notes=["read-only run: solver pipeline not yet wired"],
+            sources_used=sources_used,
+            sources_missing=sources_missing,
+            shadow_prices=shadow_prices,
+            category_weights=category_weights,
+            notes=notes,
         )
-        return run_id
+
+    def _apply_lineup(
+        self,
+        run_id: str,
+        lg: "League",
+        plan: "pipeline.LineupPlan",
+        roster: Any,
+        settings: Any,
+    ) -> None:
+        """Journal, execute, notify. Lineup and IR only -- never an acquisition.
+
+        ``auto_approve=True`` is the autonomy decision, and it still writes a
+        proposal row: autonomy changes who approves, never whether there is an
+        audit trail. The claim is still taken, so a scheduled run and a tap can
+        never both execute the same plan.
+
+        ``shadow_mode`` is enforced inside ``EspnWrite``, not here. There is one
+        place that decides whether a packet reaches ESPN, and it is the same
+        place that builds the packet.
+        """
+        payload = {
+            "target": {str(k): int(v) for k, v in plan.target.items()},
+            "scoring_period": int(settings.current_scoring_period),
+        }
+        rationale = "; ".join(
+            "%s %s->%s" % (m.player_name, ids.slot_name(m.from_slot or -1),
+                           ids.slot_name(m.to_slot or -1))
+            for m in plan.moves
+        )
+        proposal = self.store.propose(
+            run_id, "LINEUP", payload, rationale=rationale,
+            value_delta=sum(m.value_delta for m in plan.moves),
+            auto_approve=True,
+        )
+        if not self.store.claim_for_execution(proposal.id):
+            log.warning("lineup proposal %s already claimed", proposal.action_id)
+            return
+        try:
+            result = lg.write.set_lineup(
+                {int(k): int(v) for k, v in plan.target.items()},
+                roster=roster,
+                scoring_period=settings.current_scoring_period,
+            )
+            self.store.complete(proposal.id, bool(result and result.ok))
+        except Exception as exc:  # noqa: BLE001 - one league must not kill the rest
+            log.exception("lineup write failed for %s", lg.name)
+            self.store.complete(proposal.id, False, str(exc))
+            self._notify_problem("Autopilot: lineup write failed",
+                                 "%s: %s" % (lg.name, str(exc)[:400]))
+            return
+
+        title = "%s: %d move(s)%s" % (
+            lg.name, len(plan.moves), " [shadow]" if self.cfg.shadow_mode else "",
+        )
+        try:
+            self.ha.notify(
+                title=title,
+                message=pipeline.summarize(plan, roster),
+                tag="autopilot-lineup-%d" % lg.ref.league_id,
+                actions=(),
+                time_sensitive=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed push is not a failed run
+            log.error("could not deliver lineup notification: %s", exc)
 
     # -- approval loop -----------------------------------------------------
 
