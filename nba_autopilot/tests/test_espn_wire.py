@@ -339,6 +339,53 @@ class TestCancelShape(unittest.TestCase):
         self.assertEqual(http.bodies, [])
 
 
+class TestUnpairedAddNeedsAnActiveSpot(unittest.TestCase):
+    """The last line of defence against the IR-slot miscount.
+
+    ``_settings`` is 5 active slots (PG, C, UTIL, 2x BE) plus 1 IR, so a roster
+    of 5 healthy players is full however many IR slots sit empty. Summing all
+    six slot counts said otherwise, and the decision layer acted on it: a live
+    league was proposed an unpaired add that ESPN refused at the wire. Preflight
+    is the half of the fix that holds even if a caller gets the arithmetic wrong
+    again, which is why it is checked here and not only in ``solve/addrop``.
+    """
+
+    FULL = ROSTER + [
+        _player(4, "Bench Two", BE),
+        _player(5, "Util One", UTIL),
+        _player(6, "Hurt Guy", IR, injury_status="OUT"),
+    ]
+
+    def test_an_empty_ir_slot_does_not_license_an_unpaired_add(self):
+        w, _http = _writer(roster=self.FULL)
+        with self.assertRaises(PreflightError) as caught:
+            w.add_drop(add=50, waiver=False)
+        self.assertIn("5/5 active spots", str(caught.exception))
+
+    def test_the_same_add_goes_through_once_a_drop_is_paired_with_it(self):
+        """The refusal is of the *unpaired* add, not of the pickup."""
+        w, http = _writer(roster=self.FULL)
+        w.add_drop(add=50, drop=3, waiver=False)
+        self.assertEqual(
+            sorted(i["type"] for i in http.last["items"]), ["ADD", "DROP"]
+        )
+
+    def test_a_player_on_ir_leaves_his_active_spot_free(self):
+        """Five players, one of them on IR, in a league with 5 active slots.
+
+        Four healthy men in five slots: there is a real spot, and preflight
+        must not invent a fullness that would force a needless drop. The count
+        has to skip IR occupants for the same reason the cap has to skip IR
+        slots -- fixing only one side turns this add into a refusal.
+        """
+        w, http = _writer(roster=ROSTER + [
+            _player(4, "Bench Two", BE),
+            _player(6, "Hurt Guy", IR, injury_status="OUT"),
+        ])
+        w.add_drop(add=50, waiver=False)
+        self.assertEqual([i["type"] for i in http.last["items"]], ["ADD"])
+
+
 class TestAcquisitionMode(unittest.TestCase):
     def test_instant_add_of_a_waivers_player_is_blocked_locally(self):
         """ESPN would reject this; we say so before spending the request."""

@@ -557,6 +557,97 @@ class TestDropProtections(unittest.TestCase):
         self.assertIn("nowhere to go", " ".join(plan.notes))
 
 
+class TestIrIsNotRoom(unittest.TestCase):
+    """An empty IR slot is not somewhere a pickup may go.
+
+    This is a regression, and it got all the way to the wire: both live leagues
+    were proposed unpaired ``open-spot`` adds, and tapping **Approve** on the
+    Chairman's one came back as an error from ESPN because the roster had no
+    room. ``lineupSlotCounts`` summed to 16 there -- 13 active slots plus 3 IR
+    -- against 14 players of whom one sat on IR, so the full sum read as "two
+    spots free" when the true answer was none. ESPN will only accept a player
+    into an IR slot if his own designation makes him IR-eligible, which a free
+    agent worth acquiring never is.
+
+    Both shapes below are the two live leagues as measured on 2026-10-21, which
+    is the point: one of them has no room and one genuinely has two spots, and
+    a fix that only hard-codes "the roster is full" would pass the first test
+    and fail the second.
+    """
+
+    def chairmans(self, **over):
+        """10 starting + 3 bench + 3 IR, holding 13 healthy and 1 on IR.
+
+        Four of the thirteen are weak, so the tenth-best starter prices a slot
+        at 5.0 and the 25-a-game pickup is worth +60 for the week. The man on
+        IR plays for team 3, which never plays -- he is out, so he neither sets
+        the slot price nor offers any surplus of his own.
+        """
+        roster = [player(i, team=1) for i in range(1, 14)]
+        roster.append(player(99, name="Hurt", team=3, slot=13, status="OUT"))
+        values = {i: 60.0 for i in range(1, 10)}
+        values.update({i: 5.0 for i in range(10, 14)})
+        values[99] = 1.0
+        values[90] = 25.0
+        case = _Case(
+            settings=settings(lineup_slot_counts={11: 10, 12: 3, 13: 3}),
+            roster=roster,
+            pool=[player(90, name="Better", team=1)],
+            values=values,
+            p_play={99: 0.0},
+        )
+        case.kw.update(over)
+        return case
+
+    def test_the_pickup_has_to_be_paired_with_a_drop(self):
+        """13 healthy players in 13 active slots: somebody has to go.
+
+        Before the fix this came out as ``drop=None`` with reason
+        ``open-spot``, which is the proposal ESPN refused.
+        """
+        plan = self.chairmans().run()
+        self.assertTrue(plan.proposed)
+        self.assertIsNotNone(plan.drop)
+        self.assertNotEqual(plan.reason, addrop.REASON_OPEN)
+
+    def test_no_active_room_and_nobody_droppable_says_so_in_active_spots(self):
+        """And the count it reports is of active spots, not of roster slots.
+
+        A note reading "full (14/16)" would be arithmetically true and would
+        describe a roster with two spare slots, which is exactly the reading
+        that caused the bug.
+        """
+        plan = self.chairmans(
+            starters=list(range(1, 14)), never_drop=["Hurt"]
+        ).run()
+        self.assertFalse(plan.proposed)
+        notes = " ".join(plan.notes)
+        self.assertIn("roster is full (13/13 active spots)", notes)
+
+    def test_two_players_on_ir_leave_two_active_spots_genuinely_free(self):
+        """The Dynassty shape: 11 starting + 13 bench + 3 IR, 24 players, 2 on
+        IR. 22 healthy in 24 active slots, so an unpaired add is legitimate and
+        has to stay that way -- the fix excludes IR slots from the cap *and*
+        IR occupants from the count, and dropping either half turns this
+        league's correct proposal into a needless drop.
+        """
+        roster = [player(i, team=1) for i in range(1, 23)]
+        roster += [player(98, name="Hurt A", team=3, slot=13, status="OUT"),
+                   player(99, name="Hurt B", team=3, slot=13, status="OUT")]
+        values = {i: 60.0 for i in range(1, 23)}
+        values.update({98: 1.0, 99: 1.0, 90: 80.0})
+        plan = _Case(
+            settings=settings(lineup_slot_counts={11: 11, 12: 13, 13: 3}),
+            roster=roster,
+            pool=[player(90, name="Star", team=1)],
+            values=values,
+            p_play={98: 0.0, 99: 0.0},
+        ).run()
+        self.assertTrue(plan.proposed)
+        self.assertIsNone(plan.drop)
+        self.assertEqual(plan.reason, addrop.REASON_OPEN)
+
+
 class TestKeeperAsymmetry(unittest.TestCase):
     """*"in the dynasty league we keep players ... different from the other
     league."*

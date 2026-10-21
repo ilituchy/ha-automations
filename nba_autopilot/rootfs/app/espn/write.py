@@ -531,11 +531,15 @@ class EspnWrite:
             # original requirement is explicit that pickups never happen
             # without a paired drop, so a full roster plus no drop is a bug
             # upstream, not something to resolve here by picking a victim.
-            roster_cap = sum(settings.lineup_slot_counts.values())
-            if drop is None and len(current) >= roster_cap:
+            # Non-IR slots only: an open IR slot is not somewhere a healthy
+            # pickup may go, and ESPN rejects the attempt at the wire. See
+            # ``ids.active_roster_cap``.
+            roster_cap = ids.active_roster_cap(settings.lineup_slot_counts)
+            roster_use = ids.active_roster_use(p.current_slot for p in current)
+            if drop is None and roster_use >= roster_cap:
                 raise PreflightError(
-                    "roster is full (%d/%d) and no drop was paired with this add"
-                    % (len(current), roster_cap)
+                    "roster is full (%d/%d active spots) and no drop was "
+                    "paired with this add" % (roster_use, roster_cap)
                 )
             self._check_acquisition_mode(add, waiver)
 

@@ -532,12 +532,16 @@ def plan_addrop(
     if blocked:
         notes.append("not droppable: %s" % ", ".join(sorted(blocked)))
 
-    roster_cap = sum(int(n) for n in settings.lineup_slot_counts.values())
-    open_spot = len(roster) < roster_cap
+    # Non-IR slots against non-IR occupants: see ``ids.active_roster_cap``. The
+    # pair has to be measured the same way on both sides, or a player parked on
+    # IR reads as using up a slot he does not occupy.
+    roster_cap = ids.active_roster_cap(settings.lineup_slot_counts)
+    roster_use = ids.active_roster_use(e.current_slot for e in roster)
+    open_spot = roster_use < roster_cap
     if not droppable and not open_spot:
         notes.append(
-            "roster is full (%d/%d) and nobody is droppable, so a pickup has "
-            "nowhere to go" % (len(roster), roster_cap)
+            "roster is full (%d/%d active spots) and nobody is droppable, so a "
+            "pickup has nowhere to go" % (roster_use, roster_cap)
         )
         return nothing()
 

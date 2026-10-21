@@ -15,7 +15,7 @@ when ESPN changes something, so there is as little of it as possible.
 from __future__ import annotations
 
 from datetime import date
-from typing import Dict, FrozenSet, Optional
+from typing import Dict, FrozenSet, Iterable, Mapping, Optional
 from zoneinfo import ZoneInfo
 
 SlotId = int
@@ -283,6 +283,33 @@ def pro_team(team: ProTeamId) -> str:
 
 def is_starting_slot(slot: SlotId) -> bool:
     return slot not in NON_SCORING_SLOTS
+
+
+def active_roster_cap(lineup_slot_counts: Mapping[SlotId, int]) -> int:
+    """Slots a **healthy** player can occupy: every slot except IR.
+
+    This, and not the full sum of ``lineupSlotCounts``, is what "is there room
+    for a pickup" has to be asked against. An empty IR slot is not a free
+    roster spot: ESPN only accepts a player into one if his own injury
+    designation makes him IR-eligible, and a free agent worth acquiring is by
+    definition not. Counting IR slots as room is how a 16-slot league holding
+    13 healthy players in its 13 non-IR slots came out as "two spots free" and
+    produced an unpaired add that ESPN rejected at the wire.
+    """
+    return sum(
+        int(n) for s, n in lineup_slot_counts.items() if int(s) != IR_SLOT
+    )
+
+
+def active_roster_use(slots: Iterable[SlotId]) -> int:
+    """How many of those slots are taken, given each player's current slot.
+
+    Takes slots rather than roster entries so that this module keeps depending
+    on nothing: the asymmetry with ``active_roster_cap`` is deliberate, since
+    the count has to come from where the players actually sit and not from the
+    league's slot budget.
+    """
+    return sum(1 for s in slots if int(s) != IR_SLOT)
 
 
 def season_id(today: Optional[date] = None) -> int:

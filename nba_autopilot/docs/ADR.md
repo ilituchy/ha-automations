@@ -698,6 +698,21 @@ we do not have. So the score may **waive** the churn floor when we are behind by
 less than the move would gain, and may never raise it: an accumulated lead with
 no opponent projection behind it is not evidence the week is safe.
 
+**"Is there room?" is asked of non-IR slots against non-IR occupants.** Summing
+all of `lineupSlotCounts` reads an empty IR slot as a free roster spot, and it is
+not one: ESPN only accepts a player into IR if his own designation makes him
+IR-eligible, which a free agent worth acquiring never is. Both halves matter and
+each is pinned by its own test, because fixing one alone is worse than fixing
+neither in one of the two live leagues — the Chairman's league (13 active slots +
+3 IR, 14 players with 1 on IR) read as "two spots free" and produced an unpaired
+add that ESPN refused at the wire, while Dynassty (24 active + 3 IR, 24 players
+with 2 on IR) has two genuine spots that a cap-only fix would hide, forcing a
+drop that is not needed. The helper lives in `espn/ids.py` because that module
+owns slot semantics; it cannot live on `LeagueSettings`, since `models.py`
+depends on nothing and so cannot see `IR_SLOT`. `espn/write.py`'s preflight
+repeats the check rather than trusting the decision layer: this one reached the
+user as a tap that failed, so the last line of defence has to be at the wire.
+
 **Rejected:** a discount rate converting keeper value into this week's points
 (invented number, changes decisions); a ranked list of the best several swaps
 (the acquisition budget is five to seven for a *week*, and a layer that proposed

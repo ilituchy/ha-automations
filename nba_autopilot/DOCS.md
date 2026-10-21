@@ -87,6 +87,12 @@ Either reason is enough, and the points gain is required regardless — so a
 reason can never license a move that loses you points, and the quality bar can
 never block free ones.
 
+A pickup is only proposed without a matching drop when there is genuinely
+somewhere to put him. An **empty IR slot does not count** — ESPN will only let a
+player into one if his own injury designation qualifies him, and someone worth
+picking up never does. So a roster whose active slots are all taken gets a
+paired add/drop or nothing, even when the IR slots are empty.
+
 The matchup score is read every run and shown in the notes, but it is only ever
 used to *waive* the floor, never to raise it. ESPN publishes no projected final
 for basketball, so a lead you can see accumulated is not evidence the week is
