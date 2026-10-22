@@ -45,6 +45,36 @@ All notable changes to this app are documented here. The format follows
   not yet debuted, however hurt he was — so the trigger is ESPN's eligibility
   flag and nothing else. See ADR-023.
 
+### Changed
+
+- **The status page was rebuilt around the decision instead of the data.**
+  *"it looks crappy. make it more modern and sleak"* — fairly. Every line on
+  the page was grey text at some opacity, a proposal's reasoning ran four
+  times the height of the move it explained, and eight runs' worth of notes
+  and reviewer text sat expanded below the approve buttons, so the thing the
+  page exists for was the smallest element on it.
+
+  A swap now reads as what it is: the man arriving above the man leaving, each
+  with a coloured pip, the projected gain as a pill beside the league, and the
+  two buttons weighted so Approve is the filled one and Reject is quiet. The
+  rationale keeps a three-line lead and puts the rest behind *Show reasoning* —
+  the reviewer's caveat is always the last paragraph and is the part most worth
+  reading, so it is disclosed rather than truncated. Recent runs are collapsed,
+  newest open, with the move and note counts in the summary. Status chips at
+  the top answer the two questions the page is opened with: is it really
+  writing to ESPN, and does it want something from me.
+
+  Dark mode now actually works. The page named Home Assistant's own CSS
+  variables and relied on them for the theme, but ingress serves it in an
+  iframe and custom properties do not cross a document boundary — the
+  fallbacks were what rendered, always light, inside a dark frontend. The HA
+  variables are still named first so a theme can drive the page if one ever
+  reaches us; the fallbacks are now a pair of token sets selected by
+  `prefers-color-scheme`, which the iframe does inherit.
+
+  Still no JavaScript, no template engine, no static-file mount, and every URL
+  still relative. The disclosures are `<details>`.
+
 ### Added
 
 - **An approved add/drop clears its card instead of sending a second push.**

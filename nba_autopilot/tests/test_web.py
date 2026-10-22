@@ -150,6 +150,49 @@ class TestRenderEscaping(unittest.TestCase):
         self.assertNotIn("<img src=x", out)
 
 
+class TestRationaleBlock(unittest.TestCase):
+    """The rationale is four times the height of the move it explains.
+
+    Closed, the card has to stay the size of a decision; open, nothing may be
+    lost -- the reviewer's caveat is the part most worth reading and it is
+    always the *last* paragraph.
+    """
+
+    def test_a_short_single_paragraph_is_not_hidden_behind_a_toggle(self):
+        out = web._why("Add him. He is better.")
+        self.assertNotIn("<details", out)
+        self.assertIn("Add him. He is better.", out)
+
+    def test_a_second_paragraph_forces_the_disclosure(self):
+        out = web._why("The lead.\n\nReviewer's caveat: think twice.")
+        self.assertIn("<details", out)
+        self.assertIn("Reviewer&#x27;s caveat: think twice.", out)
+
+    def test_a_long_lead_gets_the_disclosure_even_when_alone(self):
+        """The clamp hides the tail either way, so the toggle has to be there."""
+        out = web._why("x" * (web.LEAD_CHARS + 1))
+        self.assertIn("<details", out)
+
+    def test_every_paragraph_survives(self):
+        out = web._why("one\n\ntwo\n\nthree")
+        for word in ("one", "two", "three"):
+            self.assertIn(">%s<" % word, out)
+
+    def test_paragraphs_are_escaped_on_both_sides_of_the_split(self):
+        out = web._why("<b>lead</b>\n\n<b>rest</b>")
+        self.assertNotIn("<b>", out)
+        self.assertEqual(out.count("&lt;b&gt;"), 2)
+
+
+class TestKindLabels(unittest.TestCase):
+    def test_known_kinds_read_as_english(self):
+        self.assertEqual(web._kind("ADD_DROP"), "Add / drop")
+
+    def test_an_unknown_kind_is_shown_rather_than_dropped(self):
+        """A kind added later must still render, just without a nice name."""
+        self.assertEqual(web._kind("TRADE_OFFER"), "Trade offer")
+
+
 class TestRenderUrls(unittest.TestCase):
     """Ingress serves the app under /api/hassio_ingress/<token>/.
 
@@ -214,7 +257,7 @@ class TestStatusPage(unittest.TestCase):
     def test_stuck_writes_are_surfaced(self):
         bot = FakeBot(FakeStore(stuck=[{"id": 3}, {"id": 4}]))
         out = web.render(web.StatusPage(bot))
-        self.assertIn("2 write(s) in an unknown state", out)
+        self.assertIn("2 writes in an unknown state", out)
 
     def test_malformed_stored_json_does_not_break_the_page(self):
         """`notes` is written by us, but a half-written row must still render."""
