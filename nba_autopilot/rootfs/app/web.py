@@ -374,34 +374,17 @@ button:hover { filter: brightness(1.06); }
 button.no:hover { background: var(--chip); }
 button:active { transform: translateY(1px); }
 
-details.run { padding: 0; }
-details.run > summary {
-  list-style: none; cursor: pointer; padding: 14px 16px;
-  border-radius: 16px; display: flex; align-items: center; gap: 10px;
-}
-details.run > summary::-webkit-details-marker { display: none; }
-details.run > summary:hover { background: var(--chip); }
-details.run[open] > summary { border-radius: 16px 16px 0 0; }
-.runline { flex: 1; min-width: 0; }
+/* A run is not a disclosure. What it changed is the thing the page is open
+   for, so it is on the surface of the card and nothing has to be tapped to
+   reach it; only the working notes are behind a control. */
+.run { padding: 0; }
+.runline { padding: 14px 16px 0; min-width: 0; }
 .runline .top {
   display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
   margin-bottom: 3px;
 }
 .runline .name { font-size: 15px; font-weight: 600; }
-.caret {
-  flex: 0 0 20px; height: 20px; border-radius: 999px;
-  display: grid; place-items: center;
-  background: var(--chip); color: var(--secondary-text-color, var(--dim));
-  transition: transform .15s ease;
-}
-.caret::before {
-  content: ""; width: 5px; height: 5px; margin-left: -2px;
-  border-right: 1.7px solid currentColor;
-  border-bottom: 1.7px solid currentColor;
-  transform: rotate(-45deg);
-}
-details.run[open] .caret { transform: rotate(90deg); }
-.runbody { padding: 2px 16px 16px; }
+.runbody { padding: 6px 16px 16px; }
 .props { list-style: none; margin: 0; padding: 0; }
 .props li { padding: 10px 0; border-top: 1px solid var(--line); }
 .props .head { display: flex; align-items: center; gap: 7px; }
@@ -761,11 +744,11 @@ def render(page: StatusPage, *, user: str = "") -> str:
     if not runs:
         parts.append("<div class='card empty'><b>No runs recorded yet.</b>"
                      "The first scheduled run will appear here.</div>")
-    # Collapsed, newest expanded. A run carries up to a dozen notes and the
-    # full reviewer text for every proposal it made; eight of those open at
-    # once was the wall of grey the page used to open with, and it buried the
-    # approval queue above it.
-    for i, r in enumerate(runs):
+    # Every run shows what it changed, without being opened first. Collapsing
+    # the whole run was the fix for a body that was a dozen notes long; now
+    # that the notes are behind their own control the body is a few moves, and
+    # hiding those made the page's one answer the thing hardest to reach.
+    for r in runs:
         # Lineup and IR writes are split out of the proposal list: they are the
         # only ones nobody approved, so they are the only ones the page has to
         # account for move by move. Everything else is a card above, or a row
@@ -777,22 +760,20 @@ def render(page: StatusPage, *, user: str = "") -> str:
             (applied if moves else rows).append((p, moves))
         nmoves = sum(len(m) for _, m in applied)
 
-        counts = []
-        if nmoves or rows:
-            counts.append(_plural(nmoves + len(rows), "move"))
-        if r["notes"]:
-            counts.append(_plural(len(r["notes"]), "note"))
-        parts.append("<details class='card run'%s><summary>"
-                     % (" open" if i == 0 else ""))
+        # The note count is not repeated here: the dropdown below carries it,
+        # and a run that changed nothing should say so in one line rather than
+        # advertise seventeen notes about not doing anything.
+        counts = [_plural(nmoves + len(rows), "move")] if nmoves or rows else []
+        parts.append("<div class='card run'>")
         parts.append(
             "<div class=runline><div class=top><span class=name>%s</span>"
             "<span class=tag>period %s</span>%s</div>"
-            "<div class=meta>%s</div></div><span class=caret></span>"
+            "<div class=meta>%s</div></div>"
             % (_e(r["league"]), _e(r["scoring_period"]),
                "<span class='tag hold'>shadow</span>" if r["shadow_mode"] else "",
                " &middot; ".join([_e(_when(r["started_at"], tz))] + counts))
         )
-        parts.append("</summary><div class=runbody>")
+        parts.append("<div class=runbody>")
         for p, moves in applied:
             state = str(p["state"]).upper()
             parts.append(
@@ -837,7 +818,7 @@ def render(page: StatusPage, *, user: str = "") -> str:
             for n in r["notes"]:
                 parts.append("<li>%s</li>" % _e(n))
             parts.append("</ul></details>")
-        parts.append("</div></details>")
+        parts.append("</div></div>")
 
     if user:
         parts.append("<footer>signed in as %s</footer>" % _e(user))

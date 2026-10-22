@@ -360,6 +360,22 @@ class TestLogsDisclosure(unittest.TestCase):
         self.assertIn("Logs (1)", out)
         self.assertIn("cap 70, used 15", out)
 
+    def test_the_moves_are_not_behind_one(self):
+        """*"this should be shown, just logs in the dropdown"*.
+
+        The run card used to be the disclosure, so every move it made cost a
+        tap to see. The only ``<details>`` in a run is now the logs.
+        """
+        bot = FakeBot(FakeStore(rows=_run_rows([{
+            "kind": "LINEUP", "state": "DONE",
+            "rationale": "Karl-Anthony Towns UTIL->BE",
+            "payload": LINEUP_PAYLOAD,
+        }], '["cap 70, used 15"]')))
+        out = web.render(web.StatusPage(bot))
+        # Counting the markup, not the stylesheet -- which mentions the tag.
+        self.assertEqual(out.count("<details class"), 1)
+        self.assertIn("<details class=logs>", out)
+
     def test_a_run_with_no_notes_has_no_dropdown(self):
         bot = FakeBot(FakeStore(rows=_run_rows([])))
         out = web.render(web.StatusPage(bot))

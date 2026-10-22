@@ -59,10 +59,9 @@ All notable changes to this app are documented here. The format follows
   two buttons weighted so Approve is the filled one and Reject is quiet. The
   rationale keeps a three-line lead and puts the rest behind *Show reasoning* —
   the reviewer's caveat is always the last paragraph and is the part most worth
-  reading, so it is disclosed rather than truncated. Recent runs are collapsed,
-  newest open, with the move and note counts in the summary. Status chips at
-  the top answer the two questions the page is opened with: is it really
-  writing to ESPN, and does it want something from me.
+  reading, so it is disclosed rather than truncated. Status chips at the top
+  answer the two questions the page is opened with: is it really writing to
+  ESPN, and does it want something from me.
 
   Dark mode now actually works. The page named Home Assistant's own CSS
   variables and relied on them for the theme, but ingress serves it in an
@@ -84,6 +83,13 @@ All notable changes to this app are documented here. The format follows
   row, each with the player's headshot, the slot he left and the slot he was
   put in, and the reason underneath; the notes moved behind a **Logs (n)**
   dropdown.
+
+  A run is no longer a disclosure either — *"this should be shown, just logs
+  in the dropdown"*. Collapsing the whole run was the right fix for a body
+  that was a dozen notes long, but once the notes had their own control the
+  body was a few moves, and hiding those made the page's one answer the
+  thing hardest to reach. Every run now shows what it changed on the surface
+  of its card.
 
   Lineup writes journal a `moves` array for this, since the page cannot
   recover the per-move detail from the target lineup: the difference is
