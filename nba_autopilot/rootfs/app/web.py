@@ -42,6 +42,7 @@ injection.
 import html
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import parse_qs
 
@@ -139,6 +140,16 @@ class StatusPage:
                 } for p in props],
             })
         return runs
+
+    def tz(self) -> Any:
+        """The configured zone, or ``None`` to leave times as stored.
+
+        ``Autopilot`` resolves ``cfg.timezone`` once at startup; reading its
+        attribute rather than re-resolving the name keeps the page and the
+        scheduler agreed about what "today" means, and keeps ``zoneinfo`` out
+        of this module's import path.
+        """
+        return getattr(self.bot, "tz", None)
 
     def stuck(self) -> List[Mapping[str, Any]]:
         return self.bot.store.stuck_writes()
@@ -427,6 +438,44 @@ def _plural(n: int, word: str) -> str:
     return "%d %s%s" % (n, word, "" if n == 1 else "s")
 
 
+def _clock(dt: datetime) -> str:
+    """``9:54 am``. Built by hand because ``%-I`` is a glibc extension.
+
+    The add-on runs on musl, where the dash flag is not supported and the
+    format string comes back through unexpanded.
+    """
+    return "%d:%02d %s" % (dt.hour % 12 or 12, dt.minute,
+                           "am" if dt.hour < 12 else "pm")
+
+
+def _when(raw: Any, tz: Any = None, now: Optional[datetime] = None) -> str:
+    """A stored timestamp as a person reads it, in the configured zone.
+
+    Runs are recorded in UTC, and ``datetime.isoformat`` keeps microseconds --
+    ``2026-10-22T16:54:18.033797+00:00`` for a run the user watched happen at
+    breakfast. Anything unparseable is handed back untouched rather than
+    hidden: a timestamp that does not fit the format is still evidence.
+    """
+    text = str(raw)
+    try:
+        dt = datetime.fromisoformat(text[:-1] + "+00:00"
+                                    if text.endswith("Z") else text)
+    except (TypeError, ValueError):
+        return text
+    if dt.tzinfo is None:        # every writer uses UTC; see state.py
+        dt = dt.replace(tzinfo=timezone.utc)
+    if tz is not None:
+        dt = dt.astimezone(tz)
+    now = now or datetime.now(dt.tzinfo)
+    days = (now.date() - dt.date()).days
+    if days == 0:
+        return "Today, %s" % _clock(dt)
+    if days == 1:
+        return "Yesterday, %s" % _clock(dt)
+    return "%s %d %s, %s" % (dt.strftime("%a"), dt.day, dt.strftime("%b"),
+                             _clock(dt))
+
+
 #: A lead paragraph longer than this gets the expander even when it is the only
 #: one, because the clamp will be hiding something either way.
 LEAD_CHARS = 170
@@ -557,6 +606,7 @@ def render(page: StatusPage, *, user: str = "") -> str:
 
     parts.append("<h2>Recent runs</h2>")
     runs = page.recent_runs()
+    tz = page.tz()
     if not runs:
         parts.append("<div class='card empty'><b>No runs recorded yet.</b>"
                      "The first scheduled run will appear here.</div>")
@@ -578,7 +628,7 @@ def render(page: StatusPage, *, user: str = "") -> str:
             "<div class=meta>%s</div></div><span class=caret></span>"
             % (_e(r["league"]), _e(r["scoring_period"]),
                "<span class='tag hold'>shadow</span>" if r["shadow_mode"] else "",
-               " &middot; ".join([_e(r["started_at"])] + counts))
+               " &middot; ".join([_e(_when(r["started_at"], tz))] + counts))
         )
         parts.append("</summary><div class=runbody>")
         if r["proposals"]:

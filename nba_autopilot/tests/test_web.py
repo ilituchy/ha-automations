@@ -184,6 +184,56 @@ class TestRationaleBlock(unittest.TestCase):
         self.assertEqual(out.count("&lt;b&gt;"), 2)
 
 
+class TestTimestamps(unittest.TestCase):
+    """Runs are recorded in UTC with microseconds; nobody reads that.
+
+    The live page showed ``2026-10-22T16:54:18.033797+00:00`` for a run the
+    owner watched happen at breakfast -- right to the microsecond, and in the
+    wrong zone by seven hours.
+    """
+
+    PT = timezone(timedelta(hours=-7))
+    NOW = datetime(2026, 10, 22, 11, 0, tzinfo=PT)
+
+    def test_a_run_today_is_shown_as_a_time(self):
+        self.assertEqual(
+            web._when("2026-10-22T16:54:18.033797+00:00", self.PT, self.NOW),
+            "Today, 9:54 am",
+        )
+
+    def test_yesterday_is_named(self):
+        self.assertEqual(
+            web._when("2026-10-21T16:54:18+00:00", self.PT, self.NOW),
+            "Yesterday, 9:54 am",
+        )
+
+    def test_older_runs_carry_their_date(self):
+        self.assertEqual(
+            web._when("2026-10-18T23:05:00+00:00", self.PT, self.NOW),
+            "Sun 18 Oct, 4:05 pm",
+        )
+
+    def test_a_naive_timestamp_is_read_as_utc(self):
+        """Older rows were written without an offset. They are UTC too."""
+        self.assertEqual(
+            web._when("2026-10-22 16:54:18", self.PT, self.NOW),
+            "Today, 9:54 am",
+        )
+
+    def test_an_unparseable_timestamp_is_shown_rather_than_swallowed(self):
+        """A row that does not fit the format is still evidence of something."""
+        self.assertEqual(web._when("not a date", self.PT, self.NOW), "not a date")
+
+    def test_noon_and_midnight_do_not_become_zero(self):
+        self.assertEqual(web._clock(datetime(2026, 1, 1, 0, 5)), "12:05 am")
+        self.assertEqual(web._clock(datetime(2026, 1, 1, 12, 5)), "12:05 pm")
+
+    def test_a_bot_without_a_zone_still_renders(self):
+        """`tz` is read off the bot; the test doubles here do not have one."""
+        out = web.render(web.StatusPage(FakeBot()))
+        self.assertIn("No runs recorded yet.", out)
+
+
 class TestKindLabels(unittest.TestCase):
     def test_known_kinds_read_as_english(self):
         self.assertEqual(web._kind("ADD_DROP"), "Add / drop")
