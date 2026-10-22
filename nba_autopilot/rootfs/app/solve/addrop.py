@@ -118,7 +118,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple,
+)
 
 from espn import ids
 from models import (
@@ -139,6 +141,7 @@ __all__ = [
     "REASON_QUALITY",
     "REASON_GAMES",
     "REASON_OPEN",
+    "REASON_IR",
     "Candidate",
     "AddDropPlan",
     "acquisitions_per_matchup",
@@ -172,6 +175,11 @@ REASON_GAMES = "games"
 #: Not a third gate -- the degenerate case where nothing goes out, so there is
 #: no player to be a percentage better than and no games to compare against.
 REASON_OPEN = "open-spot"
+#: A healthy player on IR with no active spot to come back to. The only reason
+#: that proposes a drop with no add, and the only one that is not an upgrade:
+#: ESPN will not let him stay on IR, so the cost of *not* acting is the whole
+#: day's lineup, not a few points of foregone gain.
+REASON_IR = "ir-activation"
 
 
 @dataclass(frozen=True)
@@ -260,7 +268,8 @@ class AddDropPlan:
     drop: Optional[Candidate] = None
     #: Expected points gained over the rest of the matchup period.
     gain: float = 0.0
-    #: :data:`REASON_QUALITY` or :data:`REASON_GAMES`; empty when not proposed.
+    #: :data:`REASON_QUALITY`, :data:`REASON_GAMES`, :data:`REASON_OPEN` or
+    #: :data:`REASON_IR`; empty when not proposed.
     reason: str = ""
     rationale: str = ""
     notes: Tuple[str, ...] = ()
@@ -271,15 +280,23 @@ class AddDropPlan:
     def proposed(self) -> bool:
         """True when there is something for the user to approve.
 
-        A lone drop is never proposed by this module -- dropping without adding
-        forfeits a roster spot for nothing -- so an add is what makes a plan
-        real.
+        Usually that is an add: a lone drop forfeits a roster spot for nothing,
+        so on the quality and games gates an add is what makes a plan real.
+
+        The exception is :data:`REASON_IR` -- a healthy player stuck on IR with
+        no active spot to return to. There the spot *is* the point: we are not
+        buying an upgrade, we are paying for roster legality, and the player
+        coming back is already ours. See :func:`plan_ir_activation`.
         """
-        return self.add is not None
+        return self.add is not None or self.drop is not None
 
     def describe(self) -> str:
         if not self.proposed:
             return "no add/drop: %s" % (self.notes[0] if self.notes else "no reason")
+        if self.add is None:
+            return "drop %s to open a roster spot (%s)" % (
+                self.drop.describe(), self.reason,
+            )
         bits = ["add %s" % self.add.describe()]
         if self.drop is not None:
             bits.append("drop %s" % self.drop.describe())
@@ -417,6 +434,153 @@ def week_surplus(
 
 
 # ---------------------------------------------------------------------------
+# pricing and droppability, shared by both decisions
+# ---------------------------------------------------------------------------
+
+
+def _pricer(
+    values: Mapping[PlayerId, float],
+    projections: Mapping[PlayerId, Projection],
+    horizon: Sequence[int],
+    schedule: Mapping[int, Mapping[int, int]],
+    lam: float,
+    prices: Mapping[int, float],
+) -> Callable[[RosterEntry], Candidate]:
+    """A function turning a roster entry into a priced :class:`Candidate`.
+
+    A factory rather than a closure inside the caller, because both decisions
+    in this module price players the same way and have to: a drop proposed by
+    one and a drop proposed by the other would otherwise be comparable only by
+    coincidence.
+    """
+
+    def candidate(e: RosterEntry) -> Candidate:
+        proj = projections.get(e.player_id)
+        p_play = float(proj.p_play) if proj is not None else 0.0
+        days = game_days_for(horizon, schedule, e.pro_team_id)
+        per_game = float(values.get(e.player_id, 0.0))
+        return Candidate(
+            player_id=e.player_id,
+            name=e.name,
+            per_game=per_game,
+            surplus=week_surplus(
+                per_game=per_game, p_play=p_play,
+                game_days=days, lam=lam, prices=prices,
+            ),
+            games=len(days),
+            p_play=p_play,
+            waiver=e.must_claim_on_waivers,
+            on_ir=int(e.current_slot) == ids.IR_SLOT,
+            percent_owned=e.percent_owned,
+            draft_adp=e.draft_adp,
+            draft_rank=e.draft_rank,
+            outlook=e.outlook,
+        )
+
+    return candidate
+
+
+@dataclass(frozen=True)
+class _Droppable:
+    """Who may be given away, who may not, and how full the roster is."""
+
+    priced: Mapping[PlayerId, Candidate]
+    droppable: Tuple[Candidate, ...]
+    blocked: Tuple[str, ...]
+    notes: Tuple[str, ...]
+    roster_cap: int
+    roster_use: int
+    open_spot: bool
+
+
+def _droppable_set(
+    settings: LeagueSettings,
+    roster: Sequence[RosterEntry],
+    candidate: Callable[[RosterEntry], Candidate],
+    *,
+    starters: Optional[Iterable[PlayerId]] = None,
+    never_drop: Iterable[str] = (),
+    just_added: Iterable[PlayerId] = (),
+    review_blocked: Iterable[str] = (),
+    keeper_drop_fraction: float = DEFAULT_KEEPER_DROP_FRACTION,
+) -> _Droppable:
+    """The droppability rules, in one place.
+
+    Shared by :func:`plan_addrop` and :func:`plan_ir_activation` so that the
+    protections a user configured hold whichever decision is asking. Stating
+    them twice is how ``never_drop`` comes to mean one thing on an upgrade and
+    another on a roster-legality drop, which is the version of this bug that
+    would cost somebody a player he said to keep.
+
+    What it deliberately does **not** decide is whether a man sitting on IR may
+    go: that answer differs between the callers -- see the note at the IR filter
+    in :func:`plan_addrop` -- so ``droppable`` includes him and the caller
+    filters.
+    """
+    notes: List[str] = []
+    protected = {n.strip().lower() for n in never_drop if n.strip()}
+    vetoed = {n.strip().lower() for n in review_blocked if n.strip()}
+    started = {int(p) for p in (starters or ())}
+    fresh = {int(p) for p in just_added}
+    mine = [candidate(e) for e in roster]
+    priced = {c.player_id: c for c in mine}
+    by_value = sorted(mine, key=lambda c: c.per_game)
+
+    if settings.keeper:
+        # A rank gate, not a value gate. See the keeper note in the module
+        # docstring: converting "we keep this player" into this week's points
+        # would mean inventing a horizon, so the rule is stated as a rule.
+        keep_rank = max(int(round(len(mine) * float(keeper_drop_fraction))), 1)
+        eligible_by_rank = {c.player_id for c in by_value[:keep_rank]}
+        notes.append(
+            "keeper league: only the %d lowest-valued of %d players may be "
+            "dropped, and being out for the season is not by itself a reason"
+            % (keep_rank, len(mine))
+        )
+    else:
+        eligible_by_rank = {c.player_id for c in mine}
+
+    droppable: List[Candidate] = []
+    blocked: List[str] = []
+    for e in roster:
+        cand = priced[e.player_id]
+        if e.name.strip().lower() in protected:
+            blocked.append("%s (never_drop)" % e.name)
+            continue
+        if e.name.strip().lower() in vetoed:
+            blocked.append("%s (the reviewer blocked a swap sending him out)"
+                           % e.name)
+            continue
+        if int(e.player_id) in fresh:
+            blocked.append("%s (picked up earlier this run)" % e.name)
+            continue
+        if e.lineup_locked:
+            blocked.append("%s (locked)" % e.name)
+            continue
+        if int(e.player_id) in started:
+            blocked.append("%s (starting today)" % e.name)
+            continue
+        if cand.player_id not in eligible_by_rank:
+            continue
+        droppable.append(cand)
+
+    # Non-IR slots against non-IR occupants: see ``ids.active_roster_cap``. The
+    # pair has to be measured the same way on both sides, or a player parked on
+    # IR reads as using up a slot he does not occupy.
+    roster_cap = ids.active_roster_cap(settings.lineup_slot_counts)
+    roster_use = ids.active_roster_use(e.current_slot for e in roster)
+    return _Droppable(
+        priced=priced,
+        droppable=tuple(droppable),
+        blocked=tuple(blocked),
+        notes=tuple(notes),
+        roster_cap=roster_cap,
+        roster_use=roster_use,
+        open_spot=roster_use < roster_cap,
+    )
+
+
+# ---------------------------------------------------------------------------
 # the decision
 # ---------------------------------------------------------------------------
 
@@ -523,83 +687,23 @@ def plan_addrop(
         starting_slots=starting_slots, horizon=horizon, schedule=schedule,
     )
 
-    def candidate(e: RosterEntry) -> Candidate:
-        proj = projections.get(e.player_id)
-        p_play = float(proj.p_play) if proj is not None else 0.0
-        days = game_days_for(horizon, schedule, e.pro_team_id)
-        per_game = float(values.get(e.player_id, 0.0))
-        return Candidate(
-            player_id=e.player_id,
-            name=e.name,
-            per_game=per_game,
-            surplus=week_surplus(
-                per_game=per_game, p_play=p_play,
-                game_days=days, lam=lam, prices=prices,
-            ),
-            games=len(days),
-            p_play=p_play,
-            waiver=e.must_claim_on_waivers,
-            on_ir=int(e.current_slot) == ids.IR_SLOT,
-            percent_owned=e.percent_owned,
-            draft_adp=e.draft_adp,
-            draft_rank=e.draft_rank,
-            outlook=e.outlook,
-        )
+    candidate = _pricer(values, projections, horizon, schedule, lam, prices)
 
     # -- who may go out ----------------------------------------------------
 
-    protected = {n.strip().lower() for n in never_drop if n.strip()}
-    vetoed = {n.strip().lower() for n in review_blocked if n.strip()}
-    started = {int(p) for p in (starters or ())}
-    fresh = {int(p) for p in just_added}
-    mine = [candidate(e) for e in roster]
-    priced = {c.player_id: c for c in mine}
-    by_value = sorted(mine, key=lambda c: c.per_game)
-
-    droppable: List[Candidate] = []
-    blocked: List[str] = []
-    if settings.keeper:
-        # A rank gate, not a value gate. See the keeper note in the module
-        # docstring: converting "we keep this player" into this week's points
-        # would mean inventing a horizon, so the rule is stated as a rule.
-        keep_rank = max(int(round(len(mine) * float(keeper_drop_fraction))), 1)
-        eligible_by_rank = {c.player_id for c in by_value[:keep_rank]}
-        notes.append(
-            "keeper league: only the %d lowest-valued of %d players may be "
-            "dropped, and being out for the season is not by itself a reason"
-            % (keep_rank, len(mine))
-        )
-    else:
-        eligible_by_rank = {c.player_id for c in mine}
-
-    for e in roster:
-        cand = priced[e.player_id]
-        if e.name.strip().lower() in protected:
-            blocked.append("%s (never_drop)" % e.name)
-            continue
-        if e.name.strip().lower() in vetoed:
-            blocked.append("%s (the reviewer blocked a swap sending him out)"
-                           % e.name)
-            continue
-        if int(e.player_id) in fresh:
-            blocked.append("%s (picked up earlier this run)" % e.name)
-            continue
-        if e.lineup_locked:
-            blocked.append("%s (locked)" % e.name)
-            continue
-        if int(e.player_id) in started:
-            blocked.append("%s (starting today)" % e.name)
-            continue
-        if cand.player_id not in eligible_by_rank:
-            continue
-        droppable.append(cand)
-
-    # Non-IR slots against non-IR occupants: see ``ids.active_roster_cap``. The
-    # pair has to be measured the same way on both sides, or a player parked on
-    # IR reads as using up a slot he does not occupy.
-    roster_cap = ids.active_roster_cap(settings.lineup_slot_counts)
-    roster_use = ids.active_roster_use(e.current_slot for e in roster)
-    open_spot = roster_use < roster_cap
+    rule = _droppable_set(
+        settings, roster, candidate,
+        starters=starters, never_drop=never_drop, just_added=just_added,
+        review_blocked=review_blocked,
+        keeper_drop_fraction=keeper_drop_fraction,
+    )
+    notes.extend(rule.notes)
+    priced = rule.priced
+    droppable = list(rule.droppable)
+    blocked = list(rule.blocked)
+    roster_cap, roster_use, open_spot = (
+        rule.roster_cap, rule.roster_use, rule.open_spot,
+    )
 
     # Dropping a man off IR frees an IR slot, not an active one. So when every
     # active slot is taken he is no way to make room for a healthy pickup, and

@@ -1061,3 +1061,68 @@ and a player blocked for being hurt should be reconsidered when he is not);
 and raising `addrop_max_moves`' schema ceiling to absorb the extra looks, which
 would have let a user ask for five swaps and get five reviews of refusals and
 call it a configuration error.
+
+## ADR-023 — An illegal IR occupancy ESPN already has is worked around, not vetoed.
+
+**Context.** ESPN's IR eligibility is its own rule and this app never infers it
+from injury status (ADR-004). Both the target validator in `pipeline.py` and
+preflight check 7 in `espn/write.py` therefore refused any target that put a
+non-eligible player in an IR slot.
+
+Refusing to *put* him there is right. Refusing to *leave* him there is not, and
+on 2026-10-22 the difference cost both live leagues their entire lineup:
+
+```
+ERROR pipeline: rejected target lineup: AJ Dybantsa is not IR-eligible per ESPN
+ERROR pipeline: rejected target lineup: Anthony Black is not IR-eligible per ESPN
+```
+
+Both rosters were full. The men were already in IR slots ESPN had since
+declared them ineligible for, there was no active spot to move them into, so
+the target left them in place — and the validator vetoed the target for
+containing the occupancy it had inherited. Ten starting slots nobody disputed
+went unset because of one player in a slot the write would not have touched.
+A stricter check that produced a worse roster, every run, silently.
+
+**Decision.** Both checks gain `and slot != current_slot`. `set_lineup` sends
+only the differences between current and target, so a player left exactly where
+ESPN has him generates no item in the request and cannot be the grounds for a
+rejection. The illegal state is ESPN's, it exists before we touch anything, and
+the only move that resolves it is a drop.
+
+`plan_lineup` additionally chooses *which* returnee stays parked rather than
+leaving it to the matching. With every active slot eligible to somebody, the
+assignment will happily seat the returnee and leave out whichever player it
+values least — including one sitting legally on the bench, who then fails
+validation for real and costs the lineup after all. The returnees are counted
+against the active roster cap, and the cheapest `excess` of them are pinned to
+IR before the assignment runs. `LineupPlan.ir_stranded` carries them up by id,
+because freeing a spot is an add/drop and the lineup layer may not drop.
+
+**What the live data changed about the reasoning.** Both stranded men were
+**OUT**, not healthy — AJ Dybantsa had not debuted and the injuries page said
+"will not debut". ESPN reports `injuredReserveEligible` false for a rookie
+regardless of how hurt he is. So the state is not "he got healthy and must come
+off IR", which is how it was first described and nearly how it was first coded;
+the trigger is ESPN's eligibility flag and nothing else. Any version keyed on
+injury status would have missed both of them.
+
+**Accepted approximation.** The IR-parking pass runs before the stranding
+decision, and it counts every returnee as occupying his IR slot — including the
+ones it is about to seat, who will release theirs. Parking has already run by
+then, so a freed slot goes unused for the day. It under-parks by at most a slot
+or two and errs toward holding fewer players on IR than the league allows,
+which is the direction that cannot produce an illegal write. Reordering the two
+passes would fix it and would make parking depend on an assignment that has not
+happened yet.
+
+**Rejected:** inferring IR eligibility from injury status so the state could
+not arise (ADR-004, and the live data shows the two do not correlate); dropping
+a player automatically to make room (irreversible, and `autonomy_add_drop`
+defaults off for exactly this reason); returning the plan infeasible but
+writing the starters anyway (the validator exists to make "this target is
+legal" a single answer, and a partial write with a known-bad map is how the
+bench ends up over capacity); and leaving the whole thing to the matching with
+a large negative weight on the IR slot, which encodes the policy as a magic
+number and still lets the optimizer trade away a legal bench player when the
+arithmetic happens to favour it.

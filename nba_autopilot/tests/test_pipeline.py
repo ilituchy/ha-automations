@@ -470,6 +470,132 @@ class TestPlanLineup(unittest.TestCase):
         self.assertNotEqual(plan.target[60], ids.IR_SLOT)
         self.assertTrue(any("must come off IR" in n for n in plan.notes))
 
+    def test_a_healthy_man_on_ir_with_no_room_does_not_cost_the_lineup(self):
+        """The dangerous case, and the one the old code got backwards.
+
+        13 active players against 13 active slots, plus a fourteenth who just
+        got healthy on IR. There is no seat for him -- freeing one means
+        dropping somebody, which this layer may not do. The old behaviour was to
+        leave him in IR, fail validation on *him*, and throw away the entire
+        target: a league where one man got healthy stopped having its starters
+        set at all, every run, until a human noticed.
+
+        What should happen instead: the ten starting slots get filled as usual,
+        he stays parked in the slot ESPN already has him in -- no item of the
+        write touches him, so it cannot be rejected for his sake -- and he is
+        reported upward by id, because the fix is an add/drop and ``main.py``
+        has to be able to act on it.
+        """
+        roster = [player(i) for i in range(10)]
+        roster += [player(i, slot=ids.BENCH_SLOT) for i in range(10, 13)]
+        roster.append(
+            player(60, slot=ids.IR_SLOT, status="ACTIVE", ir=False,
+                   slots=(11, 12, 13))
+        )
+        projections = {e.player_id: projection(e.player_id, 15.0)
+                       for e in roster}
+        # Worth more than anyone he would displace, so "the optimizer did not
+        # want him" cannot explain the outcome -- only the missing spot can.
+        projections[60] = projection(60, 99.0)
+        plan = self.plan(roster, projections)
+
+        self.assertTrue(plan.feasible, plan.notes)
+        self.assertEqual(plan.target[60], ids.IR_SLOT)
+        self.assertEqual(plan.ir_stranded, (60,))
+        self.assertEqual(sum(1 for s in plan.target.values() if s == 11), 10)
+        self.assertTrue(
+            any("has to come off IR" in n and "dropped" in n
+                for n in plan.notes),
+            plan.notes,
+        )
+
+    def test_an_out_player_espn_will_not_keep_on_ir_is_the_live_case(self):
+        """The run of 2026-10-22, reproduced.
+
+        Both leagues lost their entire lineup write that morning, twice over::
+
+            ERROR pipeline: rejected target lineup:
+                AJ Dybantsa is not IR-eligible per ESPN
+            ERROR pipeline: rejected target lineup:
+                Anthony Black is not IR-eligible per ESPN
+
+        The surprise in the live data, and the reason this test exists next to
+        the one above rather than instead of it: the stranded men were **OUT**,
+        not healthy. ESPN had them in IR slots, the injuries page said "will not
+        debut" and "has been ruled out", and ESPN still reported
+        ``injuredReserveEligible`` false -- a rookie who has not debuted does
+        not qualify for IR however hurt he is. So "he got healthy" is not what
+        produces this state, and code that keyed on the injury status rather
+        than on ESPN's eligibility flag would not have caught either of them.
+
+        Nothing about the handling differs -- he is in ``vacating``, there is no
+        active spot, so he stays parked and is reported -- which is the point
+        worth pinning down.
+        """
+        roster = [player(i) for i in range(10)]
+        roster += [player(i, slot=ids.BENCH_SLOT) for i in range(10, 13)]
+        roster.append(
+            player(70, slot=ids.IR_SLOT, status="OUT", ir=False,
+                   slots=(11, 12, 13))
+        )
+        projections = {e.player_id: projection(e.player_id, 15.0)
+                       for e in roster}
+        projections[70] = projection(70, 15.0, p_play=0.0)
+        plan = self.plan(roster, projections)
+
+        self.assertTrue(plan.feasible, plan.notes)
+        self.assertEqual(plan.target[70], ids.IR_SLOT)
+        self.assertEqual(plan.ir_stranded, (70,))
+        # The ten starting slots still get filled, which is the whole point:
+        # the live failure was that they did not.
+        self.assertEqual(sum(1 for s in plan.target.values() if s == 11), 10)
+        # And no item of the write touches him, so it cannot be rejected on his
+        # account the way the live one was.
+        self.assertFalse(any(m.player_id == 70 for m in plan.moves))
+
+    def test_two_stranded_returnees_are_both_reported(self):
+        """The Dynassty case: ESPN refused IR eligibility for two men at once.
+
+        Both have to come back by id, because the add/drop layer proposes one
+        drop at a time and would otherwise resolve the first and go quiet about
+        the second -- which reads as "fixed" while the roster is still a man
+        over.
+        """
+        roster = [player(i) for i in range(10)]
+        roster += [player(i, slot=ids.BENCH_SLOT) for i in range(10, 13)]
+        roster.append(
+            player(70, slot=ids.IR_SLOT, status="OUT", ir=False,
+                   slots=(11, 12, 13))
+        )
+        roster.append(
+            player(71, slot=ids.IR_SLOT, status="ACTIVE", ir=False,
+                   slots=(11, 12, 13))
+        )
+        projections = {e.player_id: projection(e.player_id, 15.0)
+                       for e in roster}
+        projections[70] = projection(70, 15.0, p_play=0.0)
+        plan = self.plan(roster, projections)
+
+        self.assertTrue(plan.feasible, plan.notes)
+        self.assertEqual(set(plan.ir_stranded), {70, 71})
+        self.assertEqual(sum(1 for s in plan.target.values() if s == 11), 10)
+
+    def test_a_healthy_man_on_ir_is_activated_when_there_is_room(self):
+        """The same situation with a spare bench slot is not a dilemma at all,
+        and must not be reported as one."""
+        roster = [player(i) for i in range(10)]
+        roster += [player(i, slot=ids.BENCH_SLOT) for i in range(10, 12)]
+        roster.append(
+            player(60, slot=ids.IR_SLOT, status="ACTIVE", ir=False,
+                   slots=(11, 12, 13))
+        )
+        projections = {e.player_id: projection(e.player_id, 15.0)
+                       for e in roster}
+        plan = self.plan(roster, projections)
+        self.assertTrue(plan.feasible, plan.notes)
+        self.assertNotEqual(plan.target[60], ids.IR_SLOT)
+        self.assertEqual(plan.ir_stranded, ())
+
     def test_no_pointless_churn(self):
         """Indifferent players stay put. Every move lands in a public activity
         feed, so a reshuffle that gains nothing is a cost with no benefit."""

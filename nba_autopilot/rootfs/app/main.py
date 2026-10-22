@@ -1379,13 +1379,7 @@ class Autopilot:
         )
         log.info("add/drop %s: %s", swap, decision.rationale)
 
-        # Per proposal, not per league. A run may offer several swaps, and iOS
-        # treats the tag as an identity: a second notification carrying the
-        # league's tag *replaces* the first on the lock screen, so the user
-        # would be asked about the third swap and never see the other two. The
-        # league id stays in front for the same reason it was there before --
-        # it keeps two leagues' cards from ever colliding, whatever the ids.
-        tag = "autopilot-addrop-%d-%s" % (lg.ref.league_id, proposal.action_id)
+        tag = bridge_mod.addrop_tag(lg.ref.league_id, proposal.action_id)
 
         if not auto:
             # The one class of move that asks. The buttons carry the verb; the
@@ -1493,29 +1487,39 @@ class Autopilot:
                 log.info("proposal %s already claimed", p.action_id)
                 continue
             try:
+                # Inside the try: this reads the store, and an exception
+                # escaping here would abandon every *other* approved proposal
+                # in the queue. The `continue` below means it is always bound
+                # by the time anything downstream reads it.
+                lg = self.league_for_run(p.run_id)
                 result = self._execute(p)
                 self.store.complete(p.id, bool(result and result.ok))
-                self.ha.confirm(
-                    tag="autopilot-%s" % p.run_id,
-                    title="Autopilot: done",
-                    message=p.rationale or p.kind,
-                )
             except Exception as exc:  # noqa: BLE001 - must not kill the loop
                 log.exception("executing %s failed", p.action_id)
                 self.store.complete(p.id, False, str(exc))
                 self._notify_problem("Autopilot: move failed", str(exc)[:400])
                 continue
+
+            # Take the card down; send nothing in its place. The user decided
+            # this himself a second ago and does not need telling -- but the
+            # card must stop offering Approve and Reject for a swap that has
+            # already happened, or a later tap on it reads as a no-op bug. What
+            # he does still hear about is the lineup change below, if there is
+            # one, because that part he did not do.
+            if lg is not None and p.kind in ("ADD", "DROP", "ADD_DROP"):
+                self.ha.dismiss(
+                    bridge_mod.addrop_tag(lg.ref.league_id, p.action_id)
+                )
+
             # The approved swap is on the roster; the lineup still is not. This
             # is the tap path, so it may be hours after the run that proposed
             # it -- which is exactly why the rebalance cannot wait for the next
             # scheduled one. Journalled under the original run, because that is
             # the decision this follows from.
-            if p.kind in ("ADD", "DROP", "ADD_DROP"):
-                lg = self.league_for_run(p.run_id)
-                if lg is not None:
-                    self.rebalance_after_swap(
-                        p.run_id, lg, p.payload or {}, result
-                    )
+            if p.kind in ("ADD", "DROP", "ADD_DROP") and lg is not None:
+                self.rebalance_after_swap(
+                    p.run_id, lg, p.payload or {}, result
+                )
 
     def _execute(self, proposal: Any) -> Any:
         lg = self.league_for_run(proposal.run_id)

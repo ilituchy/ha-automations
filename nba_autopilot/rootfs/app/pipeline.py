@@ -90,6 +90,14 @@ class LineupPlan:
     feasible: bool = True
     cap: Optional[float] = None
     games_used: Optional[float] = None
+    #: Players ESPN has stopped calling IR-eligible -- they got healthy -- who
+    #: could not be given an active slot because every one is taken. They are
+    #: left sitting in IR, which is illegal but which no item of our write
+    #: creates, and they stay there until a roster spot opens.
+    #:
+    #: Structured rather than only a note, because the only fix is an add/drop
+    #: and ``main.py`` has to be able to act on it rather than parse prose.
+    ir_stranded: Tuple[PlayerId, ...] = ()
 
     @property
     def changed(self) -> bool:
@@ -244,7 +252,13 @@ def plan_lineup(
     # -- park newly-OUT players on IR to free bench space ------------------
 
     ir_capacity = int(settings.lineup_slot_counts.get(ids.IR_SLOT, 0))
-    ir_taken = sum(1 for s in fixed.values() if s == ids.IR_SLOT)
+    # ``vacating`` players are physically on IR right now and are counted as
+    # occupying it, even though we are about to try to seat them: ESPN checks
+    # capacity against the slots they hold today, so a parking move that assumes
+    # their slots are free can exceed IR capacity and lose the write.
+    ir_taken = (
+        sum(1 for s in fixed.values() if s == ids.IR_SLOT) + len(vacating)
+    )
     ir_free = max(ir_capacity - ir_taken, 0)
     if ir_free:
         # Lowest value first: parking is free either way, so the tie-break is
@@ -263,6 +277,39 @@ def plan_lineup(
             )
         parked = {e.player_id for e in parkable[:ir_free]}
         movable = [e for e in movable if e.player_id not in parked]
+
+    # -- returnees with nowhere to sit -------------------------------------
+
+    # A healthy man coming off IR needs an active spot, and if the roster is
+    # already full there is not one. Freeing it means dropping somebody, which
+    # this layer may not do, so he stays parked for today and is reported up by
+    # id for the add/drop layer to act on.
+    #
+    # Forced here rather than left to the matching, because the matching would
+    # otherwise choose its own victim: with every active slot eligible to
+    # somebody, it seats the returnee and strands whichever player it liked
+    # least -- possibly one sitting legally on the bench, who then fails
+    # validation and costs the whole day's lineup. Which man stays on IR has to
+    # be our decision, and the cheapest returnee is the one to leave there.
+    #
+    # Accepted approximation: a returnee we *do* seat releases the IR slot he
+    # holds, and the parking pass above could have used it. Parking has already
+    # run by this point, so that slot goes unused today. It under-parks by at
+    # most a slot or two and errs toward holding fewer players on IR than we are
+    # entitled to, which is the safe direction -- never toward an illegal write.
+    stranded_entries: List[RosterEntry] = []
+    if vacating:
+        active_cap = ids.active_roster_cap(settings.lineup_slot_counts)
+        excess = (len(pinned) + len(movable)) - active_cap
+        if excess > 0:
+            leave = sorted(
+                vacating, key=lambda e: values.get(e.player_id, 0.0),
+            )[:excess]
+            for e in leave:
+                fixed[e.player_id] = ids.IR_SLOT
+            held = {e.player_id for e in leave}
+            movable = [e for e in movable if e.player_id not in held]
+            stranded_entries.extend(leave)
 
     # -- the assignment ----------------------------------------------------
 
@@ -348,6 +395,23 @@ def plan_lineup(
             % (len(unplaced), ", ".join(e.name for e in unplaced))
         )
 
+    # Healthy men we could not seat: the ones held back above, plus -- belt and
+    # braces -- any the matching still left out despite the roster arithmetic
+    # saying there was room. The only way to seat them is to drop somebody,
+    # which this layer is not allowed to do, so they are reported upward by id
+    # for the add/drop layer to act on.
+    for e in unplaced:
+        if (e.current_slot == ids.IR_SLOT and not e.ir_eligible
+                and e not in stranded_entries):
+            stranded_entries.append(e)
+    stranded = tuple(e.player_id for e in stranded_entries)
+    for e in stranded_entries:
+        notes.append(
+            "%s is healthy and has to come off IR, but all %d active spot(s) "
+            "are taken -- he cannot be started until somebody is dropped"
+            % (e.name, ids.active_roster_cap(settings.lineup_slot_counts))
+        )
+
     problems = validate_target(settings, roster, target)
     if problems:
         for p in problems:
@@ -363,6 +427,9 @@ def plan_lineup(
             feasible=False,
             cap=cap,
             games_used=used,
+            # Carried even here. An infeasible lineup is the one case where the
+            # add/drop layer most needs to know a drop would unblock it.
+            ir_stranded=stranded,
         )
 
     moves = _moves_for(
@@ -376,6 +443,7 @@ def plan_lineup(
         values=values,
         notes=tuple(notes),
         feasible=True,
+        ir_stranded=stranded,
         cap=cap,
         games_used=used,
     )
@@ -452,7 +520,20 @@ def validate_target(
             problems.append(
                 "%s is not eligible for %s" % (e.name, ids.slot_name(slot))
             )
-        if slot == ids.IR_SLOT and not e.ir_eligible:
+        if (slot == ids.IR_SLOT and not e.ir_eligible
+                and slot != e.current_slot):
+            # Only when the target *puts* him there. A player ESPN has already
+            # parked on IR and has since declared healthy is in an illegal slot
+            # before we touch anything, and ``set_lineup`` sends only the
+            # differences -- so leaving him alone sends no item for him and
+            # cannot be what a rejection is about.
+            #
+            # This used to veto the target either way, which made one healthy
+            # player on a full roster cost the league its entire lineup write:
+            # he could not be placed, the plan came back infeasible, and the
+            # starters nobody was arguing about went unset too. Refusing to
+            # create the illegal state is right; refusing to work around a
+            # pre-existing one is how a bad situation got worse.
             problems.append("%s is not IR-eligible per ESPN" % e.name)
 
     counts: Dict[SlotId, int] = {}

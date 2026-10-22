@@ -89,6 +89,24 @@ class ParsedAction:
         return self.proposal_action_id is None
 
 
+def addrop_tag(league_id: int, proposal_action_id: str) -> str:
+    """The lock-screen identity of one add/drop card. The only place it is built.
+
+    Two call sites need the same string and cannot be allowed to disagree: the
+    one that posts the card, and the one that takes it down once the swap has
+    executed. They *did* disagree -- the teardown used the run id where the
+    card used the league id and the proposal id -- so instead of replacing the
+    card it posted a second, unrelated notification and left the original
+    Approve/Reject buttons sitting there. Two pushes for one decision, and the
+    dead one still looked live.
+
+    Per proposal rather than per league, because iOS treats the tag as an
+    identity: a run offering three swaps under one league tag would show the
+    third and silently replace the first two.
+    """
+    return "autopilot-addrop-%d-%s" % (int(league_id), proposal_action_id)
+
+
 def item_action_id(proposal_action_id: str, verb: str) -> str:
     """``<run>:<kind>:<seq>`` + verb. The only place item ids are built."""
     if verb not in _ITEM_VERBS:
@@ -426,6 +444,32 @@ class HaBridge:
         """Replace an actionable notification with a non-actionable result."""
         self.notify(tag=tag, title=title, message=message, actions=(),
                     time_sensitive=False)
+
+    def dismiss(self, tag: str) -> None:
+        """Take a notification off the lock screen without posting another.
+
+        ``clear_notification`` is the companion app's own magic message; the
+        tag is what identifies the card to remove, so this only works for a
+        card that was posted with one.
+
+        Why this exists rather than ``confirm``: a decision the user just made
+        by hand needs no push telling him he made it -- *"i get a notification
+        when i accept the add drop request. dont need that"* -- but the card he
+        tapped does need to stop offering Approve and Reject for a swap that
+        has already happened. Clearing is the half of ``confirm`` that was
+        actually wanted.
+
+        Never raises. It runs after an executed, journalled transaction, and a
+        failed push must not make a completed swap look failed.
+        """
+        try:
+            self.call_service(
+                "notify",
+                self.notify_device,
+                {"message": "clear_notification", "data": {"tag": tag}},
+            )
+        except Exception as exc:  # noqa: BLE001 - see above
+            log.warning("could not clear notification %s: %s", tag, exc)
 
     def persistent_notification(self, title: str, message: str) -> None:
         """Durable archive in the HA sidebar; survives the push being dismissed."""

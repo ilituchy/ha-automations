@@ -6,7 +6,60 @@ All notable changes to this app are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **One player ESPN would not keep on IR stopped the lineup being set at all.**
+  The run of 2026-10-22 produced this, on both leagues, before it had set a
+  single starter:
+
+  ```
+  ERROR pipeline: rejected target lineup: AJ Dybantsa is not IR-eligible per ESPN
+  ERROR pipeline: rejected target lineup: Anthony Black is not IR-eligible per ESPN
+  ```
+
+  Both men were sitting in IR slots that ESPN had since declared them
+  ineligible for. There was no active spot to move them into — both rosters
+  were full — so the target left them where they were, the validator vetoed the
+  target for containing an illegal IR occupancy, and the whole day's lineup was
+  discarded. Ten starting slots nobody was arguing about went unset because of
+  one man in a slot we had not touched. Every run would have done the same
+  thing, silently, until somebody read the log.
+
+  The validator and the write preflight now refuse to *create* an illegal IR
+  occupancy but tolerate one ESPN already has: `set_lineup` sends only the
+  differences, so a player left exactly where he is generates no item and
+  cannot be what a rejection is about. Refusing to make a bad state is right;
+  refusing to work around one is how it got worse.
+
+  Which man stays on IR is now also our decision rather than the matching's.
+  Left to itself the assignment seats the returnee and strands whichever player
+  it values least — possibly one sitting legally on the bench, who then fails
+  validation for real. The cheapest returnee is held back explicitly, and the
+  rest of the lineup is optimized around him.
+
+  He is reported upward by id, because the fix is an add/drop and not a lineup
+  move: freeing a spot means dropping somebody, which the lineup layer may not
+  do. The surprise in the live data, worth recording because it would mislead
+  anyone debugging from the injury status: both stranded men were **OUT**, not
+  healthy. ESPN reported `injuredReserveEligible` false for a rookie who had
+  not yet debuted, however hurt he was — so the trigger is ESPN's eligibility
+  flag and nothing else. See ADR-023.
+
 ### Added
+
+- **An approved add/drop clears its card instead of sending a second push.**
+  Tapping Approve produced a confirmation notification for a decision the user
+  had just made by hand — *"i get a notification when i accept the add drop
+  request. dont need that"* — while the card he tapped stayed on the lock
+  screen still offering Approve and Reject for a swap that had already
+  executed. The card is now taken down and nothing is posted in its place. The
+  lineup change that follows the swap is still announced, because that part he
+  did not do.
+
+  The tag is built in one place now (`bridge.addrop_tag`). The teardown and the
+  card disagreed about how to spell it — the teardown used the run id where the
+  card used the league id and the proposal id — so it posted an unrelated
+  second notification and left the original buttons live.
 
 - **A swap the reviewer blocks no longer uses up one of the run's moves.**
   `addrop_max_moves` counts swaps that reach the user, and a vetoed swap is not

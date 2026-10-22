@@ -467,11 +467,20 @@ class EspnWrite:
         # 7. IR occupancy must match ESPN's eligibility, which is its own rule.
         #    We never infer it from injury status; guessing produces a rejected
         #    transaction that takes the whole lineup down with it.
+        #
+        #    "Place him on IR" is the operative phrase: the check is on the
+        #    items this request would send, and an ineligible player who stays
+        #    exactly where ESPN already has him generates no item. Raising on
+        #    him anyway refused every unrelated starter move for the whole
+        #    league until a human intervened -- a stricter check that produced a
+        #    worse roster. Freeing him needs a roster spot, which is an add/drop
+        #    decision and not something a LINEUP write can do.
         for pid, slot in target.items():
-            if slot == ids.IR_SLOT and not by_id[pid].ir_eligible:
+            p = by_id[pid]
+            if slot == ids.IR_SLOT and not p.ir_eligible and slot != p.current_slot:
                 raise PreflightError(
                     "%s is not IR-eligible per ESPN; refusing to place him on IR"
-                    % by_id[pid].name
+                    % p.name
                 )
 
         # 8. Roster size must be conserved -- a lineup write must never be able

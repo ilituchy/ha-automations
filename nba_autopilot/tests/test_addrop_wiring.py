@@ -33,6 +33,7 @@ sys.path.insert(
 import main as main_mod  # noqa: E402
 import pipeline  # noqa: E402
 from espn import ids  # noqa: E402
+from ha import bridge as bridge_mod  # noqa: E402
 from models import (  # noqa: E402
     P_PLAY_PRIOR,
     LeagueSettings,
@@ -100,6 +101,7 @@ class _Ha:
     def __init__(self, *, explode: bool = False):
         self.sent = []
         self.problems = []
+        self.cleared = []
         self.explode = explode
 
     def notify(self, *, title, message, tag, actions=(), time_sensitive=True):
@@ -114,6 +116,11 @@ class _Ha:
     def confirm(self, *, tag, title, message):
         self.sent.append({"title": title, "message": message, "tag": tag,
                           "actions": []})
+
+    def dismiss(self, tag):
+        # Into its own list, not ``sent``. The distinction is the whole point:
+        # a dismissal takes a card away and must not count as a push.
+        self.cleared.append(tag)
 
 
 class _Write:
@@ -883,6 +890,42 @@ class TestTheApprovalLoopRebalancesToo(unittest.TestCase):
         self.assertEqual(len(h.lg.write.calls), 1)
         self.assertEqual(len(h.lg.write.lineups), 1)
         self.assertEqual(h.lg.write.lineups[0]["target"][90], START)
+
+    def test_approving_a_swap_takes_the_card_down_and_says_nothing(self):
+        """*"i get a notification when i accept the add drop request. dont need
+        that."*
+
+        It was worse than redundant. The confirmation went out under
+        ``autopilot-<run_id>`` while the card it was meant to replace carried
+        ``autopilot-addrop-<league>-<proposal>``, so iOS treated them as
+        unrelated: a second push arrived *and* the original kept offering
+        Approve and Reject for a swap that had already gone through.
+        """
+        h = self._h()
+        swap = self._queue(h, "ADD_DROP", swap_payload())
+        asyncio.run(h.app.execute_approved())
+        self.assertTrue(swap.completed)
+
+        self.assertEqual(
+            h.ha.cleared,
+            [bridge_mod.addrop_tag(h.lg.ref.league_id, swap.action_id)],
+        )
+        # The only push is the rebalance, which is news he did not make
+        # himself. Nothing titled like a receipt.
+        self.assertEqual(len(h.ha.sent), 1)
+        self.assertNotIn("done", h.ha.sent[0]["title"].lower())
+
+    def test_a_swap_that_espn_refused_leaves_the_card_alone(self):
+        """The buttons must survive a failed write. The move did not happen, so
+        the question is still open and the card is still the way to answer it --
+        clearing it would leave the failure notification as the only trace of a
+        decision the user can no longer act on."""
+        h = self._h(write=_Write(explode=True))
+        h.app.league_for_run = lambda run_id: h.lg
+        self._queue(h, "ADD_DROP", swap_payload())
+        asyncio.run(h.app.execute_approved())
+        self.assertEqual(h.ha.cleared, [])
+        self.assertTrue(h.ha.problems)
 
     def test_an_approved_lineup_is_not_rebalanced_again(self):
         """A LINEUP proposal *is* the lineup. Re-planning after writing it
