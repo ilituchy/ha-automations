@@ -276,7 +276,7 @@ class TestAppliedMoves(unittest.TestCase):
 
     def test_a_lineup_write_is_listed_move_by_move(self):
         bot = FakeBot(FakeStore(rows=_run_rows([{
-            "kind": "LINEUP", "state": "EXECUTED",
+            "kind": "LINEUP", "state": "DONE",
             "rationale": "Karl-Anthony Towns UTIL->BE",
             "payload": LINEUP_PAYLOAD,
         }])))
@@ -311,7 +311,7 @@ class TestAppliedMoves(unittest.TestCase):
     def test_a_run_journaled_before_the_payload_carried_moves(self):
         """The one-line rationale is parsed back into rows, minus the faces."""
         bot = FakeBot(FakeStore(rows=_run_rows([{
-            "kind": "LINEUP", "state": "EXECUTED",
+            "kind": "LINEUP", "state": "DONE",
             "rationale": "Anthony Black BE->UTIL; Jalen Duren UTIL->BE",
             "payload": "{}",
         }])))
@@ -340,7 +340,7 @@ class TestAppliedMoves(unittest.TestCase):
 
     def test_a_move_name_is_escaped(self):
         bot = FakeBot(FakeStore(rows=_run_rows([{
-            "kind": "LINEUP", "state": "EXECUTED", "rationale": "",
+            "kind": "LINEUP", "state": "DONE", "rationale": "",
             "payload": json.dumps({"moves": [
                 {"player_id": 1, "name": "<img src=x>", "from": "BE",
                  "to": "UTIL", "why": ""},
@@ -365,6 +365,32 @@ class TestLogsDisclosure(unittest.TestCase):
         out = web.render(web.StatusPage(bot))
         self.assertNotIn("class=logs", out)
         self.assertIn("no moves proposed", out)
+
+
+class TestStateVocabulary(unittest.TestCase):
+    """The page invented ``EXECUTED``, which is ESPN's word and not ours.
+
+    Nothing failed: an unknown state falls through to the neutral chip, so
+    every completed run was rendered in grey and looked, correctly but
+    uselessly, like every other state.
+    """
+
+    def test_the_page_only_names_states_the_store_can_write(self):
+        import state
+        known = {v for k, v in vars(state).items()
+                 if k.isupper() and isinstance(v, str) and v == k}
+        self.assertTrue(set(web.STATE_TAGS) <= known,
+                        set(web.STATE_TAGS) - known)
+
+    def test_every_state_the_store_can_write_has_a_colour(self):
+        import state
+        for name in (state.PROPOSED, state.APPROVED, state.EXECUTING,
+                     state.DONE, state.FAILED, state.EXPIRED, state.REJECTED):
+            self.assertIn(name, web.STATE_TAGS)
+
+    def test_a_completed_write_is_the_one_the_page_calls_done(self):
+        import state
+        self.assertEqual(web.DONE, state.DONE)
 
 
 class TestRenderUrls(unittest.TestCase):

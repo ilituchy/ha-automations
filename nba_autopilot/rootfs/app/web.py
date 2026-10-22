@@ -471,10 +471,17 @@ footer {
 #: state painted green by accident reads as "this happened" when it may not
 #: have.
 STATE_TAGS = {
-    "EXECUTED": "on", "APPROVED": "on",
+    "DONE": "on", "APPROVED": "on",
     "FAILED": "off", "REJECTED": "off", "EXPIRED": "off",
-    "PROPOSED": "hold",
+    "PROPOSED": "hold", "EXECUTING": "hold",
 }
+
+#: What ``state`` calls a write that landed. Spelled out rather than imported,
+#: so the page has no reason to reach into the state machine; a test holds the
+#: two in step. The first draft of this page guessed ``EXECUTED`` -- which is
+#: ESPN's word on the wire, not ours -- and so painted every completed run
+#: with the neutral chip and none of them with the green one.
+DONE = "DONE"
 
 #: ``ADD_DROP`` is the database's word for it, not a person's.
 KIND_LABELS = {
@@ -790,9 +797,9 @@ def render(page: StatusPage, *, user: str = "") -> str:
             state = str(p["state"]).upper()
             parts.append(
                 "<div class=sechead>%s%s</div>" % (
-                    "Set automatically" if state == "EXECUTED"
+                    "Set automatically" if state == DONE
                     else _e(_kind(p["kind"])),
-                    "" if state == "EXECUTED" else
+                    "" if state == DONE else
                     "<span class='tag %s'>%s</span>" % (
                         STATE_TAGS.get(state, ""), _e(state.lower())),
                 )
