@@ -383,6 +383,60 @@ class TestLogsDisclosure(unittest.TestCase):
         self.assertIn("no moves proposed", out)
 
 
+def _two_leagues():
+    """Four runs, the two leagues alternating as they really do."""
+    rows = []
+    for i, (lid, when) in enumerate([
+        (7, "2026-10-22 09:54:18"), (9, "2026-10-22 09:54:00"),
+        (7, "2026-10-21 16:02:00"), (9, "2026-10-21 16:01:40"),
+    ]):
+        rows.append({
+            "run_id": "R%d" % i, "league_id": lid, "started_at": when,
+            "scoring_period": 3, "shadow_mode": 0,
+            "notes": "[]", "shadow_prices": "{}",
+        })
+    store = FakeStore(rows={"FROM runs ORDER BY": rows,
+                            "FROM runs WHERE": rows[:1]})
+    return FakeBot(store, leagues=[FakeLeague(9, "Dynassty"),
+                                   FakeLeague(7, "The Chairman's Fantasy")])
+
+
+class TestLeagueColumns(unittest.TestCase):
+    """*"can we put dynasty and the other league side by side"*.
+
+    The leagues run a second apart, so one chronological list alternated
+    between them and every card had to be read to find out whose it was.
+    """
+
+    def test_each_league_gets_one_column(self):
+        out = web.render(web.StatusPage(_two_leagues()))
+        self.assertEqual(out.count("<section class=lg>"), 2)
+
+    def test_the_league_is_named_once_not_once_per_run(self):
+        out = web.render(web.StatusPage(_two_leagues()))
+        self.assertEqual(out.count("Dynassty"), 1)
+        self.assertEqual(out.count("The Chairman&#x27;s Fantasy"), 1)
+
+    def test_column_order_follows_the_configuration(self):
+        """Not the run order: both run in the same second, so ordering by
+        recency would swap the columns on a refresh."""
+        out = web.render(web.StatusPage(_two_leagues()))
+        self.assertLess(out.index("Dynassty"),
+                        out.index("The Chairman&#x27;s Fantasy"))
+
+    def test_every_run_still_appears(self):
+        out = web.render(web.StatusPage(_two_leagues()))
+        self.assertEqual(out.count("class='card run'"), 4)
+
+    def test_a_league_no_longer_configured_keeps_its_column(self):
+        """Its history does not vanish because it was removed from options."""
+        bot = _two_leagues()
+        bot.leagues = [FakeLeague(9, "Dynassty")]
+        out = web.render(web.StatusPage(bot))
+        self.assertEqual(out.count("<section class=lg>"), 2)
+        self.assertIn("league 7", out)
+
+
 class TestStateVocabulary(unittest.TestCase):
     """The page invented ``EXECUTED``, which is ESPN's word and not ours.
 

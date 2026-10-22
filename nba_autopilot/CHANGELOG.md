@@ -106,6 +106,21 @@ All notable changes to this app are documented here. The format follows
   `<img>`, so there is no broken-image icon and no script needed to handle
   one.
 
+- **Each league gets its own column of runs.** *"can we put dynasty and the
+  other league side by side two columns rather than one combined centered
+  column"*. The runs were one list in time order, and since both leagues run
+  within a second of each other the list simply alternated between them: every
+  card had to be read to find out whose it was. They are now grouped under a
+  heading per league, side by side on a wide screen and stacked on a narrow
+  one, with the league named once instead of once a card — which leaves the
+  run itself led by when it ran, the thing that actually tells two of the same
+  league's runs apart.
+
+  Column order follows the configured order of the leagues rather than
+  recency, so it does not change under the reader between refreshes. The rest
+  of the page — the status chips, the proposals awaiting approval — stays a
+  single centred reading-width column; only the run history is wide.
+
 ### Added
 
 - **An approved add/drop clears its card instead of sending a second push.**

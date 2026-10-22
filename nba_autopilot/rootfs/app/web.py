@@ -126,6 +126,7 @@ class StatusPage:
             )
             runs.append({
                 "run_id": r["run_id"],
+                "league_id": r["league_id"],
                 "league": self.league_label(r["league_id"]),
                 "started_at": r["started_at"],
                 "scoring_period": r["scoring_period"],
@@ -140,6 +141,15 @@ class StatusPage:
                 } for p in props],
             })
         return runs
+
+    def league_order(self) -> List[Any]:
+        """Configured league ids, in the order they were configured.
+
+        Column order has to be stable across loads, and "whichever ran most
+        recently" is not: both leagues run in the same second, so a refresh
+        could swap the columns for no reason a reader could see.
+        """
+        return [lg.ref.league_id for lg in getattr(self.bot, "leagues", [])]
 
     def tz(self) -> Any:
         """The configured zone, or ``None`` to leave times as stored.
@@ -224,6 +234,27 @@ body {
   font-variant-numeric: tabular-nums;
 }
 .wrap { max-width: 660px; margin: 0 auto; }
+/* Wide enough for two columns of runs, and only then. Everything above them
+   is a single file of decisions and stays at a reading width in the middle,
+   because a swap card stretched across a desktop is two names a foot apart. */
+@media (min-width: 1000px) {
+  .wrap { max-width: 1040px; }
+  .solo { max-width: 660px; margin-left: auto; margin-right: auto; }
+}
+/* One column per league. `auto-fit` rather than a fixed two: the columns
+   collapse to one on a phone on their own, and a third league gets a column
+   instead of being appended to somebody else's. */
+.leagues {
+  display: grid; align-items: start; gap: 0 16px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+.lghead {
+  font-size: 13px; font-weight: 700; letter-spacing: -.01em;
+  margin: 0 0 8px; padding: 0 2px;
+  color: var(--primary-text-color, var(--fg));
+}
+.lg + .lg .lghead { margin-top: 18px; }
+@media (min-width: 1000px) { .lg + .lg .lghead { margin-top: 0; } }
 
 h1 {
   font-size: 24px; font-weight: 700; letter-spacing: -.02em;
@@ -668,12 +699,12 @@ def render(page: StatusPage, *, user: str = "") -> str:
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
         "<title>NBA Autopilot</title><style>%s</style></head><body>"
         "<main class=wrap>" % CSS,
-        "<h1>NBA Autopilot</h1>",
+        "<h1 class=solo>NBA Autopilot</h1>",
     ]
 
     # The chips answer, above the fold, the two questions the page is opened
     # with: is it actually writing to ESPN, and does it want something from me.
-    parts.append("<div class=chips>")
+    parts.append("<div class='chips solo'>")
     parts.append("<span class='chip hold'>Shadow mode</span>" if shadow
                  else "<span class='chip on'>Live</span>")
     parts.append(
@@ -684,7 +715,7 @@ def render(page: StatusPage, *, user: str = "") -> str:
 
     if shadow:
         parts.append(
-            "<div class='card banner'><div class=bar></div><div>"
+            "<div class='card banner solo'><div class=bar></div><div>"
             "<b>Shadow mode</b><div class=meta>"
             "Decisions are recorded and reported, but nothing is sent to ESPN. "
             "Approving below marks the move approved and logs the request it "
@@ -693,14 +724,14 @@ def render(page: StatusPage, *, user: str = "") -> str:
 
     if stuck:
         parts.append(
-            "<div class='card banner bad'><div class=bar></div><div>"
+            "<div class='card banner bad solo'><div class=bar></div><div>"
             "<b>%s in an unknown state</b><div class=meta>"
             "A POST timed out and ESPN may or may not have applied it. Runs are "
             "paused until this is reconciled.</div></div></div>"
             % _plural(len(stuck), "write")
         )
 
-    parts.append("<h2>Needs approval%s</h2>"
+    parts.append("<h2 class=solo>Needs approval%s</h2>"
                  % ("<span class=count>%d</span>" % len(pending) if pending else ""))
     if not pending:
         # Say *why* it is empty. Only add/drop needs a human, and lineup moves
@@ -709,12 +740,12 @@ def render(page: StatusPage, *, user: str = "") -> str:
         # one. Reported from the phone: tapped the notification, found nothing
         # to approve, reasonably assumed something had gone wrong.
         parts.append(
-            "<div class='card empty'><b>Nothing waiting.</b>"
+            "<div class='card empty solo'><b>Nothing waiting.</b>"
             "Lineup and IR moves are applied automatically and appear under "
             "Recent runs; only add/drop asks first.</div>"
         )
     for p in pending:
-        parts.append("<div class=card>")
+        parts.append("<div class='card solo'>")
         parts.append("<div class=eyebrow><span class=league>%s</span>%s</div>" % (
             _e(p["league"]),
             ("<span class='delta%s'>%+.1f pts</span>"
@@ -738,16 +769,46 @@ def render(page: StatusPage, *, user: str = "") -> str:
         )
         parts.append("</div>")
 
-    parts.append("<h2>Recent runs</h2>")
+    parts.append("<h2 class=solo>Recent runs</h2>")
     runs = page.recent_runs()
     tz = page.tz()
     if not runs:
-        parts.append("<div class='card empty'><b>No runs recorded yet.</b>"
+        parts.append("<div class='card empty solo'><b>No runs recorded yet.</b>"
                      "The first scheduled run will appear here.</div>")
-    # Every run shows what it changed, without being opened first. Collapsing
-    # the whole run was the fix for a body that was a dozen notes long; now
-    # that the notes are behind their own control the body is a few moves, and
-    # hiding those made the page's one answer the thing hardest to reach.
+    # A column per league rather than one interleaved list. Two leagues run a
+    # second apart, so the single column alternated between them and every
+    # card had to be read to find out whose it was.
+    groups: Dict[Any, List[Dict[str, Any]]] = {}
+    for r in runs:
+        groups.setdefault(r["league_id"], []).append(r)
+    order = [k for k in page.league_order() if k in groups]
+    order += [k for k in groups if k not in order]  # a league since removed
+
+    if runs:
+        parts.append("<div class=leagues>")
+    for key in order:
+        column = groups[key]
+        parts.append("<section class=lg><h3 class=lghead>%s</h3>"
+                     % _e(column[0]["league"]))
+        _runs(parts, column, tz)
+        parts.append("</section>")
+    if runs:
+        parts.append("</div>")
+
+    if user:
+        parts.append("<footer>signed in as %s</footer>" % _e(user))
+    parts.append("</main></body></html>")
+    return "".join(parts)
+
+
+def _runs(parts: List[str], runs: List[Dict[str, Any]], tz: Any) -> None:
+    """One league's runs, newest first.
+
+    Every run shows what it changed without being opened first. Collapsing the
+    whole run was the fix for a body that was a dozen notes long; now that the
+    notes are behind their own control the body is a few moves, and hiding
+    those made the page's one answer the thing hardest to reach.
+    """
     for r in runs:
         # Lineup and IR writes are split out of the proposal list: they are the
         # only ones nobody approved, so they are the only ones the page has to
@@ -765,13 +826,15 @@ def render(page: StatusPage, *, user: str = "") -> str:
         # advertise seventeen notes about not doing anything.
         counts = [_plural(nmoves + len(rows), "move")] if nmoves or rows else []
         parts.append("<div class='card run'>")
+        # The league is the column heading now, so the run leads with when it
+        # ran -- which is what tells two of the same league's runs apart.
         parts.append(
             "<div class=runline><div class=top><span class=name>%s</span>"
-            "<span class=tag>period %s</span>%s</div>"
-            "<div class=meta>%s</div></div>"
-            % (_e(r["league"]), _e(r["scoring_period"]),
+            "<span class=tag>period %s</span>%s</div>%s</div>"
+            % (_e(_when(r["started_at"], tz)), _e(r["scoring_period"]),
                "<span class='tag hold'>shadow</span>" if r["shadow_mode"] else "",
-               " &middot; ".join([_e(_when(r["started_at"], tz))] + counts))
+               ("<div class=meta>%s</div>" % " &middot; ".join(counts))
+               if counts else "")
         )
         parts.append("<div class=runbody>")
         for p, moves in applied:
@@ -819,11 +882,6 @@ def render(page: StatusPage, *, user: str = "") -> str:
                 parts.append("<li>%s</li>" % _e(n))
             parts.append("</ul></details>")
         parts.append("</div></div>")
-
-    if user:
-        parts.append("<footer>signed in as %s</footer>" % _e(user))
-    parts.append("</main></body></html>")
-    return "".join(parts)
 
 
 # -- deciding --------------------------------------------------------------
