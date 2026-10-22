@@ -14,6 +14,7 @@ is touched at all, and a stale decision must not reach the executor.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import unittest
@@ -241,6 +242,129 @@ class TestKindLabels(unittest.TestCase):
     def test_an_unknown_kind_is_shown_rather_than_dropped(self):
         """A kind added later must still render, just without a nice name."""
         self.assertEqual(web._kind("TRADE_OFFER"), "Trade offer")
+
+
+def _run_rows(props, notes='[]'):
+    """A store whose single run carries ``props``."""
+    return {
+        "FROM runs": [{
+            "run_id": "R1", "league_id": 1, "started_at": "2026-10-22 09:54:00",
+            "scoring_period": 3, "shadow_mode": 0,
+            "notes": notes, "shadow_prices": "{}",
+        }],
+        "FROM proposals": props,
+    }
+
+
+LINEUP_PAYLOAD = json.dumps({
+    "scoring_period": 3,
+    "moves": [
+        {"player_id": 3136195, "name": "Karl-Anthony Towns", "from": "UTIL",
+         "to": "BE", "kind": "LINEUP",
+         "why": "UTIL -> BE (no game today; p_play 0.93)"},
+    ],
+})
+
+
+class TestAppliedMoves(unittest.TestCase):
+    """What the run did, as moves rather than as a paragraph.
+
+    The owner's question of the page is "what did it change for me today",
+    and the answer used to be a semicolon-joined sentence buried under the
+    working notes.
+    """
+
+    def test_a_lineup_write_is_listed_move_by_move(self):
+        bot = FakeBot(FakeStore(rows=_run_rows([{
+            "kind": "LINEUP", "state": "EXECUTED",
+            "rationale": "Karl-Anthony Towns UTIL->BE",
+            "payload": LINEUP_PAYLOAD,
+        }])))
+        out = web.render(web.StatusPage(bot))
+        self.assertIn("Set automatically", out)
+        self.assertIn("Karl-Anthony Towns", out)
+        self.assertIn(">UTIL<", out)
+        self.assertIn(">Bench<", out)
+
+    def test_the_slots_are_not_repeated_in_the_reason(self):
+        moves = json.loads(LINEUP_PAYLOAD)["moves"]
+        self.assertEqual(web._move_reason(moves[0]),
+                         "no game today; p_play 0.93")
+
+    def test_an_unrecognised_reason_is_shown_whole(self):
+        self.assertEqual(web._move_reason({"why": "something else"}),
+                         "something else")
+
+    def test_a_headshot_is_requested_for_a_known_player(self):
+        self.assertIn("/3136195.png", web._face(3136195))
+
+    def test_an_unusable_player_id_still_renders_a_disc(self):
+        """No id, no image -- but never a broken-image icon and never a URL."""
+        out = web._face(None)
+        self.assertIn("class='face", out)
+        self.assertNotIn("background-image", out)
+
+    def test_a_player_id_cannot_smuggle_css_into_the_style_attribute(self):
+        out = web._face("1);background:url(//evil/x")
+        self.assertNotIn("evil", out)
+
+    def test_a_run_journaled_before_the_payload_carried_moves(self):
+        """The one-line rationale is parsed back into rows, minus the faces."""
+        bot = FakeBot(FakeStore(rows=_run_rows([{
+            "kind": "LINEUP", "state": "EXECUTED",
+            "rationale": "Anthony Black BE->UTIL; Jalen Duren UTIL->BE",
+            "payload": "{}",
+        }])))
+        out = web.render(web.StatusPage(bot))
+        self.assertIn("Anthony Black", out)
+        self.assertIn("Jalen Duren", out)
+        self.assertIn("class=did", out)
+
+    def test_a_rationale_that_is_not_a_move_list_falls_back(self):
+        """Half a parse is worse than none: the row keeps its paragraph."""
+        self.assertEqual(
+            web._moves_of({"rationale": "lineup already optimal",
+                           "payload": {}}),
+            [],
+        )
+
+    def test_a_failed_lineup_write_says_so(self):
+        bot = FakeBot(FakeStore(rows=_run_rows([{
+            "kind": "LINEUP", "state": "FAILED",
+            "rationale": "Karl-Anthony Towns UTIL->BE",
+            "payload": LINEUP_PAYLOAD,
+        }])))
+        out = web.render(web.StatusPage(bot))
+        self.assertNotIn("Set automatically", out)
+        self.assertIn(">failed<", out)
+
+    def test_a_move_name_is_escaped(self):
+        bot = FakeBot(FakeStore(rows=_run_rows([{
+            "kind": "LINEUP", "state": "EXECUTED", "rationale": "",
+            "payload": json.dumps({"moves": [
+                {"player_id": 1, "name": "<img src=x>", "from": "BE",
+                 "to": "UTIL", "why": ""},
+            ]}),
+        }])))
+        out = web.render(web.StatusPage(bot))
+        self.assertNotIn("<img src=x", out)
+
+
+class TestLogsDisclosure(unittest.TestCase):
+    """The working notes are for when something looks wrong, not for always."""
+
+    def test_notes_are_behind_a_dropdown(self):
+        bot = FakeBot(FakeStore(rows=_run_rows([], '["cap 70, used 15"]')))
+        out = web.render(web.StatusPage(bot))
+        self.assertIn("<details class=logs>", out)
+        self.assertIn("Logs (1)", out)
+        self.assertIn("cap 70, used 15", out)
+
+    def test_a_run_with_no_notes_has_no_dropdown(self):
+        bot = FakeBot(FakeStore(rows=_run_rows([])))
+        out = web.render(web.StatusPage(bot))
+        self.assertNotIn("class=logs", out)
+        self.assertIn("no moves proposed", out)
 
 
 class TestRenderUrls(unittest.TestCase):

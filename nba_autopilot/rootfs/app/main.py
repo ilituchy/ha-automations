@@ -1173,9 +1173,25 @@ class Autopilot:
         place that decides whether a packet reaches ESPN, and it is the same
         place that builds the packet.
         """
+        # ``target`` is what gets written; ``moves`` is what happened. The
+        # status page needs the second and cannot derive it from the first,
+        # because the difference is against the roster as it was, which is not
+        # journaled. Slot names rather than ids so a row stays readable if the
+        # slot numbering is ever remapped under it.
         payload = {
             "target": {str(k): int(v) for k, v in plan.target.items()},
             "scoring_period": int(settings.current_scoring_period),
+            "moves": [
+                {
+                    "player_id": int(m.player_id),
+                    "name": m.player_name,
+                    "from": ids.slot_name(m.from_slot or -1),
+                    "to": ids.slot_name(m.to_slot or -1),
+                    "kind": m.kind,
+                    "why": m.rationale,
+                }
+                for m in plan.moves
+            ],
         }
         rationale = "; ".join(
             "%s %s->%s" % (m.player_name, ids.slot_name(m.from_slot or -1),

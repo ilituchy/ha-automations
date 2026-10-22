@@ -75,6 +75,31 @@ All notable changes to this app are documented here. The format follows
   Still no JavaScript, no template engine, no static-file mount, and every URL
   still relative. The disclosures are `<details>`.
 
+- **A run now opens on what it changed, not on how it worked it out.**
+  *"what it should show is clearly indicating each move that was automatically
+  made today"*. A run's body led with its working notes — games-used
+  arithmetic, shadow prices, every player it declined to drop and why — a
+  dozen lines of them, with the lineup it had actually set compressed into one
+  semicolon-joined sentence somewhere above. The moves are now listed one per
+  row, each with the player's headshot, the slot he left and the slot he was
+  put in, and the reason underneath; the notes moved behind a **Logs (n)**
+  dropdown.
+
+  Lineup writes journal a `moves` array for this, since the page cannot
+  recover the per-move detail from the target lineup: the difference is
+  against the roster as it was, which is not journalled. Runs recorded before
+  that array existed are parsed back out of their one-line rationale, so the
+  history reads the same way — only without the faces, which need the player
+  id. A rationale that does not parse cleanly keeps its paragraph rather than
+  showing a half-read list as if it were the whole move.
+
+  The headshots come from ESPN's public CDN (`a.espncdn.com`), with no cookies
+  and no identifiers of ours attached. It does mean the browser showing this
+  page tells ESPN which players are on it. A player ESPN has no photo for
+  degrades to an empty disc: the image is a CSS background rather than an
+  `<img>`, so there is no broken-image icon and no script needed to handle
+  one.
+
 ### Added
 
 - **An approved add/drop clears its card instead of sending a second push.**

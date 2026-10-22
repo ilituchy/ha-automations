@@ -857,6 +857,21 @@ class TestRebalanceAfterTheSwap(unittest.TestCase):
         self.assertTrue(row.completed)
         self.assertEqual(h.ha.problems, [])
 
+    def test_the_journalled_payload_names_every_move(self):
+        """The status page shows the moves one by one and cannot recover them
+        from ``target``: the difference is against the roster as it was, which
+        is not journalled. So they are written down at the point of the write."""
+        h = after_the_swap()
+        h.app.plan_from_roster = lambda *a, **kw: lineup_work(moved_plan())
+        h.app.rebalance_after_swap("RUN1", h.lg, swap_payload(),
+                                   write_result())
+
+        moves = h.store.rows[0].payload["moves"]
+        self.assertEqual(
+            [(m["name"], m["from"], m["to"]) for m in moves],
+            [("Better", "BE", "UTIL"), ("Weak", "UTIL", "BE")],
+        )
+
 
 class TestTheApprovalLoopRebalancesToo(unittest.TestCase):
     """The tap path, which is the default one.

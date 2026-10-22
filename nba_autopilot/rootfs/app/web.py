@@ -288,6 +288,24 @@ h2 .count {
   display: grid; place-items: center;
   font-size: 15px; font-weight: 700; line-height: 1;
 }
+/* A headshot as a background rather than an <img>: a player ESPN has no
+   photo for then degrades to an empty disc instead of a broken-image icon,
+   with no script to handle the error. */
+.face {
+  position: relative;
+  flex: 0 0 36px; height: 36px; border-radius: 999px;
+  background: var(--chip) center 18%/125% no-repeat;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.face.sm { flex-basis: 28px; height: 28px; }
+/* The +/- rides on the corner of the headshot rather than beside it, so a
+   swap is two faces in a column and not four things in a row. */
+.face .pip {
+  position: absolute; right: -3px; bottom: -3px;
+  flex: 0 0 18px; height: 18px; font-size: 13px;
+  box-shadow: 0 0 0 2px var(--card-background-color, var(--card));
+}
+.face.sm .pip { flex-basis: 16px; height: 16px; font-size: 12px; }
 .pip.in { background: var(--good-bg); color: var(--good); }
 .pip.out { background: var(--bad-bg); color: var(--bad); }
 .who {
@@ -388,12 +406,48 @@ details.run[open] .caret { transform: rotate(90deg); }
 .props li { padding: 10px 0; border-top: 1px solid var(--line); }
 .props .head { display: flex; align-items: center; gap: 7px; }
 .props .kind { font-size: 13px; font-weight: 700; }
-.notehead {
+.props .swap { margin-top: 9px; gap: 7px; }
+.props .swap .who { font-size: 15px; }
+.sechead {
   font-size: 10px; font-weight: 700; text-transform: uppercase;
   letter-spacing: .07em; color: var(--secondary-text-color, var(--faint));
-  margin: 16px 0 6px; padding-top: 12px; border-top: 1px solid var(--line);
+  margin: 14px 0 8px; display: flex; align-items: center; gap: 7px;
 }
-.notes { list-style: none; margin: 0; padding: 0; }
+.props li:first-child .sechead, .runbody > .sechead:first-child {
+  margin-top: 4px;
+}
+
+/* One applied lineup change: who, and the two slots. */
+.did { list-style: none; margin: 0; padding: 0; }
+.did li {
+  display: flex; align-items: center; gap: 11px;
+  padding: 7px 0; min-width: 0;
+}
+.did li + li { border-top: 1px solid var(--line); }
+.did .who { font-size: 15px; font-weight: 600; }
+.did .body { flex: 1; min-width: 0; }
+.did .top {
+  display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap;
+}
+.did .slots {
+  display: flex; align-items: center; gap: 6px; margin-top: 1px;
+  font-size: 11px; font-weight: 700; letter-spacing: .04em;
+  color: var(--secondary-text-color, var(--faint));
+}
+.did .slots .to { color: var(--good); }
+.did .slots .arrow { opacity: .6; font-weight: 400; }
+.did .note { font-size: 12px; color: var(--secondary-text-color, var(--dim)); }
+
+details.logs { margin-top: 14px; border-top: 1px solid var(--line); }
+details.logs > summary {
+  list-style: none; cursor: pointer; padding: 11px 0 0;
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .07em; color: var(--secondary-text-color, var(--faint));
+}
+details.logs > summary::-webkit-details-marker { display: none; }
+details.logs > summary::after { content: " \\25B8"; }
+details.logs[open] > summary::after { content: " \\25BE"; }
+.notes { list-style: none; margin: 8px 0 0; padding: 0; }
 .notes li {
   font-size: 12px; line-height: 1.5; padding: 3px 0 3px 11px;
   color: var(--secondary-text-color, var(--dim));
@@ -436,6 +490,116 @@ def _kind(kind: Any) -> str:
 
 def _plural(n: int, word: str) -> str:
     return "%d %s%s" % (n, word, "" if n == 1 else "s")
+
+
+#: ESPN's public headshot CDN. No cookies and no ids of ours go with the
+#: request, but it is a third party learning which players are on the page, so
+#: it is one URL in one place rather than scattered through the markup.
+HEADSHOT = "https://a.espncdn.com/i/headshots/nba/players/full/%d.png"
+
+
+def _face(player_id: Any, extra: str = "", badge: str = "") -> str:
+    """An avatar disc for a player id, or a plain one if the id is unusable.
+
+    ``int()`` is the escaping here: the value lands inside a ``style``
+    attribute, where ``_e`` would not be enough on its own, so nothing but a
+    number can ever reach the URL.
+    """
+    try:
+        style = " style='background-image:url(%s)'" % (HEADSHOT % int(player_id))
+    except (TypeError, ValueError):
+        style = ""
+    return "<span class='face %s'%s>%s</span>" % (extra, style, badge)
+
+
+#: ESPN's slot abbreviations, as read by someone who did not write them. Only
+#: the ones that are not already the word people use get an entry.
+SLOT_WORDS = {"BE": "Bench"}
+
+
+def _slot(name: Any) -> str:
+    return SLOT_WORDS.get(str(name), str(name))
+
+
+def _swap(payload: Mapping[str, Any], *, small: bool = False) -> str:
+    """The two legs of an add/drop. Shared by the queue and the history.
+
+    Add before drop: the move is read as "who am I getting", and the man
+    leaving is the cost of it, so he belongs second and dimmer.
+    """
+    out = ["<div class=swap>"]
+    for verb, pid in (("ADD", payload.get("add")), ("DROP", payload.get("drop"))):
+        if not pid:
+            continue
+        name = payload.get("%s_name" % verb.lower()) or "player %s" % pid
+        side = "in" if verb == "ADD" else "out"
+        tags = ""
+        if verb == "ADD" and payload.get("waiver"):
+            tags = " <span class='tag hold'>waiver claim</span>"
+        badge = "<span class='pip %s'>%s</span>" % (
+            side, "+" if verb == "ADD" else "−")
+        out.append("<div class='leg %s'>%s<span class=who>%s</span>%s</div>" % (
+            side, _face(pid, "sm" if small else "", badge), _e(name), tags,
+        ))
+    out.append("</div>")
+    return "".join(out)
+
+
+def _applied(moves: List[Mapping[str, Any]]) -> str:
+    """The lineup changes a run actually made, one row each."""
+    out = ["<ul class=did>"]
+    for m in moves:
+        reason = _move_reason(m)
+        out.append(
+            "<li>%s<div class=body><div class=top>"
+            "<span class=who>%s</span><span class=slots>%s"
+            "<span class=arrow>&rarr;</span><span class=to>%s</span>"
+            "</span></div>%s</div></li>" % (
+                _face(m.get("player_id")),
+                _e(m.get("name") or "player %s" % m.get("player_id")),
+                _e(_slot(m.get("from"))), _e(_slot(m.get("to"))),
+                ("<div class=note>%s</div>" % _e(reason)) if reason else "",
+            )
+        )
+    out.append("</ul>")
+    return "".join(out)
+
+
+def _moves_of(proposal: Mapping[str, Any]) -> List[Mapping[str, Any]]:
+    """The per-move detail of a lineup write, however old the row is.
+
+    Runs journaled before the payload carried ``moves`` only have the one-line
+    rationale ``"Name UTIL->BE; Name BE->UTIL"``, which is enough for the slots
+    and the name but not for a headshot. Recovering it is all-or-nothing: a
+    single bit that does not parse falls the whole proposal back to the plain
+    rationale row, rather than showing a half-read list as if it were complete.
+    """
+    payload = proposal.get("payload")
+    moves = payload.get("moves") if isinstance(payload, Mapping) else None
+    if isinstance(moves, list) and moves:
+        return [m for m in moves if isinstance(m, Mapping)]
+    out: List[Mapping[str, Any]] = []
+    for bit in str(proposal.get("rationale") or "").split("; "):
+        name, sep, slots = bit.strip().rpartition(" ")
+        src, arrow, dst = slots.partition("->")
+        if not (name and sep and arrow and src and dst):
+            return []
+        out.append({"name": name, "from": src, "to": dst})
+    return out
+
+
+def _move_reason(move: Mapping[str, Any]) -> str:
+    """The parenthetical from a move's rationale, without the slots again.
+
+    ``pipeline`` writes ``"UTIL -> BE (no game today)"``; the slots are already
+    shown as pills beside it, so only the reason is wanted. If the format ever
+    changes the whole string is shown rather than nothing.
+    """
+    why = str(move.get("why") or "")
+    head = "%s -> %s (" % (move.get("from", ""), move.get("to", ""))
+    if why.startswith(head) and why.endswith(")"):
+        return why[len(head):-1]
+    return why
 
 
 def _clock(dt: datetime) -> str:
@@ -567,27 +731,7 @@ def render(page: StatusPage, *, user: str = "") -> str:
              % ("" if p["value_delta"] > 0 else " down", p["value_delta"]))
             if p["value_delta"] else "",
         ))
-        # Add before drop: the move is read as "who am I getting", and the man
-        # leaving is the cost of it, so he belongs second and dimmer.
-        parts.append("<div class=swap>")
-        for verb, pid in (("ADD", p["payload"].get("add")),
-                          ("DROP", p["payload"].get("drop"))):
-            if not pid:
-                continue
-            name = p["payload"].get("%s_name" % verb.lower()) or "player %s" % pid
-            tags = ""
-            if verb == "ADD" and p["payload"].get("waiver"):
-                tags = " <span class='tag hold'>waiver claim</span>"
-            parts.append(
-                "<div class='leg %s'><span class='pip %s'>%s</span>"
-                "<span class=who>%s</span>%s</div>" % (
-                    "in" if verb == "ADD" else "out",
-                    "in" if verb == "ADD" else "out",
-                    "+" if verb == "ADD" else "−",
-                    _e(name), tags,
-                )
-            )
-        parts.append("</div>")
+        parts.append(_swap(p["payload"]))
         if p["rationale"]:
             parts.append(_why(p["rationale"]))
         parts.append(
@@ -615,9 +759,20 @@ def render(page: StatusPage, *, user: str = "") -> str:
     # once was the wall of grey the page used to open with, and it buried the
     # approval queue above it.
     for i, r in enumerate(runs):
+        # Lineup and IR writes are split out of the proposal list: they are the
+        # only ones nobody approved, so they are the only ones the page has to
+        # account for move by move. Everything else is a card above, or a row
+        # somebody already answered.
+        applied, rows = [], []
+        for p in r["proposals"]:
+            moves = (_moves_of(p)
+                     if str(p["kind"]).upper() in ("LINEUP", "IR") else [])
+            (applied if moves else rows).append((p, moves))
+        nmoves = sum(len(m) for _, m in applied)
+
         counts = []
-        if r["proposals"]:
-            counts.append(_plural(len(r["proposals"]), "move"))
+        if nmoves or rows:
+            counts.append(_plural(nmoves + len(rows), "move"))
         if r["notes"]:
             counts.append(_plural(len(r["notes"]), "note"))
         parts.append("<details class='card run'%s><summary>"
@@ -631,28 +786,50 @@ def render(page: StatusPage, *, user: str = "") -> str:
                " &middot; ".join([_e(_when(r["started_at"], tz))] + counts))
         )
         parts.append("</summary><div class=runbody>")
-        if r["proposals"]:
+        for p, moves in applied:
+            state = str(p["state"]).upper()
+            parts.append(
+                "<div class=sechead>%s%s</div>" % (
+                    "Set automatically" if state == "EXECUTED"
+                    else _e(_kind(p["kind"])),
+                    "" if state == "EXECUTED" else
+                    "<span class='tag %s'>%s</span>" % (
+                        STATE_TAGS.get(state, ""), _e(state.lower())),
+                )
+            )
+            parts.append(_applied(moves))
+        if rows:
             parts.append("<ul class=props>")
-            for p in r["proposals"]:
+            for p, _m in rows:
+                payload = p["payload"] if isinstance(p["payload"], Mapping) else {}
+                swap = (_swap(payload, small=True)
+                        if payload.get("add") or payload.get("drop") else "")
                 parts.append(
                     "<li><div class=head><span class=kind>%s</span>"
-                    "<span class='tag %s'>%s</span></div>%s</li>" % (
+                    "<span class='tag %s'>%s</span></div>%s%s</li>" % (
                         _e(_kind(p["kind"])),
                         STATE_TAGS.get(str(p["state"]).upper(), ""),
                         _e(str(p["state"]).lower()),
-                        _why(p["rationale"])
-                        if p["rationale"] else "",
+                        swap,
+                        _why(p["rationale"]) if p["rationale"] else "",
                     )
                 )
             parts.append("</ul>")
-        else:
+        if not applied and not rows:
             parts.append("<div class='meta empty'>no moves proposed</div>")
         if r["notes"]:
-            parts.append("<div class=notehead>What the run worked out</div>")
-            parts.append("<ul class=notes>")
+            # Working notes, not results: the games-used arithmetic, the
+            # shadow prices, every player it refused to drop and why. Useful
+            # when something looks wrong, and noise the rest of the time, so
+            # the run opens on what it *did* and keeps the reasoning one tap
+            # away.
+            parts.append(
+                "<details class=logs><summary>Logs (%d)</summary>"
+                "<ul class=notes>" % len(r["notes"])
+            )
             for n in r["notes"]:
                 parts.append("<li>%s</li>" % _e(n))
-            parts.append("</ul>")
+            parts.append("</ul></details>")
         parts.append("</div></details>")
 
     if user:
