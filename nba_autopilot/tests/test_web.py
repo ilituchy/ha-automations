@@ -34,10 +34,10 @@ from state import Proposal, Store  # noqa: E402
 
 
 def _proposal(action_id="R1:ADD_DROP:0", kind="ADD_DROP", payload=None,
-              rationale="", state="PROPOSED", pid=1):
+              rationale="", state="PROPOSED", pid=1, run_id="R1"):
     return Proposal(
         id=pid,
-        run_id="R1",
+        run_id=run_id,
         action_id=action_id,
         kind=kind,
         state=state,
@@ -71,10 +71,15 @@ class FakeCfg:
 class FakeStore:
     """Only the four things the page touches."""
 
-    def __init__(self, pending=(), rows=None, stuck=()):
+    def __init__(self, pending=(), rows=None, stuck=(), run_leagues=None):
         self._pending = list(pending)
         self._rows = rows or {}
         self._stuck = list(stuck)
+        #: ``run_id -> league_id``, for the one query the page makes whose
+        #: answer depends on its argument: which league a pending proposal's
+        #: run belonged to. ``_rows`` matches on the SQL alone, so it cannot
+        #: give two run ids two different leagues.
+        self._run_leagues = dict(run_leagues or {})
         self.decisions = []
         self.decide_result = _proposal()
 
@@ -85,6 +90,9 @@ class FakeStore:
         return list(self._stuck)
 
     def query(self, sql, args=()):
+        if self._run_leagues and "SELECT league_id FROM runs" in sql:
+            lid = self._run_leagues.get(args[0] if args else None)
+            return [{"league_id": lid}] if lid is not None else []
         for fragment, rows in self._rows.items():
             if fragment in sql:
                 return rows
@@ -154,25 +162,26 @@ class TestRenderEscaping(unittest.TestCase):
 class TestRationaleBlock(unittest.TestCase):
     """The rationale is four times the height of the move it explains.
 
-    Closed, the card has to stay the size of a decision; open, nothing may be
-    lost -- the reviewer's caveat is the part most worth reading and it is
-    always the *last* paragraph.
+    Closed, *none* of it shows -- a clamped lead line was tried first and read
+    as a card leading with its own footnotes. Open, nothing may be lost: the
+    reviewer's caveat is the part most worth reading and it is always the
+    *last* paragraph.
     """
 
-    def test_a_short_single_paragraph_is_not_hidden_behind_a_toggle(self):
+    def test_even_a_short_single_paragraph_is_hidden(self):
         out = web._why("Add him. He is better.")
-        self.assertNotIn("<details", out)
-        self.assertIn("Add him. He is better.", out)
-
-    def test_a_second_paragraph_forces_the_disclosure(self):
-        out = web._why("The lead.\n\nReviewer's caveat: think twice.")
         self.assertIn("<details", out)
+        self.assertNotIn("Add him. He is better.</summary>", out)
+
+    def test_nothing_of_the_rationale_sits_in_the_summary(self):
+        """The summary is empty; CSS puts "Show details" on it."""
+        out = web._why("The lead.\n\nReviewer's caveat: think twice.")
+        self.assertIn("<summary></summary>", out)
         self.assertIn("Reviewer&#x27;s caveat: think twice.", out)
 
-    def test_a_long_lead_gets_the_disclosure_even_when_alone(self):
-        """The clamp hides the tail either way, so the toggle has to be there."""
-        out = web._why("x" * (web.LEAD_CHARS + 1))
-        self.assertIn("<details", out)
+    def test_an_empty_rationale_renders_no_control(self):
+        self.assertEqual(web._why(""), "")
+        self.assertEqual(web._why("   \n\n  "), "")
 
     def test_every_paragraph_survives(self):
         out = web._why("one\n\ntwo\n\nthree")
@@ -435,6 +444,67 @@ class TestLeagueColumns(unittest.TestCase):
         out = web.render(web.StatusPage(bot))
         self.assertEqual(out.count("<section class=lg>"), 2)
         self.assertIn("league 7", out)
+
+
+def _pending_bot(*leagues_with_swaps):
+    """A bot whose waiting proposals belong to the leagues named.
+
+    Each argument is a ``league_id``; one proposal is queued per argument, so
+    passing the same id twice queues two for that league and passing one id
+    leaves the other league's column empty.
+    """
+    pending, run_leagues = [], {}
+    for i, lid in enumerate(leagues_with_swaps):
+        run_id = "R%d" % i
+        run_leagues[run_id] = lid
+        pending.append(_proposal(
+            action_id="%s:ADD_DROP:0" % run_id, pid=i + 1, run_id=run_id,
+            payload={"add": 10 + i, "add_name": "Adds %d" % i,
+                     "drop": 20 + i, "drop_name": "Drops %d" % i,
+                     "waiver": False},
+        ))
+    store = FakeStore(pending=pending, run_leagues=run_leagues)
+    return FakeBot(store, leagues=[FakeLeague(9, "Dynassty"),
+                                   FakeLeague(7, "The Chairman's Fantasy")])
+
+
+class TestPendingColumns(unittest.TestCase):
+    """*"needs approval should be in the sepearate columns please"*.
+
+    Same columns as the runs and in the same order, so a waiting swap sits
+    above the runs of the league it came from.
+    """
+
+    def test_each_league_gets_a_column(self):
+        out = web.render(web.StatusPage(_pending_bot(9, 7)))
+        self.assertEqual(out.count("<section class=lg>"), 2)
+
+    def test_a_league_with_nothing_waiting_keeps_its_column(self):
+        """Otherwise one league's swap slides under the other's heading."""
+        out = web.render(web.StatusPage(_pending_bot(7)))
+        self.assertEqual(out.count("<section class=lg>"), 2)
+        self.assertIn("Nothing waiting.", out)
+
+    def test_the_column_order_matches_the_configuration(self):
+        out = web.render(web.StatusPage(_pending_bot(7, 9)))
+        self.assertLess(out.index("Dynassty"),
+                        out.index("The Chairman&#x27;s Fantasy"))
+
+    def test_the_card_no_longer_repeats_the_league(self):
+        """The heading says it; the eyebrow spends that slot on the kind."""
+        out = web.render(web.StatusPage(_pending_bot(9, 9)))
+        self.assertEqual(out.count("Dynassty"), 1)
+        self.assertEqual(out.count("<span class=league>Add / drop</span>"), 2)
+
+    def test_both_swaps_keep_their_own_buttons(self):
+        out = web.render(web.StatusPage(_pending_bot(9, 7)))
+        self.assertIn("value='R0:ADD_DROP:0'", out)
+        self.assertIn("value='R1:ADD_DROP:0'", out)
+
+    def test_an_empty_queue_says_so_once_rather_than_per_column(self):
+        out = web.render(web.StatusPage(_pending_bot()))
+        self.assertEqual(out.count("Nothing waiting."), 1)
+        self.assertIn("only add/drop asks first", out)
 
 
 class TestStateVocabulary(unittest.TestCase):

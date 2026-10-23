@@ -20,10 +20,12 @@ The four findings:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import sys
 import unittest
+from datetime import datetime, timedelta
 
 sys.path.insert(
     0,
@@ -34,10 +36,12 @@ sys.path.insert(
     ),
 )
 
+import main as main_mod  # noqa: E402
 from espn import ids  # noqa: E402
 from espn.read import EspnConfig, EspnRead  # noqa: E402
 from espn.write import EspnWrite, PreflightError  # noqa: E402
 from models import LeagueSettings, RosterEntry  # noqa: E402
+from solve.calendar import SeasonCalendar  # noqa: E402
 
 PG, C, UTIL, BE, IR = 0, 4, 11, 12, 13
 
@@ -652,6 +656,120 @@ class TestAcquisitionsUsedWire(unittest.TestCase):
             {"id": 7, "transactionCounter": {"matchupAcquisitionTotals": {}}},
         ]})
         self.assertEqual(EspnRead(cfg, http).acquisitions_used(), {})
+
+
+# ---------------------------------------------------------------------------
+# finding 5: `latestScoringPeriod` lags the period writes are accepted for
+# ---------------------------------------------------------------------------
+
+
+def _autopilot(cal):
+    """An ``Autopilot`` with nothing on it but the calendar cache.
+
+    ``__init__`` opens an HTTP client and a SQLite file; ``today_period``
+    touches neither.
+    """
+    bot = object.__new__(main_mod.Autopilot)
+    bot._calendar = cal
+    return bot
+
+
+def _calendar(first_date, days=100):
+    """A linear season of ``days`` periods starting at period 1."""
+    return SeasonCalendar.from_period_dates(
+        {p: first_date + timedelta(days=p - 1) for p in range(1, days + 1)}
+    )
+
+
+class TestScoringPeriodLag(unittest.TestCase):
+    """ESPN's two services disagree about which period it is.
+
+    Observed live 2026-10-23: the 09:00 run read ``latestScoringPeriod: 3``
+    and addressed its lineup to period 3; the write service answered ``409
+    TRAN_INVALID_SCORINGPERIOD_NOT_CURRENT`` on both leagues, because by the
+    date it was already period 4. The read-side number had rolled over around
+    midday Eastern the day before -- the 09:00 run read 2 and the 09:54 run
+    read 3, with no NBA game having finished in between.
+    """
+
+    def setUp(self):
+        # 2026-10-20 is period 1 of the live season, so today is period 4.
+        self.today = datetime.now(ids.GAME_DATE_TZ).date()
+        self.cal = _calendar(self.today - timedelta(days=3))
+
+    def test_the_date_wins_when_espn_lags(self):
+        bot = _autopilot(self.cal)
+        period, note = bot.today_period(
+            _settings(current_scoring_period=3, espn_latest_scoring_period=3)
+        )
+        self.assertEqual(period, 4)
+        self.assertIn("scoring period 3", note)
+
+    def test_agreement_is_silent(self):
+        bot = _autopilot(self.cal)
+        period, note = bot.today_period(
+            _settings(current_scoring_period=4, espn_latest_scoring_period=4)
+        )
+        self.assertEqual(period, 4)
+        self.assertIsNone(note)
+
+    def test_no_calendar_leaves_espns_number_alone(self):
+        """Degrading to the lagging number beats inventing one."""
+        period, note = _autopilot(None).today_period(
+            _settings(current_scoring_period=3, espn_latest_scoring_period=3)
+        )
+        self.assertEqual(period, 3)
+        self.assertIsNone(note)
+
+    def test_an_untrustworthy_calendar_leaves_it_alone_too(self):
+        """A non-linear calendar cannot answer "which period is today"."""
+        dates = {p: self.today - timedelta(days=3 - p + 1) for p in (1, 2, 3)}
+        dates[4] = self.today + timedelta(days=9)  # breaks the linear model
+        bot = _autopilot(SeasonCalendar.from_period_dates(dates))
+        self.assertFalse(bot._calendar.trustworthy)
+        period, _ = bot.today_period(
+            _settings(current_scoring_period=3, espn_latest_scoring_period=3)
+        )
+        self.assertEqual(period, 3)
+
+    def test_the_offseason_is_not_a_disagreement(self):
+        """ESPN keeps reporting a period in July. Today is outside the season
+        then, so the date has nothing to say and must not overrule it."""
+        bot = _autopilot(_calendar(self.today + timedelta(days=60), days=10))
+        period, note = bot.today_period(
+            _settings(current_scoring_period=7, espn_latest_scoring_period=7)
+        )
+        self.assertEqual(period, 7)
+        self.assertIsNone(note)
+
+    def test_espns_raw_number_survives_the_correction(self):
+        """``main`` overwrites ``current_scoring_period``; the cross-check in
+        ``SeasonCalendar.verify`` still needs ESPN's own pair."""
+        s = dataclasses.replace(
+            _settings(current_scoring_period=3, espn_latest_scoring_period=3),
+            current_scoring_period=4,
+        )
+        self.assertEqual(s.current_scoring_period, 4)
+        self.assertEqual(s.espn_latest_scoring_period, 3)
+
+
+class TestWritesCarryTheCallersPeriod(unittest.TestCase):
+    """The corrected period has to reach the packet, or none of this matters."""
+
+    def test_add_drop_sends_what_it_was_given(self):
+        w, http = _writer()
+        w.add_drop(add=50, drop=3, waiver=False, scoring_period=4)
+        self.assertEqual(http.last["scoringPeriodId"], 4)
+
+    def test_add_drop_falls_back_to_settings(self):
+        w, http = _writer()
+        w.add_drop(add=50, drop=3, waiver=False)
+        self.assertEqual(http.last["scoringPeriodId"], 5)  # _settings()
+
+    def test_set_lineup_sends_what_it_was_given(self):
+        w, http = _writer()
+        w.set_lineup({1: UTIL, 2: BE, 3: BE}, scoring_period=4)
+        self.assertEqual(http.last["scoringPeriodId"], 4)
 
 
 if __name__ == "__main__":

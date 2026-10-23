@@ -8,6 +8,48 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **Every write was addressed to yesterday for the first half of the morning.**
+  The run of 2026-10-23 lost both leagues' entire lineup to this:
+
+  ```
+  ESPN rejected LINEUP (409): Transaction type can only be executed in the
+  current scoring period
+  ```
+
+  ESPN's two services disagree about what day it is. `status.latestScoringPeriod`
+  is the latest period it has *results* for, and it lags the period the league
+  is actually in until it rolls over around midday Eastern — on 2026-10-22 the
+  09:00 run read period 2 and the 09:54 run read 3, with no NBA game having
+  finished in between. The write service does not lag: it accepts the current
+  period and answers `TRAN_INVALID_SCORINGPERIOD_NOT_CURRENT` to every other
+  one. The 09:00 runs had been sending a stale number for days and nobody
+  noticed, because `set_lineup` sends nothing when the lineup is already
+  optimal — the bug could only bite on a morning that actually had a move.
+
+  The date is now the authority. The season calendar already knows which
+  period a date is, in the same US Eastern the periods are keyed in, and it is
+  cross-checked against ESPN every run; `latestScoringPeriod` is the fallback
+  for when there is no trustworthy calendar or when today is out of season,
+  which is the offseason and not a disagreement about anything. The correction
+  happens once, in `Autopilot.settings_now`, because the same field drives the
+  optimizer, the budget horizon, the games-used baseline and every write, and
+  the only way those can be made to agree is to fix it before any of them read
+  it. It is applied in `main` and not in `read` or `solve`: the read layer's
+  contract is ESPN verbatim, and the solver is pure and has no clock.
+
+  ESPN's own number is kept beside it in `espn_latest_scoring_period`, because
+  `SeasonCalendar.verify` is asking whether our week model reproduces ESPN's
+  `currentMatchupPeriod` and ESPN's two numbers lag *together* — pairing a
+  corrected period with a lagging matchup would report a disagreement at every
+  week boundary that was ours and not ESPN's. When the two differ the run says
+  so in its notes, which is also the only place a calendar that had genuinely
+  drifted would show up.
+
+  The approve path recomputes rather than reading the period off the journalled
+  payload: a swap can be approved from a notification hours — or a night's
+  sleep — after the run that proposed it, and the period that was current then
+  is exactly the one ESPN now refuses.
+
 - **One player ESPN would not keep on IR stopped the lineup being set at all.**
   The run of 2026-10-22 produced this, on both leagues, before it had set a
   single starter:
@@ -57,9 +99,9 @@ All notable changes to this app are documented here. The format follows
   A swap now reads as what it is: the man arriving above the man leaving, each
   with a coloured pip, the projected gain as a pill beside the league, and the
   two buttons weighted so Approve is the filled one and Reject is quiet. The
-  rationale keeps a three-line lead and puts the rest behind *Show reasoning* —
-  the reviewer's caveat is always the last paragraph and is the part most worth
-  reading, so it is disclosed rather than truncated. Status chips at the top
+  rationale goes behind *Show details* in full — the reviewer's caveat is
+  always the last paragraph and is the part most worth reading, so it is
+  disclosed rather than truncated. Status chips at the top
   answer the two questions the page is opened with: is it really writing to
   ESPN, and does it want something from me.
 
@@ -117,9 +159,32 @@ All notable changes to this app are documented here. The format follows
   league's runs apart.
 
   Column order follows the configured order of the leagues rather than
-  recency, so it does not change under the reader between refreshes. The rest
-  of the page — the status chips, the proposals awaiting approval — stays a
-  single centred reading-width column; only the run history is wide.
+  recency, so it does not change under the reader between refreshes.
+
+- **Swaps awaiting approval are in those columns too, and nothing explains
+  itself before it is asked to.** *"needs approval should be in the sepearate
+  columns please. and ALL the subtext should be hidden in show details which
+  includes the calculations and reasoning"*. Two things:
+
+  The approval queue was a single centred list while the runs beneath it were
+  two columns, so a waiting swap sat above neither league in particular and
+  had to name its own league on every card. It is now the same grid in the
+  same configured order, a column per league — including a league with nothing
+  waiting, which gets a *Nothing waiting* card rather than silently letting
+  the other league's swap slide under its heading. The league name comes off
+  the card with it, and the kind takes that slot.
+
+  And the rationale now discloses whole. It kept a clamped three-line lead
+  outside the control, which meant every card opened with the first third of
+  its own arithmetic — shadow prices, the games-used figure, the matchup score
+  — above the two buttons it exists to offer. Closed, a card is the swap and
+  the decision; the pricing and the reviewer's caveat are one tap away and
+  unabridged when they arrive.
+
+  The header band is capped at reading width but no longer centred within the
+  wide wrapper: with both lists now full-width grids, a title and status chips
+  floating 190px to the right of the first column read as a different page
+  laid on top of this one.
 
 ### Added
 

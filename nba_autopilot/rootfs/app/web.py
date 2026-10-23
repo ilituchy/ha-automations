@@ -43,7 +43,7 @@ import html
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import parse_qs
 
 log = logging.getLogger("autopilot.web")
@@ -97,10 +97,15 @@ class StatusPage:
                 log.warning("pending proposal %s has non-approvable kind %r",
                             p.action_id, p.kind)
                 continue
+            league_id = self._league_of_run(p.run_id)
             out.append({
                 "action_id": p.action_id,
                 "kind": p.kind,
-                "league": self.league_label(self._league_of_run(p.run_id)),
+                # The id as well as the label, because the page groups this
+                # list into the same per-league columns as the runs and the
+                # column order has to come from the configured ids.
+                "league_id": league_id,
+                "league": self.league_label(league_id),
                 "payload": dict(p.payload),
                 "rationale": p.rationale,
                 "value_delta": p.value_delta,
@@ -239,7 +244,10 @@ body {
    because a swap card stretched across a desktop is two names a foot apart. */
 @media (min-width: 1000px) {
   .wrap { max-width: 1040px; }
-  .solo { max-width: 660px; margin-left: auto; margin-right: auto; }
+  /* Capped but not centred. Both lists below are now full-width grids, and a
+     header band floating 190px to the right of the first column reads as a
+     different page sitting on top of this one. */
+  .solo { max-width: 660px; }
 }
 /* One column per league. `auto-fit` rather than a fixed two: the columns
    collapse to one on a phone on their own, and a third league gets a column
@@ -354,31 +362,27 @@ h2 .count {
 .tag.on { background: var(--good-bg); color: var(--good); }
 .tag.off { background: var(--bad-bg); color: var(--bad); }
 
-.why {
-  margin: 14px 0 0; padding-left: 12px;
-  border-left: 2px solid var(--line);
-  color: var(--secondary-text-color, var(--dim));
-  font-size: 13.5px; line-height: 1.55;
-}
-.why p { margin: 0; }
-.why p + p { margin-top: 9px; }
-/* The rationale carries the pricing detail and the reviewer's caveat in full
-   -- worth having, but it is four times the height of the move it explains, so
-   closed it shows a three-line lead and the card stays the size of a decision.
+/* The rationale carries the pricing arithmetic and the reviewer's caveat in
+   full -- worth having, and four times the height of the move it explains, so
+   none of it shows until it is asked for. A clamped lead line was tried first
+   and read as a card leading with its own footnotes.
    `<details>` rather than script: this page ships no JavaScript. */
-details.why > summary { list-style: none; cursor: pointer; }
-details.why > summary::-webkit-details-marker { display: none; }
-details.why:not([open]) .lead {
-  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-details.why > summary::after {
-  content: "Show reasoning";
-  display: inline-block; margin-top: 7px;
+.why { margin: 13px 0 0; font-size: 13.5px; line-height: 1.55; }
+.why > summary { list-style: none; cursor: pointer; }
+.why > summary::-webkit-details-marker { display: none; }
+.why > summary::after {
+  content: "Show details";
   font-size: 12px; font-weight: 600;
   color: var(--primary-color, #2b7de9);
 }
-details.why[open] > summary::after { content: "Show less"; }
+.why[open] > summary::after { content: "Hide details"; }
+.why .detail {
+  margin-top: 10px; padding-left: 12px;
+  border-left: 2px solid var(--line);
+  color: var(--secondary-text-color, var(--dim));
+}
+.why .detail p { margin: 0; }
+.why .detail p + p { margin-top: 9px; }
 .meta {
   font-size: 12px; line-height: 1.45;
   color: var(--secondary-text-color, var(--faint));
@@ -661,11 +665,6 @@ def _when(raw: Any, tz: Any = None, now: Optional[datetime] = None) -> str:
                              _clock(dt))
 
 
-#: A lead paragraph longer than this gets the expander even when it is the only
-#: one, because the clamp will be hiding something either way.
-LEAD_CHARS = 170
-
-
 def _chunks(text: Any) -> List[str]:
     """Rationale split into paragraphs on blank lines.
 
@@ -677,17 +676,48 @@ def _chunks(text: Any) -> List[str]:
 
 
 def _why(text: Any) -> str:
-    """The rationale block: a clamped lead, with the rest behind a disclosure."""
+    """The rationale, every paragraph of it, behind one disclosure.
+
+    Nothing of it shows closed -- not a lead line, not the first sentence. It
+    is the shadow prices, the games-used arithmetic and the reviewer's caveat,
+    and a card has one job above the fold: say what the move is and let it be
+    answered. Asked for directly: "ALL the subtext should be hidden in show
+    details which includes the calculations and reasoning."
+    """
     chunks = _chunks(text)
     if not chunks:
         return ""
-    lead, rest = chunks[0], chunks[1:]
-    if not rest and len(lead) <= LEAD_CHARS:
-        return "<div class=why><p>%s</p></div>" % _e(lead)
     return (
-        "<details class=why><summary><p class=lead>%s</p></summary>%s</details>"
-        % (_e(lead), "".join("<p>%s</p>" % _e(c) for c in rest))
+        "<details class=why><summary></summary><div class=detail>%s</div>"
+        "</details>" % "".join("<p>%s</p>" % _e(c) for c in chunks)
     )
+
+
+def _league_columns(page: StatusPage,
+                    rows: List[Dict[str, Any]],
+                    *, all_leagues: bool = False
+                    ) -> List[Tuple[str, List[Dict[str, Any]]]]:
+    """``(label, rows)`` per league, in the order the leagues were configured.
+
+    Both lists on this page are grouped the same way, because a reader
+    comparing two leagues wants the same league in the same place in both.
+    Order comes from the config rather than from the data: both leagues run in
+    the same second, so "whichever is newest" could swap the columns between
+    two refreshes for no reason a reader could see.
+
+    ``all_leagues`` keeps a column for a league with nothing in it, which is
+    the difference between "this one has nothing to approve" and "this one is
+    missing from the page".
+    """
+    groups: Dict[Any, List[Dict[str, Any]]] = {}
+    if all_leagues:
+        for key in page.league_order():
+            groups[key] = []
+    for r in rows:
+        groups.setdefault(r["league_id"], []).append(r)
+    order = [k for k in page.league_order() if k in groups]
+    order += [k for k in groups if k not in order]  # a league since removed
+    return [(page.league_label(k), groups[k]) for k in order]
 
 
 def render(page: StatusPage, *, user: str = "") -> str:
@@ -744,29 +774,46 @@ def render(page: StatusPage, *, user: str = "") -> str:
             "Lineup and IR moves are applied automatically and appear under "
             "Recent runs; only add/drop asks first.</div>"
         )
-    for p in pending:
-        parts.append("<div class='card solo'>")
-        parts.append("<div class=eyebrow><span class=league>%s</span>%s</div>" % (
-            _e(p["league"]),
-            ("<span class='delta%s'>%+.1f pts</span>"
-             % ("" if p["value_delta"] > 0 else " down", p["value_delta"]))
-            if p["value_delta"] else "",
-        ))
-        parts.append(_swap(p["payload"]))
-        if p["rationale"]:
-            parts.append(_why(p["rationale"]))
-        parts.append(
-            "<div class=actions>"
-            "<form method=post action=decide>"
-            "<input type=hidden name=action_id value='%s'>"
-            "<input type=hidden name=verb value=APPROVE>"
-            "<button class=ok type=submit>Approve</button></form>"
-            "<form method=post action=decide>"
-            "<input type=hidden name=action_id value='%s'>"
-            "<input type=hidden name=verb value=REJECT>"
-            "<button class=no type=submit>Reject</button></form>"
-            "</div>" % (_e(p["action_id"]), _e(p["action_id"]))
-        )
+    # A column per league, same as the runs below and in the same order, so a
+    # waiting swap sits above the runs of the league it belongs to. The league
+    # name comes off the card's eyebrow with it -- the column heading says it
+    # once instead of every card saying it again -- and the kind takes that
+    # slot, which is what the eyebrow was actually missing.
+    if pending:
+        parts.append("<div class=leagues>")
+        for label, column in _league_columns(page, pending, all_leagues=True):
+            parts.append("<section class=lg><h3 class=lghead>%s</h3>"
+                         % _e(label))
+            if not column:
+                parts.append("<div class='card empty'>"
+                             "<b>Nothing waiting.</b></div>")
+            for p in column:
+                parts.append("<div class=card>")
+                parts.append(
+                    "<div class=eyebrow><span class=league>%s</span>%s</div>" % (
+                        _e(_kind(p["kind"])),
+                        ("<span class='delta%s'>%+.1f pts</span>"
+                         % ("" if p["value_delta"] > 0 else " down",
+                            p["value_delta"]))
+                        if p["value_delta"] else "",
+                    ))
+                parts.append(_swap(p["payload"]))
+                if p["rationale"]:
+                    parts.append(_why(p["rationale"]))
+                parts.append(
+                    "<div class=actions>"
+                    "<form method=post action=decide>"
+                    "<input type=hidden name=action_id value='%s'>"
+                    "<input type=hidden name=verb value=APPROVE>"
+                    "<button class=ok type=submit>Approve</button></form>"
+                    "<form method=post action=decide>"
+                    "<input type=hidden name=action_id value='%s'>"
+                    "<input type=hidden name=verb value=REJECT>"
+                    "<button class=no type=submit>Reject</button></form>"
+                    "</div>" % (_e(p["action_id"]), _e(p["action_id"]))
+                )
+                parts.append("</div>")
+            parts.append("</section>")
         parts.append("</div>")
 
     parts.append("<h2 class=solo>Recent runs</h2>")
@@ -775,24 +822,16 @@ def render(page: StatusPage, *, user: str = "") -> str:
     if not runs:
         parts.append("<div class='card empty solo'><b>No runs recorded yet.</b>"
                      "The first scheduled run will appear here.</div>")
-    # A column per league rather than one interleaved list. Two leagues run a
-    # second apart, so the single column alternated between them and every
-    # card had to be read to find out whose it was.
-    groups: Dict[Any, List[Dict[str, Any]]] = {}
-    for r in runs:
-        groups.setdefault(r["league_id"], []).append(r)
-    order = [k for k in page.league_order() if k in groups]
-    order += [k for k in groups if k not in order]  # a league since removed
-
-    if runs:
+    else:
+        # A column per league rather than one interleaved list. Two leagues run
+        # a second apart, so the single column alternated between them and
+        # every card had to be read to find out whose it was.
         parts.append("<div class=leagues>")
-    for key in order:
-        column = groups[key]
-        parts.append("<section class=lg><h3 class=lghead>%s</h3>"
-                     % _e(column[0]["league"]))
-        _runs(parts, column, tz)
-        parts.append("</section>")
-    if runs:
+        for label, column in _league_columns(page, runs):
+            parts.append("<section class=lg><h3 class=lghead>%s</h3>"
+                         % _e(label))
+            _runs(parts, column, tz)
+            parts.append("</section>")
         parts.append("</div>")
 
     if user:

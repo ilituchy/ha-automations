@@ -260,7 +260,12 @@ class EspnRead:
             # INDIVIDUAL_GAME, the strictest mode there is: each player locks
             # at their own tip-off rather than at the day's first game.
             roster_lock_mode=str(roster.get("lineupLocktimeType") or "UNKNOWN"),
+            # Verbatim, in both fields. This is the latest period ESPN has
+            # *results* for, which is not the same as the period it is
+            # currently in -- `Autopilot.today_period` corrects the first of
+            # these two and leaves the second alone.
             current_scoring_period=int(status.get("latestScoringPeriod") or 0),
+            espn_latest_scoring_period=int(status.get("latestScoringPeriod") or 0),
             current_matchup_period=int(status.get("currentMatchupPeriod") or 0),
             matchup_period_boundaries=_matchup_windows(s),
             acquisition_limit=acq_limit,

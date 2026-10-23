@@ -275,6 +275,19 @@ class LeagueSettings:
     #: season is a free drop (redraft) or an asset with value past this week
     #: that we are not in a position to price (keeper).
     keeper: bool = False
+    #: ``status.latestScoringPeriod`` exactly as ESPN reported it, kept beside
+    #: ``current_scoring_period`` because ``main`` overwrites that one with the
+    #: period today's *date* falls in. The two disagree for part of every day:
+    #: this field is the latest period ESPN has results for, which lags the day
+    #: it is in, while the write service only accepts the current one. See
+    #: ``Autopilot.today_period``.
+    #:
+    #: The cross-check in ``SeasonCalendar.verify`` wants this one rather than
+    #: the corrected period: it is asking whether our week model reproduces
+    #: ESPN's ``currentMatchupPeriod``, and ESPN's two numbers lag together, so
+    #: pairing a corrected period with a lagging matchup would report a
+    #: disagreement every week boundary that is ours and not ESPN's.
+    espn_latest_scoring_period: int = 0
 
     @property
     def is_categories(self) -> bool:

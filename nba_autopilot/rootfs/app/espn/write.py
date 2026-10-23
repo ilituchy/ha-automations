@@ -249,6 +249,7 @@ class EspnWrite:
         bid: Optional[int] = None,
         waiver: bool = True,
         roster: Optional[Sequence[RosterEntry]] = None,
+        scoring_period: Optional[int] = None,
         team_id: Optional[int] = None,
     ) -> WriteResult:
         """Add and/or drop. **Requires explicit human approval upstream.**
@@ -311,7 +312,15 @@ class EspnWrite:
             "teamId": int(team_id),
             "type": tran_type,
             "memberId": self.cfg.swid,
-            "scoringPeriodId": int(settings.current_scoring_period),
+            # Caller-supplied when there is one, because ESPN's own
+            # `latestScoringPeriod` lags the period its write service will
+            # accept -- see `Autopilot.today_period`. The fallback keeps this
+            # method usable on its own and is wrong for part of every day.
+            "scoringPeriodId": int(
+                settings.current_scoring_period
+                if scoring_period is None
+                else scoring_period
+            ),
             "executionType": ids.EXEC_EXECUTE,
             "items": items,
         }

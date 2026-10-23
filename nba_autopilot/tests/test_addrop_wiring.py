@@ -129,11 +129,11 @@ class _Write:
         self.lineups = []
         self.explode = explode
 
-    def add_drop(self, *, add, drop, bid, waiver):
+    def add_drop(self, *, add, drop, bid, waiver, scoring_period=None):
         if self.explode:
             raise RuntimeError("ESPN said no")
         self.calls.append({"add": add, "drop": drop, "bid": bid,
-                           "waiver": waiver})
+                           "waiver": waiver, "scoring_period": scoring_period})
         # ``shadow`` as well as ``ok``, because the rebalance that follows an
         # acquisition reads it to tell "ESPN accepted this" from "this never
         # left the process", and a stub missing the attribute would make every
@@ -353,6 +353,11 @@ class _Harness:
             write,
         )
         self.cal = calendar()
+        # ``settings_now`` consults the season calendar to correct ESPN's
+        # lagging scoring period, so the cache it reads has to exist even on an
+        # instance built without ``__init__``. Pre-seeded rather than left
+        # unset, because the alternative is a live fetch from a test.
+        self.app._calendar = self.cal
         self.schedule = {1: {1: 1, 2: 1, 3: 1}}
 
     def plan(self, target=None):

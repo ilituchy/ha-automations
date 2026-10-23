@@ -549,6 +549,68 @@ class Autopilot:
                 )
         return overrides, notes
 
+    def settings_now(self, lg: "League") -> Tuple[Any, Optional[str]]:
+        """This league's settings, with the scoring period set to *today's*.
+
+        The one way the rest of the app should read settings. ESPN's own
+        ``latestScoringPeriod`` is right for most of the day and wrong for the
+        rest of it (see :meth:`today_period`), and the field it lands in is
+        read by the optimizer, the budget horizon, the games-used baseline and
+        every write -- so correcting it in one place is the only way they can
+        be made to agree.
+        """
+        settings = lg.read.league_settings()
+        period, note = self.today_period(settings)
+        if note:
+            log.warning("league %d: %s", lg.ref.league_id, note)
+            settings = dataclasses.replace(
+                settings, current_scoring_period=period
+            )
+        return settings, note
+
+    def today_period(self, settings: Any) -> Tuple[int, Optional[str]]:
+        """The scoring period a write sent right now is addressed to.
+
+        ESPN's ``status.latestScoringPeriod`` is the latest period it has
+        *results* for, and it lags the period the league is actually in by
+        most of a morning. Observed live: on 2026-10-22 the 09:00 run read
+        period 2 and the 09:54 run read 3, with no NBA game having finished in
+        between; the number simply rolled over around midday Eastern.
+
+        The write service does not lag. It accepts the current period and
+        rejects every other one with ``409
+        TRAN_INVALID_SCORINGPERIOD_NOT_CURRENT``. So on 2026-10-23 the 09:00
+        run addressed its lineup to period 3, ESPN was already in 4, and both
+        leagues lost the entire day's lineup to a rejection -- the only reason
+        it had not happened sooner is that the mornings before it had nothing
+        to move, and a write with no items is never sent.
+
+        The season calendar already knows which period a date is, in the same
+        US Eastern the periods are keyed in, and it is checked against ESPN
+        every run. So the date is the authority here and
+        ``latestScoringPeriod`` is only the fallback -- used when there is no
+        trustworthy calendar, or when today falls outside the season, which is
+        the offseason and not a disagreement about anything.
+
+        Returns the period and, when it is not the one ESPN reported, a note
+        saying so. The note is worth keeping: a persistent disagreement in the
+        other direction would mean the calendar had drifted, and this is the
+        only place the two numbers are ever compared.
+        """
+        espn = int(settings.espn_latest_scoring_period
+                   or settings.current_scoring_period)
+        cal = self.season_calendar()
+        if cal is None or not cal.trustworthy:
+            return espn, None
+        today = datetime.now(ids.GAME_DATE_TZ).date()
+        period = cal.period_of(today)
+        if not cal.in_season(period) or period == espn:
+            return espn, None
+        return period, (
+            "ESPN reports scoring period %d, but %s is period %d; writing to "
+            "%d, which is the one ESPN accepts" % (espn, today, period, period)
+        )
+
     def _calendar_for(
         self, settings: Any
     ) -> Tuple[Optional[SeasonCalendar], int, List[str]]:
@@ -566,8 +628,11 @@ class Autopilot:
             return None, int(settings.current_matchup_period), [
                 "no season calendar: the games-played cap cannot be priced"
             ]
+        # ESPN's own pair, not the corrected period -- see the note on
+        # LeagueSettings.espn_latest_scoring_period.
         problem = cal.verify(
-            settings.current_scoring_period, settings.current_matchup_period
+            settings.espn_latest_scoring_period or settings.current_scoring_period,
+            settings.current_matchup_period,
         )
         if problem:
             log.error(
@@ -1048,7 +1113,9 @@ class Autopilot:
 
     def run_league(self, lg: "League") -> str:
         run_id = _ulid()
-        settings = lg.read.league_settings()
+        # Before anything is journalled: the run is *about* a day, and ESPN's
+        # own number for which day that is lags.
+        settings, period_note = self.settings_now(lg)
         self.store.start_run(
             run_id,
             settings.current_scoring_period,
@@ -1059,6 +1126,8 @@ class Autopilot:
                  settings.name, settings.current_scoring_period)
 
         notes: List[str] = []
+        if period_note:
+            notes.append(period_note)
         sources_used: Dict[str, str] = {"espn": "ok"}
         sources_missing: Dict[str, str] = {}
 
@@ -1130,7 +1199,8 @@ class Autopilot:
         # answer -- under ``autonomy_add_drop`` they all execute, and otherwise
         # they all sit in the queue and the user takes the ones he wants.
         for decision in decisions:
-            self._offer_addrop(run_id, lg, decision, matchup_period)
+            self._offer_addrop(run_id, lg, decision, matchup_period,
+                               scoring_period=settings.current_scoring_period)
 
         self._finish(run_id, sources_used, sources_missing, shadow_prices,
                      coefficients, notes)
@@ -1293,7 +1363,7 @@ class Autopilot:
             return
 
         try:
-            settings = lg.read.league_settings()
+            settings, _ = self.settings_now(lg)
             roster = lg.read.roster()
             work = self.plan_from_roster(lg, settings, roster)
         except Exception as exc:  # noqa: BLE001 - the swap already succeeded
@@ -1348,6 +1418,8 @@ class Autopilot:
         lg: "League",
         decision: "addrop_mod.AddDropPlan",
         matchup_period: int,
+        *,
+        scoring_period: Optional[int] = None,
     ) -> None:
         """Journal the swap and ask, or -- under autonomy -- journal and do it.
 
@@ -1440,6 +1512,7 @@ class Autopilot:
                 drop=payload["drop"],
                 bid=None,
                 waiver=payload["waiver"],
+                scoring_period=scoring_period,
             )
             self.store.complete(proposal.id, bool(result and result.ok))
         except Exception as exc:  # noqa: BLE001 - one league must not kill the rest
@@ -1545,9 +1618,15 @@ class Autopilot:
             )
         kind = proposal.kind
         payload = proposal.payload
+        # Recomputed rather than read off the payload. This is the tap path, so
+        # it can be hours -- or a night's sleep -- after the run that journalled
+        # the proposal, and the period that was current then is exactly the one
+        # ESPN now refuses.
+        period = self.settings_now(lg)[0].current_scoring_period
         if kind == "LINEUP":
             return lg.write.set_lineup(
-                {int(k): int(v) for k, v in payload["target"].items()}
+                {int(k): int(v) for k, v in payload["target"].items()},
+                scoring_period=period,
             )
         if kind in ("ADD", "DROP", "ADD_DROP"):
             return lg.write.add_drop(
@@ -1555,6 +1634,7 @@ class Autopilot:
                 drop=payload.get("drop"),
                 bid=payload.get("bid"),
                 waiver=bool(payload.get("waiver", True)),
+                scoring_period=period,
             )
         raise ValueError("unknown proposal kind %r" % kind)
 
