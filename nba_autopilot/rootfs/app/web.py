@@ -39,9 +39,11 @@ injection.
 # required"}``, which is how this was found: on the device, through the ingress
 # proxy, because no test here imports FastAPI at all. See test_web.py.
 
+import asyncio
 import html
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import parse_qs
@@ -77,8 +79,27 @@ def _loads(raw: Any, default: Any) -> Any:
 class StatusPage:
     """Builds the view model. Separated from routing so it is testable without HTTP."""
 
+    #: How long a live score is reused before ESPN is asked again. Short
+    #: enough that the number on screen is the number now, long enough that
+    #: holding down refresh -- or the redirect that follows every Approve --
+    #: does not turn into a request per keystroke.
+    LIVE_TTL = 25.0
+
+    #: And how long a *failed* read is remembered. Shorter, because the usual
+    #: cause is transient, but not zero: without it a dead cookie would make
+    #: every single page load sit through the timeout below.
+    FAIL_TTL = 10.0
+
+    #: Long enough for a slow ESPN, short enough that a hung one does not hold
+    #: the page hostage. The fallback is a cached score, not an error.
+    LIVE_TIMEOUT = 4.0
+
     def __init__(self, bot: Any) -> None:
         self.bot = bot
+        #: ``league_id -> (monotonic deadline, board or None)``. Instance state
+        #: because ``create_app`` builds one page and both handlers close over
+        #: it, so this outlives a request the way a cache has to.
+        self._live: Dict[Any, Tuple[float, Optional[Dict[str, Any]]]] = {}
 
     def league_label(self, league_id: Optional[int]) -> str:
         for lg in getattr(self.bot, "leagues", []):
@@ -148,12 +169,12 @@ class StatusPage:
         return runs
 
     def scoreboards(self) -> List[Dict[str, Any]]:
-        """This week's head-to-head per league, as of each league's last run.
+        """Each league's head-to-head as of its last run.
 
-        Cached by the run rather than fetched here: the page has no ESPN
-        credentials, no event loop and no business making a network call while
-        someone is waiting for a button to respond. The staleness is real and
-        ``updated_at`` is rendered because of it.
+        The floor, not the normal path: :meth:`live_scoreboards` asks ESPN on
+        every load and only lands here when that fails. Kept because the page's
+        job is to render -- the Approve button is on it -- and an expired
+        cookie must cost the reader a stale score, not the whole page.
 
         A league with no row yet -- a fresh install, or one whose only run
         aborted before the score was read -- is simply absent, and the header
@@ -165,6 +186,104 @@ class StatusPage:
             b = dict(r)
             b["league"] = self.league_label(b.get("league_id"))
             boards[b.get("league_id")] = b
+        return self._ordered(boards)
+
+    async def live_scoreboards(self) -> List[Dict[str, Any]]:
+        """This week's head-to-head, read from ESPN now.
+
+        The score is the one thing on this page that is worth a request while
+        somebody is waiting: a lineup decision is hours old by the time it is
+        read, but a score that is hours old is wrong. The credentials are right
+        here -- every ``League`` holds its own authenticated reader -- and one
+        ``matchup_score`` call is one HTTP request that carries both teams'
+        points, names, abbrevs, logos and games-used.
+
+        Two fields still come off the run's cached row, because they are not
+        on that response and are not worth more requests to rebuild:
+
+        * ``games_cap`` -- a league setting, fixed for the season;
+        * ``my_games_today`` -- it depends on the lineup *and* the pro
+          schedule, and the run that wrote it also wrote the lineup, so it
+          stays true for the rest of the day anyway.
+
+        Leagues are read concurrently and every failure degrades to that same
+        cached row, labelled with its age. Nothing here may raise: a page that
+        will not render is worse than a score that is an hour old.
+        """
+        cached = {b.get("league_id"): b for b in self.scoreboards()}
+        leagues = list(getattr(self.bot, "leagues", []))
+        if not leagues:
+            return self._ordered(cached)
+        got = await asyncio.gather(
+            *(self._live_board(lg, cached) for lg in leagues),
+            return_exceptions=True,
+        )
+        boards = dict(cached)
+        for lg, b in zip(leagues, got):
+            if isinstance(b, dict):
+                boards[lg.ref.league_id] = b
+            elif isinstance(b, BaseException):
+                # Belt and braces: ``_live_board`` already swallows, so this
+                # is only reachable if it is edited badly later.
+                log.warning("live scoreboard for %s raised: %s",
+                            lg.ref.league_id, b)
+        return self._ordered(boards)
+
+    async def _live_board(
+        self, lg: Any, cached: Mapping[Any, Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """One league's live row, memoised, falling back to its cached one."""
+        league_id = lg.ref.league_id
+        now = time.monotonic()
+        hit = self._live.get(league_id)
+        if hit is not None and hit[0] > now:
+            return hit[1] if hit[1] is not None else cached.get(league_id)
+
+        fallback = cached.get(league_id)
+        try:
+            # ``EspnRead`` is a synchronous ``httpx.Client``; calling it on the
+            # loop would stall every other request behind this one.
+            score = await asyncio.wait_for(
+                asyncio.to_thread(lg.read.matchup_score),
+                timeout=self.LIVE_TIMEOUT,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not read %s's live score (%s); "
+                        "showing the last cached one", league_id, exc)
+            self._live[league_id] = (now + self.FAIL_TTL, None)
+            return fallback
+        if score is None:
+            # No matchup row for us this period -- preseason, or a league that
+            # has not scheduled the week. Not an error, and not a 0-0 either.
+            self._live[league_id] = (now + self.LIVE_TTL, None)
+            return fallback
+
+        board = dict(fallback or {})
+        board.update({
+            "league_id": league_id,
+            "league": self.league_label(league_id),
+            "matchup_period": score.matchup_period,
+            "my_team_id": score.my_team_id,
+            "my_name": score.my_name,
+            "my_abbrev": score.my_abbrev,
+            "my_logo": score.my_logo,
+            "my_points": score.my_points,
+            "opp_team_id": score.opp_team_id,
+            "opp_name": score.opp_name,
+            "opp_abbrev": score.opp_abbrev,
+            "opp_logo": score.opp_logo,
+            "opp_points": score.opp_points,
+            "my_games_used": score.my_games_used,
+            "opp_games_used": score.opp_games_used,
+            # Read just now, so the panel says so instead of showing a
+            # timestamp the reader would have to date-arithmetic.
+            "live": True,
+        })
+        self._live[league_id] = (now + self.LIVE_TTL, board)
+        return board
+
+    def _ordered(self, boards: Mapping[Any, Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Configured order first, so the panels line up with the columns."""
         order = [k for k in self.league_order() if k in boards]
         order += [k for k in boards if k not in order]
         return [boards[k] for k in order]
@@ -320,6 +439,15 @@ h1 {
 .bwhen {
   margin-left: auto; font-size: 10px; font-weight: 600;
   text-transform: none; letter-spacing: 0; white-space: nowrap;
+}
+/* A live reading gets a dot and the accent colour; a recovered one keeps the
+   dim grey of the label it is. The distinction has to survive a glance,
+   because it is the difference between a score and a memory of one. */
+.bwhen.fresh { color: var(--good); text-transform: uppercase; letter-spacing: .06em; }
+.bwhen.fresh::before {
+  content: ""; display: inline-block; vertical-align: middle;
+  width: 5px; height: 5px; margin: -1px 4px 0 0;
+  border-radius: 50%; background: currentColor;
 }
 .bteam {
   display: flex; align-items: center; gap: 8px;
@@ -905,10 +1033,18 @@ def _board(b: Mapping[str, Any], tz: Any) -> str:
                 "—" if pts is None else _e("%.0f" % pts),
             ))
 
+    # Read just now, or recovered from the last run? The two deserve different
+    # words: a timestamp beside a live score invites the reader to date it,
+    # and a live-looking score that is four hours old is the failure this
+    # whole label exists to prevent.
+    if b.get("live"):
+        when = "<span class='bwhen fresh'>Live</span>"
+    else:
+        when = "<span class=bwhen>as of %s</span>" % _e(
+            _when(b.get("updated_at"), tz))
     out = ["<section class=board>",
-           "<div class=bhead><span>%s</span><span class=bwhen>%s</span></div>"
-           % (_e(b.get("league") or ""),
-              _e(_when(b.get("updated_at"), tz)))]
+           "<div class=bhead><span>%s</span>%s</div>"
+           % (_e(b.get("league") or ""), when)]
     ahead = (mine is not None and theirs is not None and mine > theirs)
     behind = (mine is not None and theirs is not None and theirs > mine)
     out.append(row(b.get("my_name"), b.get("my_logo"), mine, used, ahead))
@@ -983,11 +1119,21 @@ def _league_columns(page: StatusPage,
     return [(page.league_label(k), groups[k]) for k in order]
 
 
-def render(page: StatusPage, *, user: str = "") -> str:
+def render(page: StatusPage, *, user: str = "",
+           boards: Optional[List[Dict[str, Any]]] = None) -> str:
+    """The whole page, as a string.
+
+    ``boards`` is passed in rather than fetched here because reading them
+    touches the network and this function is deliberately synchronous and
+    pure. The route awaits :meth:`StatusPage.live_scoreboards` and hands the
+    result over; omitting it falls back to the run's cached rows, which is what
+    every caller that is not a request wants.
+    """
     pending = page.pending()
     shadow = page.shadow_mode()
     stuck = page.stuck()
-    boards = page.scoreboards()
+    if boards is None:
+        boards = page.scoreboards()
     tz = page.tz()
     parts: List[str] = [
         "<!doctype html><html><head><meta charset=utf-8>"
@@ -1324,7 +1470,12 @@ def build_app(bot: Any):
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
         _, name = identify(request)
-        return HTMLResponse(render(page, user=name))
+        # The one network call this page makes, and the reason the handler is
+        # worth awaiting: a stale lineup decision is still a fact, a stale
+        # score is not. It degrades to the run's cached row rather than
+        # failing, so this cannot stop the page rendering.
+        boards = await page.live_scoreboards()
+        return HTMLResponse(render(page, user=name, boards=boards))
 
     @app.post("/decide")
     async def decide(request: Request):

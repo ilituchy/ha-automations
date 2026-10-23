@@ -196,23 +196,49 @@ All notable changes to this app are documented here. The format follows
   ESPN itself counts them, the gap computed rather than left to the reader, and
   the projection for tonight — `12 of 30 games` now, `16 games after today`.
 
-  It costs no extra ESPN request. The team names, abbreviations and logos all
-  ride on the `mTeam` view the matchup read already asks for, and the
+  **The score is read from ESPN on every page load**, not recovered from the
+  last run. It was cached-only first, on the reasoning that the page had no
+  credentials and no event loop — *"there has to be a way to live pull"* —
+  and both halves of that were wrong. Every `League` carries its own
+  authenticated reader, the handler is already `async`, and one
+  `matchup_score()` call is a single HTTP request that returns both teams'
+  points, names, abbreviations, logos and games-used. Leagues are read
+  concurrently in a worker thread, since `EspnRead` wraps a synchronous
+  `httpx.Client` and calling it on the loop would stall every other request
+  behind it.
+
+  The reads are memoised for 25 seconds, so holding down refresh — or the
+  redirect that follows every Approve — is not a request apiece. A *failed*
+  read is remembered for 10, because without that an expired cookie would make
+  every single load sit through the 4-second timeout before showing anything.
+
+  Nothing in that path may stop the page rendering: the Approve button is on
+  it. A timeout, a dead cookie, a league with no matchup row this period — each
+  degrades to the row the last run cached, and the panel header says which one
+  you are looking at (`● LIVE` against `as of 9:54 am`). A score that *looks*
+  live and is four hours old is the exact failure that label exists to prevent.
+
+  Two fields still come from the run's cached row, because they are not on the
+  score response and are not worth extra requests to rebuild: `games_cap`, a
+  league setting fixed for the season, and `my_games_today`, which needs the
+  lineup *and* the pro schedule — and the run that wrote it also wrote the
+  lineup, so it stays true for the rest of the day.
+
+  That cache is a new `scoreboards` table: one row per league, overwritten
+  every run. The opposite of `gp_snapshots`, where the earliest reading is the
+  only useful one. The row is written before the lineup is planned and before
+  the two paths that abort, because those are exactly the mornings the owner
+  most wants to open the page and see where he stands — and
+  `_record_scoreboard` swallows every exception, since a cosmetic panel must
+  never cost the run its lineup write.
+
+  The run's own read costs nothing extra either. The names, abbreviations and
+  logos all ride on the `mTeam` view the matchup read already asks for, and the
   opponent's `cumulativeScore.statBySlot` turns out to sit on the same matchup
   row as ours, so both sides' games-used come off the one response. The read
-  was therefore hoisted out of `_consider_addrops` into `run_league` rather
-  than duplicated — `EspnRead._get` does no caching, so a second call would
-  have been a second round trip on every run.
-
-  The page has no ESPN credentials and no event loop, so it renders out of a
-  new `scoreboards` table: one row per league, overwritten every run. That is
-  the opposite of `gp_snapshots`, where the earliest reading is the only useful
-  one; here a live score has no historical value and a stale one actively
-  misleads, which is why each panel carries the age of its own reading. The row
-  is written before the lineup is planned and before the two paths that abort,
-  because those are exactly the mornings the owner most wants to open the page
-  and see where he stands — and `_record_scoreboard` swallows every exception,
-  since a cosmetic panel must never cost the run its lineup write.
+  was hoisted out of `_consider_addrops` into `run_league` rather than
+  duplicated — `EspnRead._get` does no caching, so a second call would have
+  been a second round trip on every run.
 
   "Games after today" counts under the same two conditions ESPN does: a
   starting slot, and an NBA team playing on this scoring period. It measures

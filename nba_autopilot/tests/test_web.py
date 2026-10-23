@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -30,6 +31,7 @@ sys.path.insert(
 )
 
 import web  # noqa: E402
+from models import MatchupScore  # noqa: E402
 from state import Proposal, Store  # noqa: E402
 
 
@@ -57,9 +59,31 @@ class FakeRef:
         return self._label
 
 
+class FakeRead:
+    """``matchup_score`` and nothing else, which is all the page calls.
+
+    ``score`` may be a ``MatchupScore``, ``None`` (no row this period), or an
+    exception to raise -- the three outcomes the live path has to survive.
+    """
+
+    def __init__(self, score=None, delay=0.0):
+        self.score = score
+        self.delay = delay
+        self.calls = 0
+
+    def matchup_score(self, team_id=None, matchup_period=None):
+        self.calls += 1
+        if self.delay:
+            time.sleep(self.delay)
+        if isinstance(self.score, BaseException):
+            raise self.score
+        return self.score
+
+
 class FakeLeague:
-    def __init__(self, league_id, label):
+    def __init__(self, league_id, label, score=None, delay=0.0):
         self.ref = FakeRef(league_id, label)
+        self.read = FakeRead(score, delay)
 
 
 class FakeCfg:
@@ -567,6 +591,147 @@ class TestScoreboard(unittest.TestCase):
         self.assertEqual(web._initials(""), "?")
         self.assertEqual(web._initials(None), "?")
         self.assertEqual(web._initials("d'angelo"), "D")
+
+
+def _score(**over):
+    """A ``MatchupScore`` as ``matchup_score()`` returns one."""
+    kw = dict(
+        matchup_period=1, my_team_id=2, my_points=444.0,
+        opp_team_id=4, opp_name="d'angelo", opp_points=520.0,
+        my_name="Kessler", my_abbrev="KES",
+        my_logo="https://g.espncdn.com/live.svg", opp_abbrev="VODO",
+        opp_logo="https://g.espncdn.com/opp.svg",
+        my_games_used=13, opp_games_used=15,
+    )
+    kw.update(over)
+    return MatchupScore(**kw)
+
+
+class TestLiveScoreboard(unittest.TestCase):
+    """The score is read from ESPN on every load, not recovered from SQLite.
+
+    A lineup decision is still a fact an hour after it was made; a score an
+    hour old is simply wrong, and this is the one number on the page worth a
+    request while somebody is waiting. The credentials are right here -- each
+    league carries its own authenticated reader.
+
+    What the live read must never do is cost the page its ability to render:
+    the Approve button is on it. So every failure below degrades to the run's
+    cached row and the panel says which one the reader is looking at.
+    """
+
+    def page(self, leagues, boards=()):
+        return web.StatusPage(
+            FakeBot(FakeStore(boards=list(boards)), leagues=leagues))
+
+    def test_the_live_score_is_what_renders(self):
+        p = self.page([FakeLeague(4, "Alpha", score=_score())],
+                      [_board(league_id=4, my_points=403.0)])
+        boards = asyncio.run(p.live_scoreboards())
+        self.assertEqual(boards[0]["my_points"], 444.0)
+        self.assertEqual(boards[0]["my_logo"], "https://g.espncdn.com/live.svg")
+        self.assertTrue(boards[0]["live"])
+
+    def test_the_two_fields_espn_does_not_send_survive_from_the_run(self):
+        """The cap is a season-long setting and tonight's count needs the
+        lineup *and* the pro schedule -- neither is on the score response, and
+        neither is worth more requests to rebuild."""
+        p = self.page([FakeLeague(4, "Alpha", score=_score())],
+                      [_board(league_id=4, games_cap=30, my_games_today=4)])
+        board = asyncio.run(p.live_scoreboards())[0]
+        self.assertEqual(board["games_cap"], 30)
+        self.assertEqual(board["my_games_today"], 4)
+        # And they reach the rendered panel, so the live score still carries
+        # its denominator and its projection.
+        out = web._board(board, None)
+        self.assertIn("13 of 30 games", out)
+        self.assertIn("<b>17</b> games after today", out)
+
+    def test_a_dead_cookie_costs_a_stale_score_not_the_page(self):
+        p = self.page(
+            [FakeLeague(4, "Alpha", score=RuntimeError("espn_s2 expired"))],
+            [_board(league_id=4, my_points=403.0)])
+        boards = asyncio.run(p.live_scoreboards())
+        self.assertEqual(boards[0]["my_points"], 403.0)
+        self.assertFalse(boards[0].get("live"))
+        # And the page still renders, buttons and all.
+        out = web.render(p, boards=boards)
+        self.assertIn("<section class=board>", out)
+
+    def test_a_slow_espn_is_given_up_on_rather_than_waited_for(self):
+        lg = FakeLeague(4, "Alpha", score=_score(), delay=0.3)
+        p = self.page([lg], [_board(league_id=4, my_points=403.0)])
+        p.LIVE_TIMEOUT = 0.05
+        board = asyncio.run(p.live_scoreboards())[0]
+        self.assertEqual(board["my_points"], 403.0)
+        self.assertFalse(board.get("live"))
+
+    def test_no_matchup_row_this_period_is_not_an_error(self):
+        """Preseason, or a week ESPN has not scheduled. Falls back quietly."""
+        p = self.page([FakeLeague(4, "Alpha", score=None)],
+                      [_board(league_id=4, my_points=403.0)])
+        board = asyncio.run(p.live_scoreboards())[0]
+        self.assertEqual(board["my_points"], 403.0)
+
+    def test_a_league_with_neither_a_live_nor_a_cached_score_is_absent(self):
+        p = self.page([FakeLeague(4, "Alpha", score=RuntimeError("down"))])
+        self.assertEqual(asyncio.run(p.live_scoreboards()), [])
+
+    def test_a_live_score_shows_even_with_no_cached_row_behind_it(self):
+        """A fresh install should not have to wait for 09:00 tomorrow."""
+        p = self.page([FakeLeague(4, "Alpha", score=_score())])
+        board = asyncio.run(p.live_scoreboards())[0]
+        self.assertEqual(board["my_points"], 444.0)
+        self.assertIsNone(board.get("games_cap"))
+        # No cap known, so no invented denominator.
+        self.assertIn("13 games", web._board(board, None))
+
+    def test_holding_down_refresh_does_not_become_a_request_each_time(self):
+        lg = FakeLeague(4, "Alpha", score=_score())
+        p = self.page([lg])
+        for _ in range(5):
+            asyncio.run(p.live_scoreboards())
+        self.assertEqual(lg.read.calls, 1)
+
+    def test_the_memo_expires_so_the_score_does_not_freeze(self):
+        lg = FakeLeague(4, "Alpha", score=_score())
+        p = self.page([lg])
+        p.LIVE_TTL = -1.0
+        asyncio.run(p.live_scoreboards())
+        asyncio.run(p.live_scoreboards())
+        self.assertEqual(lg.read.calls, 2)
+
+    def test_a_failure_is_not_retried_on_every_single_load(self):
+        """Otherwise a dead cookie makes every page load sit through the
+        timeout before showing anything."""
+        lg = FakeLeague(4, "Alpha", score=RuntimeError("down"))
+        p = self.page([lg], [_board(league_id=4)])
+        for _ in range(4):
+            asyncio.run(p.live_scoreboards())
+        self.assertEqual(lg.read.calls, 1)
+
+    def test_one_league_failing_does_not_take_the_other_down(self):
+        p = self.page(
+            [FakeLeague(4, "Alpha", score=_score()),
+             FakeLeague(9, "Beta", score=RuntimeError("down"))],
+            [_board(league_id=9, my_points=111.0)])
+        alpha, beta = asyncio.run(p.live_scoreboards())
+        self.assertTrue(alpha["live"])
+        self.assertEqual(beta["my_points"], 111.0)
+        self.assertFalse(beta.get("live"))
+
+    def test_the_panel_says_which_one_the_reader_is_looking_at(self):
+        """A timestamp beside a live score invites the reader to date it; a
+        live-looking score that is four hours old is the whole failure."""
+        self.assertIn("<span class='bwhen fresh'>Live</span>",
+                      web._board(_board(live=True), None))
+        stale = web._board(_board(), None)
+        self.assertIn("as of ", stale)
+        self.assertNotIn("fresh", stale)
+
+    def test_a_page_with_no_leagues_configured_asks_espn_nothing(self):
+        p = self.page([], [_board(league_id=4)])
+        self.assertEqual(len(asyncio.run(p.live_scoreboards())), 1)
 
 
 class TestLogsDisclosure(unittest.TestCase):
