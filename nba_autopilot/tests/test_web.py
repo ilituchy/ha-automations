@@ -471,13 +471,14 @@ def _board(**over):
 
 
 class TestScoreboard(unittest.TestCase):
-    """This week's head-to-head, cached by the last run and rendered cold.
+    """This week's head-to-head, at the head of its league's column.
 
-    The page has no ESPN credentials and no event loop, so every number here
-    came out of SQLite and may be hours old. That is the whole reason the panel
-    carries its own timestamp, and the reason a missing field has to render as
-    an absence rather than as a zero -- a score of 0-0 shown confidently is
-    worse than no panel at all.
+    ``render`` is synchronous, so the numbers it is handed were either read
+    live by the route that called it or recovered from the row the last run
+    cached -- possibly hours ago. That is the whole reason the panel carries
+    its own timestamp, and the reason a missing field has to render as an
+    absence rather than as a zero: a score of 0-0 shown confidently is worse
+    than no panel at all.
     """
 
     def test_one_panel_per_league_in_configured_order(self):
@@ -498,6 +499,31 @@ class TestScoreboard(unittest.TestCase):
         )
         out = web.render(web.StatusPage(bot))
         self.assertEqual(out.count("<section class=board>"), 1)
+
+    def test_an_unreadable_league_still_holds_its_grid_cell(self):
+        """*"matching each column at the top"*.
+
+        The score band, the approvals and the runs are the same leagues in the
+        same order, and the page is read *down* a column. A league whose score
+        could not be read has to leave a hole: collapse it and the second
+        league's panel slides into the first league's column, where it sits
+        over the first league's approvals.
+        """
+        bot = FakeBot(
+            FakeStore(boards=[_board(league_id=9, my_name="Beta's team")]),
+            leagues=[FakeLeague(4, "Alpha"), FakeLeague(9, "Beta")],
+        )
+        out = web.render(web.StatusPage(bot))
+        band = out.split("<div class=boards>")[1].split("</div><h2")[0]
+        self.assertTrue(band.startswith("<div></div>"), band[:60])
+
+    def test_the_score_band_uses_the_same_grid_as_the_columns_below(self):
+        """One rule, not two that happen to agree today.
+
+        Separate templates would look aligned until the first time one of them
+        was edited, and the misalignment is silent.
+        """
+        self.assertIn(".leagues, .boards {", web.CSS)
 
     def test_no_panel_at_all_when_nothing_has_been_read(self):
         out = web.render(web.StatusPage(FakeBot(FakeStore())))
@@ -768,6 +794,17 @@ class TestLogsDisclosure(unittest.TestCase):
         self.assertIn("no moves proposed", out)
 
 
+def _runs_band(out: str) -> str:
+    """Everything below the Recent runs heading.
+
+    The page now has three bands of league columns -- score, approvals, runs --
+    so a count of ``<section class=lg>`` or of a league's name over the whole
+    document is three times the thing these tests are about. Each of them is an
+    assertion about one band, and this is the band.
+    """
+    return out.split("Recent runs")[-1]
+
+
 def _two_leagues():
     """Four runs, the two leagues alternating as they really do."""
     rows = []
@@ -794,11 +831,16 @@ class TestLeagueColumns(unittest.TestCase):
     """
 
     def test_each_league_gets_one_column(self):
-        out = web.render(web.StatusPage(_two_leagues()))
+        out = _runs_band(web.render(web.StatusPage(_two_leagues())))
         self.assertEqual(out.count("<section class=lg>"), 2)
 
     def test_the_league_is_named_once_not_once_per_run(self):
-        out = web.render(web.StatusPage(_two_leagues()))
+        """Once per band, as a column heading -- not once on every card in it.
+
+        Four runs, two to a league, so a card that named its own league would
+        make this two.
+        """
+        out = _runs_band(web.render(web.StatusPage(_two_leagues())))
         self.assertEqual(out.count("Dynassty"), 1)
         self.assertEqual(out.count("The Chairman&#x27;s Fantasy"), 1)
 
@@ -817,7 +859,7 @@ class TestLeagueColumns(unittest.TestCase):
         """Its history does not vanish because it was removed from options."""
         bot = _two_leagues()
         bot.leagues = [FakeLeague(9, "Dynassty")]
-        out = web.render(web.StatusPage(bot))
+        out = _runs_band(web.render(web.StatusPage(bot)))
         self.assertEqual(out.count("<section class=lg>"), 2)
         self.assertIn("league 7", out)
 
@@ -877,10 +919,41 @@ class TestPendingColumns(unittest.TestCase):
         self.assertIn("value='R0:ADD_DROP:0'", out)
         self.assertIn("value='R1:ADD_DROP:0'", out)
 
-    def test_an_empty_queue_says_so_once_rather_than_per_column(self):
+    def test_an_empty_queue_says_so_once_per_league(self):
+        """*"this should show two cards on each row saying no updates for each
+        league"*.
+
+        It used to be one full-width card, which answered "is anything
+        waiting" but not "is anything waiting *in this league*" -- and with two
+        leagues that is the question being asked. The columns also have to hold
+        their positions whether or not the queue is empty, because the score
+        above and the runs below are the same columns.
+        """
         out = web.render(web.StatusPage(_pending_bot()))
-        self.assertEqual(out.count("Nothing waiting."), 1)
-        self.assertIn("only add/drop asks first", out)
+        self.assertEqual(out.count("<section class=lg>"), 2)
+        self.assertEqual(out.count("Nothing waiting.</b></div>"), 2)
+
+    def test_the_explanation_is_said_once_and_not_per_column(self):
+        """Why the queue is empty belongs under the heading.
+
+        Only add/drop needs a human, so an empty queue right after a
+        notification that said "2 move(s)" reads as a broken page. That
+        sentence has to survive the split into per-league cards -- but said
+        twice in two cards it reads as boilerplate rather than as how the thing
+        works.
+        """
+        out = web.render(web.StatusPage(_pending_bot()))
+        self.assertEqual(out.count("only add/drop asks first"), 1)
+
+    def test_a_column_still_appears_with_no_leagues_configured(self):
+        """A fresh install, before the options are filled in.
+
+        There is no column to put the card in, so the heading would otherwise
+        be followed by nothing at all.
+        """
+        bot = FakeBot(FakeStore(pending=[], run_leagues={}), leagues=[])
+        out = web.render(web.StatusPage(bot))
+        self.assertIn("Nothing waiting.", out)
 
 
 class TestStateVocabulary(unittest.TestCase):

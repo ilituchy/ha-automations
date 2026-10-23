@@ -89,6 +89,46 @@ All notable changes to this app are documented here. The format follows
 
 ### Changed
 
+- **The status page is now three bands of the same league columns.**
+  *"this should show two cards on each row saying no updates for each league.
+  next for matchip score they should be wider and matching each column at the
+  top as well. so each column is score card, then approvals, then the rest"*.
+
+  The page is read down a column, not across a row — the score, the swap it
+  argues for and the run that applied it are one league's story — and two of
+  the three bands were not honouring that:
+
+  * The scoreboards sat *beside* the masthead, which used dead space but
+    squeezed them into half the width. At that size they were narrower than
+    the columns underneath and landed over the gutter between them. They are
+    now their own full-width band under the title, sharing one
+    `grid-template-columns` rule with the lists below rather than a second
+    rule that happens to agree: `.leagues, .boards`. A league whose score
+    could not be read holds its cell with an empty `<div>`, because
+    collapsing it would slide the next league's panel over the first league's
+    approvals — a misalignment with no visible cause.
+  * An empty approval queue was one full-width card. That answers "is
+    anything waiting" but not "is anything waiting *in this league*", which
+    with two leagues is the question actually being asked. The per-league
+    grid now renders whether or not anything is pending, so the answer is two
+    cards and the columns keep their positions. Recent runs does the same,
+    for the same reason: one league having not yet run must not shift the
+    other league's column.
+
+  The sentence explaining *why* the queue is empty — only add/drop asks a
+  human, so a notification saying "2 move(s)" with nothing to approve reads as
+  a broken page — moved out of the card and under the heading as a lede. Said
+  once it reads as how the thing works; said twice, once per column, it reads
+  as boilerplate.
+
+  Two breakpoints went away with the margins they were turning off. The gap
+  between stacked columns was `margin-top` on the second one, cancelled at
+  `min-width: 1000px` — but `auto-fit` starts pairing the columns at about
+  690px, so between those two widths the right-hand column sat 18px lower
+  than the left. It is a grid `row-gap` now, which applies between rows and
+  only between rows, and so cannot disagree with the template about how many
+  rows there are.
+
 - **The status page was rebuilt around the decision instead of the data.**
   *"it looks crappy. make it more modern and sleak"* — fairly. Every line on
   the page was grey text at some opacity, a proposal's reasoning ran four

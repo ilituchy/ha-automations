@@ -392,42 +392,48 @@ body {
 }
 /* One column per league. `auto-fit` rather than a fixed two: the columns
    collapse to one on a phone on their own, and a third league gets a column
-   instead of being appended to somebody else's. */
-.leagues {
-  display: grid; align-items: start; gap: 0 16px;
+   instead of being appended to somebody else's.
+
+   The scoreboards share the rule rather than copying it. All three bands on
+   this page -- score, approvals, runs -- are the same leagues in the same
+   order, and a reader reads *down* a column. One template means the score
+   card is directly above the swap it is the reason for; two templates that
+   merely look alike would drift apart the first time one of them is edited. */
+.leagues, .boards {
+  display: grid; align-items: start; column-gap: 16px;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
 }
+/* The separation between stacked columns is a grid row-gap and not a margin on
+   the second column, which is what it was. A margin needs a breakpoint to turn
+   itself off again when the columns go side by side, and that breakpoint was
+   1000px while `auto-fit` starts pairing them at about 690 -- so between those
+   two widths the right-hand column sat 18px lower than the left. A row-gap
+   applies between rows and only between rows, so it needs no breakpoint and
+   cannot disagree with the template about how many rows there are. */
+.leagues { row-gap: 18px; }
+/* A grid item's min-content width is its widest unbreakable child, so without
+   this a long player name widens the column past its 1fr share instead of
+   letting the name ellipsis inside it. */
+.lg { min-width: 0; }
 .lghead {
   font-size: 13px; font-weight: 700; letter-spacing: -.01em;
   margin: 0 0 8px; padding: 0 2px;
   color: var(--primary-text-color, var(--fg));
 }
-.lg + .lg .lghead { margin-top: 18px; }
-@media (min-width: 1000px) { .lg + .lg .lghead { margin-top: 0; } }
 
 h1 {
   font-size: 24px; font-weight: 700; letter-spacing: -.02em;
   margin: 0 0 10px;
 }
 
-/* The masthead: title and state on the left, this week's scoreboards in the
-   space to the right of them, which was empty. On a phone the row wraps and
-   the boards sit under the chips, which is the right order -- "is it live and
-   does it want something" before "how am I doing".
-
-   Named ``mast`` and not ``top``: ``top`` is also the header row of a run and
-   of an applied move, and an unscoped ``.top`` rule reaches both. It did, and
-   the 26px below was landing under every player's name in the log. */
-.mast {
-  display: flex; flex-wrap: wrap; gap: 18px 24px;
-  align-items: flex-start; justify-content: space-between;
-  margin: 0 0 26px;
-}
-.mast .masthead { flex: 1 1 260px; }
-.mast .chips { margin: 0; }
-.boards { display: flex; flex-wrap: wrap; gap: 10px; }
+/* Title and state, then the scoreboards as their own full-width band under
+   them. They were beside the title for a while, which fit them into dead
+   space but cost the alignment: squeezed into half the width they were
+   narrower than the columns below and sat over the gap between them. A score
+   belongs at the head of its own league's column. */
+.masthead { margin: 0 0 20px; }
+.boards { row-gap: 10px; margin: 0 0 26px; }
 .board {
-  flex: 1 1 232px; min-width: 232px; max-width: 320px;
   padding: 11px 13px 10px; border-radius: 14px;
   background: var(--card-background-color, var(--card));
   border: 1px solid var(--line);
@@ -515,6 +521,14 @@ h2:first-of-type { margin-top: 0; }
 h2 .count {
   font-size: 11px; letter-spacing: 0; padding: 2px 7px; border-radius: 999px;
   background: var(--bad-bg); color: var(--bad);
+}
+/* One line of explanation under a heading, above the columns it applies to.
+   This is where the "why is the queue empty" sentence went when the empty
+   card became one card per league: said once under the heading it reads as
+   how the thing works, said twice in two cards it reads as boilerplate. */
+.lede {
+  margin: -4px 0 12px; font-size: 13px;
+  color: var(--secondary-text-color, var(--dim));
 }
 
 .card {
@@ -1152,7 +1166,7 @@ def render(page: StatusPage, *, user: str = "",
         "<meta name=referrer content=no-referrer>"
         "<title>NBA Autopilot</title><style>%s</style></head><body>"
         "<main class=wrap>" % CSS,
-        "<div class=mast><div class=masthead>",
+        "<div class=masthead>",
         "<h1>NBA Autopilot</h1>",
     ]
 
@@ -1167,14 +1181,20 @@ def render(page: StatusPage, *, user: str = "",
     )
     parts.append("</div></div>")
 
-    # Beside the title rather than above the queue: this is the standing the
-    # decisions below are in service of, not another thing to act on.
+    # The head of each league's column: the standing the decisions under it are
+    # in service of, not another thing to act on. Grouped through the same
+    # helper as the two lists below, rather than emitted in whatever order the
+    # read returned, because the only thing that makes this band worth its
+    # height is sitting directly above the right league.
     if boards:
         parts.append("<div class=boards>")
-        for b in boards:
-            parts.append(_board(b, tz))
+        for _, column in _league_columns(page, boards, all_leagues=True):
+            # A league whose score could not be read still holds its cell.
+            # Collapsing it would shift every column to its left and silently
+            # file the next league's score under this league's heading.
+            parts.append("".join(_board(b, tz) for b in column)
+                         if column else "<div></div>")
         parts.append("</div>")
-    parts.append("</div>")
 
     if shadow:
         parts.append(
@@ -1203,51 +1223,64 @@ def render(page: StatusPage, *, user: str = "",
         # one. Reported from the phone: tapped the notification, found nothing
         # to approve, reasonably assumed something had gone wrong.
         parts.append(
-            "<div class='card empty solo'><b>Nothing waiting.</b>"
-            "Lineup and IR moves are applied automatically and appear under "
-            "Recent runs; only add/drop asks first.</div>"
+            "<div class='lede solo'>Lineup and IR moves are applied "
+            "automatically and appear under Recent runs; only add/drop asks "
+            "first.</div>"
         )
-    # A column per league, same as the runs below and in the same order, so a
-    # waiting swap sits above the runs of the league it belongs to. The league
-    # name comes off the card's eyebrow with it -- the column heading says it
-    # once instead of every card saying it again -- and the kind takes that
-    # slot, which is what the eyebrow was actually missing.
-    if pending:
-        parts.append("<div class=leagues>")
-        for label, column in _league_columns(page, pending, all_leagues=True):
-            parts.append("<section class=lg><h3 class=lghead>%s</h3>"
-                         % _e(label))
-            if not column:
-                parts.append("<div class='card empty'>"
-                             "<b>Nothing waiting.</b></div>")
-            for p in column:
-                parts.append("<div class=card>")
-                parts.append(
-                    "<div class=eyebrow><span class=league>%s</span>%s</div>" % (
-                        _e(_kind(p["kind"])),
-                        ("<span class='delta%s'>%+.1f pts</span>"
-                         % ("" if p["value_delta"] > 0 else " down",
-                            p["value_delta"]))
-                        if p["value_delta"] else "",
-                    ))
-                parts.append(_swap(p["payload"]))
-                if p["rationale"]:
-                    parts.append(_why(p["rationale"]))
-                parts.append(
-                    "<div class=actions>"
-                    "<form method=post action=decide>"
-                    "<input type=hidden name=action_id value='%s'>"
-                    "<input type=hidden name=verb value=APPROVE>"
-                    "<button class=ok type=submit>Approve</button></form>"
-                    "<form method=post action=decide>"
-                    "<input type=hidden name=action_id value='%s'>"
-                    "<input type=hidden name=verb value=REJECT>"
-                    "<button class=no type=submit>Reject</button></form>"
-                    "</div>" % (_e(p["action_id"]), _e(p["action_id"]))
-                )
-                parts.append("</div>")
-            parts.append("</section>")
-        parts.append("</div>")
+    # A column per league, same as the runs below and the scores above, in the
+    # same order, so a waiting swap sits between the score it affects and the
+    # runs of the league it belongs to. The league name comes off the card's
+    # eyebrow with it -- the column heading says it once instead of every card
+    # saying it again -- and the kind takes that slot, which is what the eyebrow
+    # was actually missing.
+    #
+    # Rendered whether or not anything is pending. An empty queue used to be
+    # one full-width card, which answered "is anything waiting" but not "is
+    # anything waiting *in this league*" -- and that second question is the
+    # one somebody with two leagues is actually asking. Two cards saying
+    # nothing is waiting is two answers; one card is half of one.
+    columns = _league_columns(page, pending, all_leagues=True)
+    if not columns:
+        # No leagues configured and nothing queued, so there is no column to
+        # put a card in. Reachable on a fresh install, before the options are
+        # filled in -- and an empty grid there would render as a heading with
+        # nothing under it at all.
+        parts.append("<div class='card empty solo'><b>Nothing waiting.</b></div>")
+    parts.append("<div class=leagues>")
+    for label, column in columns:
+        parts.append("<section class=lg><h3 class=lghead>%s</h3>"
+                     % _e(label))
+        if not column:
+            parts.append("<div class='card empty'>"
+                         "<b>Nothing waiting.</b></div>")
+        for p in column:
+            parts.append("<div class=card>")
+            parts.append(
+                "<div class=eyebrow><span class=league>%s</span>%s</div>" % (
+                    _e(_kind(p["kind"])),
+                    ("<span class='delta%s'>%+.1f pts</span>"
+                     % ("" if p["value_delta"] > 0 else " down",
+                        p["value_delta"]))
+                    if p["value_delta"] else "",
+                ))
+            parts.append(_swap(p["payload"]))
+            if p["rationale"]:
+                parts.append(_why(p["rationale"]))
+            parts.append(
+                "<div class=actions>"
+                "<form method=post action=decide>"
+                "<input type=hidden name=action_id value='%s'>"
+                "<input type=hidden name=verb value=APPROVE>"
+                "<button class=ok type=submit>Approve</button></form>"
+                "<form method=post action=decide>"
+                "<input type=hidden name=action_id value='%s'>"
+                "<input type=hidden name=verb value=REJECT>"
+                "<button class=no type=submit>Reject</button></form>"
+                "</div>" % (_e(p["action_id"]), _e(p["action_id"]))
+            )
+            parts.append("</div>")
+        parts.append("</section>")
+    parts.append("</div>")
 
     parts.append("<h2 class=solo>Recent runs</h2>")
     runs = page.recent_runs()
@@ -1258,10 +1291,19 @@ def render(page: StatusPage, *, user: str = "",
         # A column per league rather than one interleaved list. Two leagues run
         # a second apart, so the single column alternated between them and
         # every card had to be read to find out whose it was.
+        #
+        # ``all_leagues`` so the columns keep their positions when only one
+        # league has run. Without it a league with no rows loses its column and
+        # the one to its right slides over -- under the other league's score
+        # and the other league's approvals, which is the one way this page can
+        # mislead a reader who is reading down a column rather than across.
         parts.append("<div class=leagues>")
-        for label, column in _league_columns(page, runs):
+        for label, column in _league_columns(page, runs, all_leagues=True):
             parts.append("<section class=lg><h3 class=lghead>%s</h3>"
                          % _e(label))
+            if not column:
+                parts.append("<div class='card empty'>"
+                             "<b>No runs recorded yet.</b></div>")
             _runs(parts, column, tz)
             parts.append("</section>")
         parts.append("</div>")
