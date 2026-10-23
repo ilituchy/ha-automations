@@ -1274,11 +1274,16 @@ class Autopilot:
     ) -> None:
         """Cache the head-to-head for the status page. Never raises.
 
-        The page renders out of SQLite because it has no ESPN credentials and
-        no event loop of its own, so the score it shows is the one the last run
-        saw. That is a real limitation and the page says so by printing the
-        timestamp; this method's job is only to make sure the timestamp is as
-        recent as the run.
+        The page reads the score from ESPN itself on every load, so this row is
+        not where the number on screen normally comes from. It earns its keep
+        two other ways:
+
+        * it is the page's floor when that read fails -- an expired cookie costs
+          the reader a stale score, labelled with its age, not the whole page;
+        * it carries the two fields that are *not* on the score response and so
+          could not be live even in principle -- ``games_cap``, a league setting
+          fixed for the season, and ``my_games_today``, which depends on the
+          lineup this run just set and therefore holds for the rest of the day.
 
         Wrapped whole and swallowing everything. A scoreboard is the least
         important thing this run does, and it is recorded *before* the lineup
