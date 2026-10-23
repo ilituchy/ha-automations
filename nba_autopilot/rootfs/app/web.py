@@ -147,6 +147,28 @@ class StatusPage:
             })
         return runs
 
+    def scoreboards(self) -> List[Dict[str, Any]]:
+        """This week's head-to-head per league, as of each league's last run.
+
+        Cached by the run rather than fetched here: the page has no ESPN
+        credentials, no event loop and no business making a network call while
+        someone is waiting for a button to respond. The staleness is real and
+        ``updated_at`` is rendered because of it.
+
+        A league with no row yet -- a fresh install, or one whose only run
+        aborted before the score was read -- is simply absent, and the header
+        then shows nothing rather than a 0-0 placeholder.
+        """
+        rows = self.bot.store.query("SELECT * FROM scoreboards")
+        boards = {}
+        for r in rows:
+            b = dict(r)
+            b["league"] = self.league_label(b.get("league_id"))
+            boards[b.get("league_id")] = b
+        order = [k for k in self.league_order() if k in boards]
+        order += [k for k in boards if k not in order]
+        return [boards[k] for k in order]
+
     def league_order(self) -> List[Any]:
         """Configured league ids, in the order they were configured.
 
@@ -268,6 +290,80 @@ h1 {
   font-size: 24px; font-weight: 700; letter-spacing: -.02em;
   margin: 0 0 10px;
 }
+
+/* The masthead: title and state on the left, this week's scoreboards in the
+   space to the right of them, which was empty. On a phone the row wraps and
+   the boards sit under the chips, which is the right order -- "is it live and
+   does it want something" before "how am I doing". */
+.top {
+  display: flex; flex-wrap: wrap; gap: 18px 24px;
+  align-items: flex-start; justify-content: space-between;
+  margin: 0 0 26px;
+}
+.top .masthead { flex: 1 1 260px; }
+.top .chips { margin: 0; }
+.boards { display: flex; flex-wrap: wrap; gap: 10px; }
+.board {
+  flex: 1 1 232px; min-width: 232px; max-width: 320px;
+  padding: 11px 13px 10px; border-radius: 14px;
+  background: var(--card-background-color, var(--card));
+  border: 1px solid var(--line);
+}
+.bhead {
+  display: flex; align-items: baseline; gap: 8px;
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--secondary-text-color, var(--dim));
+}
+/* The age of the reading, not an afterthought: the page renders a score the
+   last run cached, so one from this morning shown bare would read as live. */
+.bwhen {
+  margin-left: auto; font-size: 10px; font-weight: 600;
+  text-transform: none; letter-spacing: 0; white-space: nowrap;
+}
+.bteam {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 0 6px;
+}
+.bteam + .bteam { border-top: 1px solid var(--line); }
+/* Fixed box, `contain` rather than `cover`: a league member's logo is whatever
+   he uploaded, and a wordmark cropped to a square is unreadable. */
+.crest {
+  flex: 0 0 26px; width: 26px; height: 26px; border-radius: 7px;
+  object-fit: contain; background: var(--chip);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700;
+  color: var(--secondary-text-color, var(--dim));
+}
+/* `min-width: 0` on the flex child is what actually lets the name ellipsis.
+   Without it the item's min-content width is the full team name and the
+   points get pushed out of the panel instead. */
+.bwho { flex: 1 1 auto; min-width: 0; }
+.bname {
+  display: block;
+  font-size: 13.5px; font-weight: 600; letter-spacing: -.01em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bgames {
+  display: block; font-size: 10.5px; font-weight: 500;
+  color: var(--secondary-text-color, var(--dim));
+}
+.bpts {
+  font-size: 19px; font-weight: 700; letter-spacing: -.02em;
+  color: var(--secondary-text-color, var(--dim));
+}
+/* Only the leader's total is in full-strength ink. Two identical numbers side
+   by side make the reader do the subtraction the page could have done. */
+.bteam.up .bpts { color: var(--primary-text-color, var(--fg)); }
+.bfoot {
+  margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line);
+  font-size: 11.5px; line-height: 1.45;
+  color: var(--secondary-text-color, var(--dim));
+}
+.bfoot b { color: var(--primary-text-color, var(--fg)); font-weight: 700; }
+.bfoot .lead { color: var(--good); }
+.bfoot .trail { color: var(--bad); }
+
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 26px; }
 .chip {
   font-size: 12px; font-weight: 600; line-height: 1;
@@ -736,6 +832,130 @@ def _why(text: Any) -> str:
     )
 
 
+def _initials(name: Any) -> str:
+    """Up to two letters for a team with no usable logo."""
+    words = [w for w in str(name or "").split() if w[:1].isalnum()]
+    return "".join(w[0] for w in words[:2]).upper() or "?"
+
+
+def _crest(url: Any, name: Any) -> str:
+    """A team's logo, or its initials when there is nothing safe to show.
+
+    ``teams[].logo`` is populated for every team on both live leagues, but a
+    third of them are ``CUSTOM_VALID`` -- **an address a league member typed
+    in**, observed pointing at imgflip, twitter and ifunny. So this is not
+    ESPN's CDN the way the player headshots are, and the request is made from
+    inside the authenticated frontend:
+
+    * ``https://`` only. A relative or ``data:`` or ``javascript:`` value is
+      refused outright rather than escaped and hoped about, and a plain
+      ``http://`` one is refused because it would be a mixed-content block on
+      a frontend served over TLS anyway.
+    * ``referrerpolicy=no-referrer``, belt to the page-level ``<meta>``'s
+      braces. The document URL contains the ingress session token, and that is
+      not something to hand to a meme host because somebody picked a funny
+      logo.
+    * No ``onerror`` fallback, because that needs script and this page has
+      none. A dead URL leaves an empty box, which is what the initials
+      underneath it are for.
+    """
+    src = str(url or "").strip()
+    if not src.lower().startswith("https://"):
+        return "<span class=crest>%s</span>" % _e(_initials(name))
+    return ("<img class=crest src='%s' alt='' loading=lazy "
+            "referrerpolicy=no-referrer>" % _e(src))
+
+
+def _num(v: Any) -> Optional[float]:
+    try:
+        return None if v is None else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _board(b: Mapping[str, Any], tz: Any) -> str:
+    """One league's head-to-head, as of that league's last run.
+
+    Four questions in one panel, which are the four that were asked: what is
+    the score, who is it against, how much of the week's games allowance has
+    been spent, and what will it be once tonight is played.
+
+    "After tonight" is the sum of a reading and a schedule lookup -- games
+    already counted, plus the starters whose NBA teams play today. It is
+    therefore a projection and is worded as one. It also assumes the lineup
+    stands, which is fair: the run that wrote the number also wrote the lineup.
+    """
+    mine = _num(b.get("my_points"))
+    theirs = _num(b.get("opp_points"))
+    cap = _num(b.get("games_cap"))
+    used = _num(b.get("my_games_used"))
+    today = _num(b.get("my_games_today"))
+
+    def row(name: Any, logo: Any, pts: Optional[float],
+            games: Optional[float], leading: bool) -> str:
+        return (
+            "<div class='bteam%s'>%s<span class=bwho>"
+            "<span class=bname>%s</span>%s</span>"
+            "<span class=bpts>%s</span></div>" % (
+                " up" if leading else "",
+                _crest(logo, name),
+                _e(name or "—"),
+                ("<span class=bgames>%s</span>"
+                 % _e(_games_line(games, cap))) if games is not None else "",
+                "—" if pts is None else _e("%.0f" % pts),
+            ))
+
+    out = ["<section class=board>",
+           "<div class=bhead><span>%s</span><span class=bwhen>%s</span></div>"
+           % (_e(b.get("league") or ""),
+              _e(_when(b.get("updated_at"), tz)))]
+    ahead = (mine is not None and theirs is not None and mine > theirs)
+    behind = (mine is not None and theirs is not None and theirs > mine)
+    out.append(row(b.get("my_name"), b.get("my_logo"), mine, used, ahead))
+    if b.get("opp_team_id") is None:
+        # A bye. One side, said plainly -- not a row of dashes implying an
+        # opponent who has scored nothing.
+        out.append("<div class=bteam><span class=crest>—</span>"
+                   "<span class=bname>No opponent (bye)</span></div>")
+    else:
+        out.append(row(b.get("opp_name"), b.get("opp_logo"), theirs,
+                       _num(b.get("opp_games_used")), behind))
+
+    foot = []
+    if mine is not None and theirs is not None and b.get("opp_team_id") is not None:
+        gap = abs(mine - theirs)
+        if not gap:
+            foot.append("<b>Level</b>")
+        else:
+            foot.append("<b class='%s'>%s by %.0f</b>"
+                        % ("lead" if ahead else "trail",
+                           "Ahead" if ahead else "Behind", gap))
+    if used is not None and today is not None:
+        # "after today" rather than "once today is played": the longer phrase
+        # wrapped the footer onto a second line in a panel this narrow, and said
+        # nothing the short one does not.
+        foot.append("<b>%.0f</b> games after today" % (used + today)
+                    if today else "no games left today")
+    if foot:
+        out.append("<div class=bfoot>%s</div>" % " &middot; ".join(foot))
+    out.append("</section>")
+    return "".join(out)
+
+
+def _games_line(used: Optional[float], cap: Optional[float]) -> str:
+    """``12 of 30 games`` -- the denominator only when there is a cap.
+
+    A league without ``lineupSlotStatLimits`` has no allowance to be spending,
+    so "12 of — games" would be inventing a constraint. Most do have one; the
+    uncapped case is why the denominator is conditional rather than assumed.
+    """
+    if used is None:
+        return ""
+    if cap:
+        return "%.0f of %.0f games" % (used, cap)
+    return "%.0f game%s" % (used, "" if used == 1 else "s")
+
+
 def _league_columns(page: StatusPage,
                     rows: List[Dict[str, Any]],
                     *, all_leagues: bool = False
@@ -767,23 +987,40 @@ def render(page: StatusPage, *, user: str = "") -> str:
     pending = page.pending()
     shadow = page.shadow_mode()
     stuck = page.stuck()
+    boards = page.scoreboards()
+    tz = page.tz()
     parts: List[str] = [
         "<!doctype html><html><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        # This document's own URL contains the ingress session token, and the
+        # page loads images from third parties: ESPN's headshot CDN, and
+        # whatever host a league member chose for his team logo. None of them
+        # gets a Referer header.
+        "<meta name=referrer content=no-referrer>"
         "<title>NBA Autopilot</title><style>%s</style></head><body>"
         "<main class=wrap>" % CSS,
-        "<h1 class=solo>NBA Autopilot</h1>",
+        "<div class=top><div class=masthead>",
+        "<h1>NBA Autopilot</h1>",
     ]
 
     # The chips answer, above the fold, the two questions the page is opened
     # with: is it actually writing to ESPN, and does it want something from me.
-    parts.append("<div class='chips solo'>")
+    parts.append("<div class=chips>")
     parts.append("<span class='chip hold'>Shadow mode</span>" if shadow
                  else "<span class='chip on'>Live</span>")
     parts.append(
         "<span class=chip>%d waiting on you</span>" % len(pending) if pending
         else "<span class=chip>Nothing waiting</span>"
     )
+    parts.append("</div></div>")
+
+    # Beside the title rather than above the queue: this is the standing the
+    # decisions below are in service of, not another thing to act on.
+    if boards:
+        parts.append("<div class=boards>")
+        for b in boards:
+            parts.append(_board(b, tz))
+        parts.append("</div>")
     parts.append("</div>")
 
     if shadow:
@@ -861,7 +1098,6 @@ def render(page: StatusPage, *, user: str = "") -> str:
 
     parts.append("<h2 class=solo>Recent runs</h2>")
     runs = page.recent_runs()
-    tz = page.tz()
     if not runs:
         parts.append("<div class='card empty solo'><b>No runs recorded yet.</b>"
                      "The first scheduled run will appear here.</div>")

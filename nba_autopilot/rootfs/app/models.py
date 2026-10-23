@@ -319,6 +319,12 @@ class MatchupScore:
 
     ``opp_team_id`` is ``Optional`` because a bye week has a row with one side.
     A bye is not a 0-0 tie and must not be valued like one.
+
+    Everything below ``opp_points`` is for the person reading the status page
+    rather than for the solver, and all of it comes off the same request the
+    score does -- the identity fields from ``mTeam``, the games-used figures
+    from the two ``cumulativeScore`` blocks on the one matchup row. Defaulted,
+    because a caller that only wants the score should not have to supply them.
     """
 
     matchup_period: int
@@ -327,6 +333,27 @@ class MatchupScore:
     opp_team_id: Optional[int]
     opp_name: str
     opp_points: float
+    #: Our own team name. ESPN sends ``location``/``nickname`` as null on both
+    #: live leagues, so ``name`` is the only full name there is, with ``abbrev``
+    #: the only short one.
+    my_name: str = ""
+    my_abbrev: str = ""
+    opp_abbrev: str = ""
+    #: ``teams[].logo``. Present for every team on both live leagues, but see
+    #: ``espn/read.matchup_score`` -- a custom one is an arbitrary URL chosen by
+    #: a league member, not necessarily an ESPN-hosted image.
+    my_logo: str = ""
+    opp_logo: str = ""
+    #: Games each side has spent against the weekly cap, as ESPN itself counts
+    #: them. ``None`` where the row has no pooled entry yet.
+    #:
+    #: Not the same number as ``usage.measure`` returns for us: that one is
+    #: reconciled against a season-to-date delta and may be the larger of the
+    #: two when they disagree, because the solver must not under-count a hard
+    #: cap. This is the figure shown on ESPN's own scoreboard, which is the one
+    #: to put in front of a human; the reconciliation lives in the run notes.
+    my_games_used: Optional[int] = None
+    opp_games_used: Optional[int] = None
 
     @property
     def margin(self) -> float:

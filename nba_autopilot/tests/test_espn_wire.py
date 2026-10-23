@@ -635,6 +635,72 @@ class TestMatchupScoreWire(unittest.TestCase):
         self.assertIsNone(read.matchup_score())
 
 
+class TestMatchupScoreDisplayFields(unittest.TestCase):
+    """The identity and games-used fields the status page renders.
+
+    All of it rides on the request the score already makes -- ``mTeam`` carries
+    the names and logos, and the opponent's ``cumulativeScore`` sits on the same
+    matchup row as ours. That is why the page costs no extra ESPN read, and it
+    is worth a test: if a future edit split these into a second request the
+    cost would be invisible from the call site.
+    """
+
+    def test_names_logos_and_both_sides_games_come_off_the_one_request(self):
+        read, http = _score_reader(
+            [{"matchupPeriodId": 1,
+              "home": _side(7, points=110.0, gp=12.0),
+              "away": _side(6, points=92.0, gp=14.0)}],
+            teams=[{"id": 7, "name": "Us", "abbrev": "US",
+                    "logo": "https://g.espncdn.com/a.svg"},
+                   {"id": 6, "name": "Them", "abbrev": "THM",
+                    "logo": "https://imgflip.com/b.png"}],
+        )
+        got = read.matchup_score()
+        self.assertEqual(got.my_name, "Us")
+        self.assertEqual(got.my_abbrev, "US")
+        self.assertEqual(got.my_logo, "https://g.espncdn.com/a.svg")
+        self.assertEqual(got.opp_name, "Them")
+        self.assertEqual(got.opp_abbrev, "THM")
+        self.assertEqual(got.opp_logo, "https://imgflip.com/b.png")
+        self.assertEqual(got.my_games_used, 12)
+        self.assertEqual(got.opp_games_used, 14)
+        # One request, and ``mTeam`` is on it. ``_get`` does no caching, so a
+        # second read here would be a second round trip on every run.
+        self.assertEqual(len(http.views), 1)
+        self.assertIn("mTeam", http.views[0])
+
+    def test_an_unscored_row_reports_no_games_rather_than_zero(self):
+        """"Not reported" and "nobody has played" look alike and are not."""
+        read, _ = _score_reader([
+            {"matchupPeriodId": 1, "home": _side(7, points=0.0),
+             "away": _side(6, points=0.0)},
+        ])
+        got = read.matchup_score()
+        self.assertIsNone(got.my_games_used)
+        self.assertIsNone(got.opp_games_used)
+
+    def test_a_team_espn_sends_no_name_for_falls_back_to_its_id(self):
+        read, _ = _score_reader(
+            [{"matchupPeriodId": 1, "home": _side(7), "away": _side(6)}],
+            teams=[{"id": 7, "abbrev": "US"}],
+        )
+        got = read.matchup_score()
+        self.assertEqual(got.my_name, "US")
+        self.assertEqual(got.opp_name, "6")
+        self.assertEqual(got.opp_logo, "")
+
+    def test_a_bye_names_nobody(self):
+        read, _ = _score_reader(
+            [{"matchupPeriodId": 1, "home": _side(7, points=50.0, gp=5.0)}],
+            teams=[{"id": 7, "name": "Us"}],
+        )
+        got = read.matchup_score()
+        self.assertIsNone(got.opp_team_id)
+        self.assertEqual(got.opp_name, "")
+        self.assertIsNone(got.opp_games_used)
+        self.assertEqual(got.my_games_used, 5)
+
+
 class TestAcquisitionsUsedWire(unittest.TestCase):
     def test_counts_are_keyed_by_matchup_period(self):
         cfg = EspnConfig(league_id=1, team_id=7, espn_s2="s2", swid="{X}",

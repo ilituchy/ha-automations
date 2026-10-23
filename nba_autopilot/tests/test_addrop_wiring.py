@@ -368,12 +368,24 @@ class _Harness:
         )
 
     def consider_all(self, target=None, injuries=None):
-        return self.app._consider_addrops(
+        # The score is read by the caller rather than by ``_consider_addrops``
+        # -- ``run_league`` needs it for the status-page scoreboard too, and one
+        # request serves both. Read it here the same way, so a test about a
+        # failing score read is still testing the path the run takes.
+        read_notes = []
+        matchup = self.app._read_matchup(self.lg, 1, read_notes)
+        # The spy is scoped to the call under test. Several tests below assert
+        # that a decision was declined "without spending a single ESPN read",
+        # and that claim is about ``_consider_addrops``; the score above is the
+        # caller's, charged to the run whether or not add/drop is considered.
+        del self.lg.read.asked[:]
+        decisions, notes = self.app._consider_addrops(
             self.lg, self.settings, self.roster, self.projections,
             self.plan(target),
             cal=self.cal, matchup_period=1, schedule=self.schedule,
-            injuries=injuries,
+            injuries=injuries, matchup=matchup,
         )
+        return decisions, read_notes + notes
 
     def consider(self, target=None, injuries=None):
         """The best swap only, or ``None``, plus every note.
@@ -1217,6 +1229,62 @@ class TestEachOfferStandsAlone(unittest.TestCase):
         self.assertEqual(
             [r.completed for r in h.store.rows], [None, None, None]
         )
+
+
+def _starts(work, roster, scoring_period=4):
+    return main_mod._starts_today(work, roster, scoring_period)
+
+
+class TestGamesStartingToday(unittest.TestCase):
+    """``_starts_today``: what tonight will cost against the weekly cap.
+
+    The status page adds this to ESPN's games-used to answer "how many will
+    have been played after today". It counts under the same two conditions ESPN
+    does -- a *starting* slot, and an NBA team playing on this scoring period --
+    because a number derived any other way would quietly disagree with the
+    scoreboard it sits next to.
+    """
+
+    def work(self, plan=None, schedule=None):
+        return main_mod.LineupWork(
+            plan=plan, projections={}, availability={}, skipped=(),
+            overrides={}, injuries=None, cal=None, matchup_period=1,
+            schedule={1: {4: 1}} if schedule is None else schedule,
+            games_used=None, notes=(), sources_used={}, sources_missing={},
+        )
+
+    def roster(self):
+        # Players 1 and 2 are on pro team 1, which plays on period 4; player 3
+        # is on team 2, which does not.
+        return [player(1), player(2), player(3, team=2)]
+
+    def test_only_starters_whose_team_plays_today_are_counted(self):
+        plan = _Harness().plan({1: START, 2: BENCH, 3: START})
+        self.assertEqual(_starts(self.work(plan), self.roster()), 1)
+
+    def test_it_measures_the_lineup_about_to_be_written(self):
+        """Not the one ESPN currently has: by the time the page is read, the
+        write has happened."""
+        before = _Harness().plan({1: BENCH, 2: BENCH, 3: BENCH})
+        after = _Harness().plan({1: START, 2: START, 3: BENCH})
+        self.assertEqual(_starts(self.work(before), self.roster()), 0)
+        self.assertEqual(_starts(self.work(after), self.roster()), 2)
+
+    def test_an_aborted_run_falls_back_to_what_espn_already_has(self):
+        """No plan is not a quiet night -- whatever is set is what will play."""
+        roster = [player(1), player(2, slot=BENCH), player(3, team=2)]
+        self.assertEqual(_starts(self.work(None), roster), 1)
+
+    def test_no_pro_schedule_means_no_claim_at_all(self):
+        """``None``, not 0: the page says nothing rather than implying a quiet
+        night it has no evidence for."""
+        plan = _Harness().plan({1: START, 2: START, 3: START})
+        self.assertIsNone(_starts(self.work(plan, schedule={}), self.roster()))
+
+    def test_a_night_with_no_games_is_zero_rather_than_unknown(self):
+        plan = _Harness().plan({1: START, 2: START, 3: START})
+        self.assertEqual(
+            _starts(self.work(plan, schedule={1: {9: 1}}), self.roster()), 0)
 
 
 if __name__ == "__main__":

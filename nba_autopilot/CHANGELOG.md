@@ -188,6 +188,62 @@ All notable changes to this app are documented here. The format follows
 
 ### Added
 
+- **This week's score sits at the top of the status page.** *"i need to know
+  the current score, how many players have played, and how many will have been
+  played after today."* One panel per league in the space beside the title,
+  which was empty: both team names and logos, both totals with only the
+  leader's in full-strength ink, each side's games against the weekly cap as
+  ESPN itself counts them, the gap computed rather than left to the reader, and
+  the projection for tonight — `12 of 30 games` now, `16 games after today`.
+
+  It costs no extra ESPN request. The team names, abbreviations and logos all
+  ride on the `mTeam` view the matchup read already asks for, and the
+  opponent's `cumulativeScore.statBySlot` turns out to sit on the same matchup
+  row as ours, so both sides' games-used come off the one response. The read
+  was therefore hoisted out of `_consider_addrops` into `run_league` rather
+  than duplicated — `EspnRead._get` does no caching, so a second call would
+  have been a second round trip on every run.
+
+  The page has no ESPN credentials and no event loop, so it renders out of a
+  new `scoreboards` table: one row per league, overwritten every run. That is
+  the opposite of `gp_snapshots`, where the earliest reading is the only useful
+  one; here a live score has no historical value and a stale one actively
+  misleads, which is why each panel carries the age of its own reading. The row
+  is written before the lineup is planned and before the two paths that abort,
+  because those are exactly the mornings the owner most wants to open the page
+  and see where he stands — and `_record_scoreboard` swallows every exception,
+  since a cosmetic panel must never cost the run its lineup write.
+
+  "Games after today" counts under the same two conditions ESPN does: a
+  starting slot, and an NBA team playing on this scoring period. It measures
+  the lineup *about to be written* rather than the one ESPN currently has,
+  because by the time anyone reads the page the write has happened. With no pro
+  schedule to check against it says nothing rather than implying a quiet night,
+  and a league with no `lineupSlotStatLimits` gets `12 games` rather than an
+  invented denominator.
+
+  A team logo is not an ESPN asset the way the player headshots are. A third of
+  the live ones are `logoType: CUSTOM_VALID` — an arbitrary address a league
+  member typed in, observed pointing at imgflip, twitter and ifunny. So the
+  crest accepts `https://` only, refusing `data:`, `javascript:` and relative
+  values outright rather than escaping them and hoping, and falls back to the
+  team's initials. The document's own URL contains the ingress session token,
+  so the page now sends `<meta name=referrer content=no-referrer>` and each
+  image repeats it — which also closes a pre-existing leak, since the headshot
+  requests had been handing that URL to `a.espncdn.com` all along.
+
+- **Player names link to their ESPN pages.** *"i need to look deeper
+  sometimes."* Every name on the page names a real player, and the numeric id
+  needed to build the URL was already in hand at both render sites because the
+  headshot needs it. New tab, because the page it leaves is the one with the
+  Approve button on it, and `rel=noopener noreferrer` so the tab keeps no
+  handle on the authenticated frontend it was opened from. The id goes through
+  `int()` rather than `_e()` — the only safe thing to put in a URL is a number
+  — and a row with no parseable id renders the bare name rather than a link to
+  nowhere, which is what every move journalled before today looks like. The
+  link keeps the colour of the name it replaced; twenty blue names down a
+  column read as a navigation list, and the thing being looked at is the move.
+
 - **An approved add/drop clears its card instead of sending a second push.**
   Tapping Approve produced a confirmation notification for a decision the user
   had just made by hand — *"i get a notification when i accept the add drop

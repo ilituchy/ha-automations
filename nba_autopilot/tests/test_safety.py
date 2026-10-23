@@ -442,6 +442,56 @@ class TestStateMachine(unittest.TestCase):
         self.assertIn("darko", row["sources_missing"])
 
 
+class TestScoreboardCache(unittest.TestCase):
+    """One row per league, overwritten every run.
+
+    The opposite of ``gp_snapshots``, where the *earliest* reading is the only
+    useful one. A live score has no historical value and a stale one actively
+    misleads, so the table keeps the newest reading and the page shows how old
+    it is.
+    """
+
+    def setUp(self):
+        self.store = Store(":memory:")
+
+    def tearDown(self):
+        self.store.close()
+
+    def test_the_latest_reading_replaces_the_last_one(self):
+        self.store.record_scoreboard(1, my_points=100.0, opp_points=90.0)
+        self.store.record_scoreboard(1, my_points=403.0, opp_points=513.5)
+        rows = self.store.scoreboards()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["my_points"], 403.0)
+
+    def test_each_league_keeps_its_own_row(self):
+        self.store.record_scoreboard(1, my_name="A")
+        self.store.record_scoreboard(2, my_name="B")
+        self.assertEqual(
+            sorted(r["my_name"] for r in self.store.scoreboards()), ["A", "B"])
+
+    def test_every_write_stamps_its_own_age(self):
+        """``updated_at`` is load-bearing: the page renders it."""
+        self.store.record_scoreboard(1, my_points=1.0)
+        self.assertTrue(self.store.scoreboards()[0]["updated_at"])
+
+    def test_a_typoed_column_is_refused_rather_than_dropped(self):
+        """Silently ignoring it would show up as a number that never updates --
+        a long way to debug from the symptom."""
+        with self.assertRaises(ValueError):
+            self.store.record_scoreboard(1, my_pointz=1.0)
+        self.assertEqual(self.store.scoreboards(), [])
+
+    def test_the_unknown_parts_of_a_reading_stay_unknown(self):
+        """A league with no cap, or a row ESPN has not scored, writes NULL --
+        not 0, which the page would render as a real number."""
+        self.store.record_scoreboard(1, my_points=403.0, games_cap=None,
+                                     my_games_used=None)
+        row = self.store.scoreboards()[0]
+        self.assertIsNone(row["games_cap"])
+        self.assertIsNone(row["my_games_used"])
+
+
 class TestLeagueConfig(unittest.TestCase):
     """Multi-league parsing. Two teams, one cookie, zero pooling."""
 

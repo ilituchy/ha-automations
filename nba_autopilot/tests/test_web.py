@@ -71,10 +71,15 @@ class FakeCfg:
 class FakeStore:
     """Only the four things the page touches."""
 
-    def __init__(self, pending=(), rows=None, stuck=(), run_leagues=None):
+    def __init__(self, pending=(), rows=None, stuck=(), run_leagues=None,
+                 boards=()):
         self._pending = list(pending)
         self._rows = rows or {}
         self._stuck = list(stuck)
+        #: Scoreboard rows, one per league. Separate from ``_rows`` because the
+        #: page selects them with their own statement and every other fixture
+        #: would otherwise have to carry an empty list for them.
+        self._boards = list(boards)
         #: ``run_id -> league_id``, for the one query the page makes whose
         #: answer depends on its argument: which league a pending proposal's
         #: run belonged to. ``_rows`` matches on the SQL alone, so it cannot
@@ -90,6 +95,8 @@ class FakeStore:
         return list(self._stuck)
 
     def query(self, sql, args=()):
+        if "FROM scoreboards" in sql:
+            return list(self._boards)
         if self._run_leagues and "SELECT league_id FROM runs" in sql:
             lid = self._run_leagues.get(args[0] if args else None)
             return [{"league_id": lid}] if lid is not None else []
@@ -419,6 +426,147 @@ class TestPlayerLinks(unittest.TestCase):
         out = web.render(web.StatusPage(bot))
         self.assertIn("Anthony Black", out)
         self.assertNotIn("/nba/player/_/id/", out)
+
+
+def _board(**over):
+    """A scoreboard row as ``record_scoreboard`` writes one."""
+    row = {
+        "league_id": 1, "run_id": "R1",
+        "updated_at": "2026-10-23T13:54:18+00:00",
+        "matchup_period": 1, "scoring_period": 4,
+        "my_team_id": 2, "my_name": "Kessler", "my_abbrev": "KES",
+        "my_logo": "https://g.espncdn.com/x.svg", "my_points": 403.0,
+        "opp_team_id": 4, "opp_name": "d'angelo", "opp_abbrev": "VODO",
+        "opp_logo": "https://g.espncdn.com/y.svg", "opp_points": 513.5,
+        "my_games_used": 12, "opp_games_used": 14,
+        "my_games_today": 4, "games_cap": 30,
+    }
+    row.update(over)
+    return row
+
+
+class TestScoreboard(unittest.TestCase):
+    """This week's head-to-head, cached by the last run and rendered cold.
+
+    The page has no ESPN credentials and no event loop, so every number here
+    came out of SQLite and may be hours old. That is the whole reason the panel
+    carries its own timestamp, and the reason a missing field has to render as
+    an absence rather than as a zero -- a score of 0-0 shown confidently is
+    worse than no panel at all.
+    """
+
+    def test_one_panel_per_league_in_configured_order(self):
+        bot = FakeBot(
+            FakeStore(boards=[_board(league_id=9, my_name="Second"),
+                              _board(league_id=4, my_name="First")]),
+            leagues=[FakeLeague(4, "Alpha"), FakeLeague(9, "Beta")],
+        )
+        out = web.render(web.StatusPage(bot))
+        self.assertLess(out.index("Alpha"), out.index("Beta"))
+        self.assertEqual(out.count("<section class=board>"), 2)
+
+    def test_a_league_with_no_reading_yet_is_simply_absent(self):
+        """A fresh install shows nothing, not a 0-0 placeholder."""
+        bot = FakeBot(
+            FakeStore(boards=[_board(league_id=4)]),
+            leagues=[FakeLeague(4, "Alpha"), FakeLeague(9, "Beta")],
+        )
+        out = web.render(web.StatusPage(bot))
+        self.assertEqual(out.count("<section class=board>"), 1)
+
+    def test_no_panel_at_all_when_nothing_has_been_read(self):
+        out = web.render(web.StatusPage(FakeBot(FakeStore())))
+        self.assertNotIn("class=boards", out)
+
+    def test_only_the_leader_gets_full_strength_ink(self):
+        out = web._board(_board(), None)
+        self.assertEqual(out.count("class='bteam up'"), 1)
+        # The leader is the opponent here, so the emphasis must land on the
+        # second row -- not on ours by default.
+        self.assertLess(out.index("Kessler"), out.index("bteam up"))
+
+    def test_the_gap_is_computed_rather_than_left_to_the_reader(self):
+        self.assertIn("Behind by 110", web._board(_board(), None))
+        self.assertIn("Ahead by 110",
+                      web._board(_board(my_points=513.5, opp_points=403.0),
+                                 None))
+        self.assertIn("Level",
+                      web._board(_board(opp_points=403.0), None))
+
+    def test_games_after_today_is_the_sum_and_is_worded_as_a_projection(self):
+        self.assertIn("<b>16</b> games after today", web._board(_board(), None))
+
+    def test_a_quiet_night_says_so_rather_than_repeating_the_count(self):
+        self.assertIn("no games left today",
+                      web._board(_board(my_games_today=0), None))
+
+    def test_an_uncapped_league_does_not_invent_a_denominator(self):
+        self.assertEqual(web._games_line(12, 30), "12 of 30 games")
+        self.assertEqual(web._games_line(12, None), "12 games")
+        self.assertEqual(web._games_line(1, 0), "1 game")
+        self.assertEqual(web._games_line(None, 30), "")
+
+    def test_a_bye_is_said_plainly_rather_than_drawn_as_a_0_0(self):
+        out = web._board(_board(opp_team_id=None, opp_name="", opp_points=0.0),
+                         None)
+        self.assertIn("No opponent (bye)", out)
+        self.assertEqual(out.count("class=bpts"), 1)
+        self.assertNotIn("Ahead by", out)
+
+    def test_an_unreported_score_renders_as_an_absence(self):
+        """A row ESPN has not scored yet is blank, not zero.
+
+        ``my_games_used`` is ``None`` only when the matchup row carries no
+        pooled entry at all, which is not the same fact as "nobody has played",
+        so the subline is dropped rather than printed as ``0 of 30``.
+        """
+        out = web._board(_board(my_points=None, my_games_used=None,
+                                opp_points=None, opp_games_used=None), None)
+        self.assertEqual(out.count("<span class=bpts>—</span>"), 2)
+        self.assertNotIn("class=bgames", out)
+        # Neither side leads, so neither gets the emphasis and the footer has
+        # no gap to report.
+        self.assertNotIn("bteam up", out)
+
+    def test_a_team_name_is_escaped_like_everything_else(self):
+        out = web._board(_board(my_name="<img src=x onerror=alert(1)>"), None)
+        self.assertNotIn("<img src=x", out)
+        self.assertIn("&lt;img", out)
+
+    def test_a_logo_that_is_not_https_falls_back_to_initials(self):
+        """``CUSTOM_VALID`` is a URL a leaguemate typed, not an ESPN asset."""
+        for bad in ("javascript:alert(1)", "data:image/svg+xml,<svg/>",
+                    "http://meme.example/x.png", "/relative.png", "", None):
+            out = web._crest(bad, "Kessler I Met")
+            self.assertEqual(out, "<span class=crest>KI</span>", bad)
+
+    def test_a_third_party_logo_is_never_told_where_it_was_loaded_from(self):
+        """The document URL carries the ingress session token."""
+        out = web._crest("https://imgflip.com/x.png", "Kessler")
+        self.assertIn("referrerpolicy=no-referrer", out)
+        self.assertIn("src='https://imgflip.com/x.png'", out)
+
+    def test_a_logo_url_cannot_break_out_of_its_attribute(self):
+        out = web._crest("https://x/y.png' onerror='alert(1)", "K")
+        self.assertNotIn("onerror='alert(1)", out)
+        self.assertIn("&#x27;", out)
+
+    def test_the_whole_page_declines_to_send_a_referer(self):
+        out = web.render(web.StatusPage(FakeBot(FakeStore())))
+        self.assertIn("<meta name=referrer content=no-referrer>", out)
+
+    def test_the_age_of_the_reading_is_shown(self):
+        """A score cached this morning shown bare would read as live."""
+        bot = FakeBot(FakeStore(boards=[_board(league_id=4)]),
+                      leagues=[FakeLeague(4, "Alpha")])
+        out = web.render(web.StatusPage(bot))
+        self.assertIn("class=bwhen", out)
+
+    def test_initials_cope_with_a_name_made_of_punctuation(self):
+        self.assertEqual(web._initials("!!! ???"), "?")
+        self.assertEqual(web._initials(""), "?")
+        self.assertEqual(web._initials(None), "?")
+        self.assertEqual(web._initials("d'angelo"), "D")
 
 
 class TestLogsDisclosure(unittest.TestCase):

@@ -43,6 +43,7 @@ import ha.bridge as bridge_mod
 from ha.bridge import Action, ActionEvent, HaBridge
 from sources.espn_injuries import EspnInjuries
 from solve import addrop as addrop_mod
+from solve import budget as budget_mod
 from solve import projections as projections_mod
 from solve import value as value_mod
 from solve.calendar import SeasonCalendar
@@ -166,6 +167,38 @@ def _ordinal(n: int) -> str:
     """``2 -> "second"``. For prose on an approval card, nothing else."""
     return {1: "first", 2: "second", 3: "third", 4: "fourth",
             5: "fifth"}.get(n, "%dth" % n)
+
+
+def _starts_today(
+    work: "LineupWork", roster: Sequence[Any], scoring_period: int
+) -> Optional[int]:
+    """Games today's lineup will spend against the weekly cap.
+
+    A game counts when a player is in a *starting* slot and his NBA team plays
+    on this scoring period -- the same two conditions ESPN counts under, which
+    is what makes "used + today" the number the owner is actually asking for
+    when he wants to know where the week stands after tonight.
+
+    Measured against ``plan.target`` -- the lineup about to be written -- not
+    against the one ESPN currently has, because by the time anyone reads the
+    page the write has happened. Falls back to the current lineup when there is
+    no plan, which is the aborted-run case: wrong to show nothing there, since
+    whatever ESPN has set is exactly what will play.
+
+    ``None`` when there is no pro schedule to check against; the page then says
+    nothing rather than implying a quiet night.
+    """
+    if not work.schedule:
+        return None
+    slots = (dict(work.plan.target) if work.plan is not None
+             else {int(e.player_id): int(e.current_slot) for e in roster})
+    teams = {int(e.player_id): int(e.pro_team_id or 0) for e in roster}
+    return sum(
+        1 for pid, slot in slots.items()
+        if ids.is_starting_slot(int(slot))
+        and (work.schedule.get(teams.get(int(pid), 0)) or {}).get(
+            int(scoring_period))
+    )
 
 
 def _apply_swap(
@@ -659,6 +692,7 @@ class Autopilot:
         matchup_period: int,
         schedule: Mapping[int, Mapping[int, int]],
         injuries: Optional[Any] = None,
+        matchup: Optional[Any] = None,
     ) -> Tuple[List["addrop_mod.AddDropPlan"], List[str]]:
         """Price the pool and decide up to ``addrop_max_moves`` swaps. Reads only.
 
@@ -674,6 +708,12 @@ class Autopilot:
         reporting this run actually acted on. A second fetch could legitimately
         return something newer, and a reviewer shown different news from the
         model it is reviewing would be answering a different question.
+
+        ``matchup`` is passed in for the same reason and one more: the caller
+        already read it to cache the scoreboard, and reading it again here
+        would be a second request for a number that cannot have changed in the
+        intervening second. ``None`` means a bye, the preseason, or a failed
+        read -- all of which this method already has to handle.
 
         Returns the swaps to offer, best first, and the notes for all of them
         including the ones that were declined or blocked. The list is empty when
@@ -744,12 +784,6 @@ class Autopilot:
         everyone = dict(pool_projections)
         everyone.update(projections)
 
-        matchup = None
-        try:
-            matchup = lg.read.matchup_score(matchup_period=matchup_period)
-        except Exception as exc:  # noqa: BLE001
-            log.error("could not read the matchup score: %s", exc)
-            notes.append("matchup score unavailable (%s)" % exc)
         if matchup is None:
             # A bye, or the preseason. Not an error, and specifically not a
             # 0-0 tie -- see ``read.matchup_score``.
@@ -1143,6 +1177,13 @@ class Autopilot:
         schedule, injuries = work.schedule, work.injuries
         projections = work.projections
 
+        # Before the plan is examined, because the scoreboard is a fact about
+        # the week rather than about this run's decisions, and the two paths
+        # that abort below are exactly the ones where the owner most wants to
+        # open the page and see where he stands.
+        matchup = self._read_matchup(lg, matchup_period, notes)
+        self._record_scoreboard(run_id, lg, settings, work, roster, matchup)
+
         if work.plan is None:
             notes.append("aborting: no usable projections for any player")
             self._finish(run_id, sources_used, sources_missing, {}, {}, notes)
@@ -1190,7 +1231,7 @@ class Autopilot:
         decisions, addrop_notes = self._consider_addrops(
             lg, settings, roster, projections, plan,
             cal=cal, matchup_period=matchup_period, schedule=schedule,
-            injuries=injuries,
+            injuries=injuries, matchup=matchup,
         )
         notes.extend(addrop_notes)
         # Best first, each its own approval. Offered in the order they were
@@ -1205,6 +1246,77 @@ class Autopilot:
         self._finish(run_id, sources_used, sources_missing, shadow_prices,
                      coefficients, notes)
         return run_id
+
+    def _read_matchup(
+        self, lg: "League", matchup_period: int, notes: List[str]
+    ) -> Optional[Any]:
+        """This week's score, or ``None`` with the reason in the notes.
+
+        Wrapped because nothing downstream of it is worth a run: the score
+        waives the churn floor in add/drop and fills a panel on the status
+        page, and both degrade to "not shown" rather than to a failure.
+        """
+        try:
+            return lg.read.matchup_score(matchup_period=matchup_period)
+        except Exception as exc:  # noqa: BLE001
+            log.error("could not read the matchup score: %s", exc)
+            notes.append("matchup score unavailable (%s)" % exc)
+            return None
+
+    def _record_scoreboard(
+        self,
+        run_id: str,
+        lg: "League",
+        settings: Any,
+        work: LineupWork,
+        roster: Any,
+        matchup: Optional[Any],
+    ) -> None:
+        """Cache the head-to-head for the status page. Never raises.
+
+        The page renders out of SQLite because it has no ESPN credentials and
+        no event loop of its own, so the score it shows is the one the last run
+        saw. That is a real limitation and the page says so by printing the
+        timestamp; this method's job is only to make sure the timestamp is as
+        recent as the run.
+
+        Wrapped whole and swallowing everything. A scoreboard is the least
+        important thing this run does, and it is recorded *before* the lineup
+        write -- so an exception escaping here would cost the run the one part
+        of it that matters.
+        """
+        if matchup is None:
+            return
+        try:
+            try:
+                cap = budget_mod.matchup_cap(settings)
+            except Exception:  # noqa: BLE001
+                # A per-slot cap, which budget.py refuses to model. The score
+                # is still worth showing; it just loses its denominator.
+                cap = None
+            self.store.record_scoreboard(
+                lg.ref.league_id,
+                run_id=run_id,
+                matchup_period=int(matchup.matchup_period),
+                scoring_period=int(settings.current_scoring_period),
+                my_team_id=int(matchup.my_team_id),
+                my_name=matchup.my_name,
+                my_abbrev=matchup.my_abbrev,
+                my_logo=matchup.my_logo,
+                my_points=float(matchup.my_points),
+                opp_team_id=matchup.opp_team_id,
+                opp_name=matchup.opp_name,
+                opp_abbrev=matchup.opp_abbrev,
+                opp_logo=matchup.opp_logo,
+                opp_points=float(matchup.opp_points),
+                my_games_used=matchup.my_games_used,
+                opp_games_used=matchup.opp_games_used,
+                my_games_today=_starts_today(work, roster,
+                                             settings.current_scoring_period),
+                games_cap=None if cap is None else int(cap),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not cache the scoreboard: %s", exc)
 
     def _finish(
         self,

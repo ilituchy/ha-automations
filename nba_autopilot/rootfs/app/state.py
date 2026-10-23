@@ -118,6 +118,39 @@ CREATE TABLE IF NOT EXISTS gp_snapshots (
     taken_at        TEXT    NOT NULL,
     PRIMARY KEY (league_id, team_id, matchup_period)
 );
+
+-- This week's head-to-head as of the last run, for the status page.
+--
+-- One row per league, overwritten every run -- the exact opposite of
+-- ``gp_snapshots``, where the earliest reading is the only useful one. Here
+-- the only useful reading is the latest: it is a live score, and yesterday's
+-- is not evidence of anything.
+--
+-- It is cached rather than fetched by the page because the page has no ESPN
+-- credentials and no event loop. It renders out of SQLite, and the only thing
+-- that talks to ESPN is a run. ``updated_at`` is therefore load-bearing and is
+-- shown: a score from this morning presented as live is worse than no score.
+CREATE TABLE IF NOT EXISTS scoreboards (
+    league_id       INTEGER PRIMARY KEY,
+    run_id          TEXT,
+    updated_at      TEXT    NOT NULL,
+    matchup_period  INTEGER,
+    scoring_period  INTEGER,
+    my_team_id      INTEGER,
+    my_name         TEXT    NOT NULL DEFAULT '',
+    my_abbrev       TEXT    NOT NULL DEFAULT '',
+    my_logo         TEXT    NOT NULL DEFAULT '',
+    my_points       REAL,
+    opp_team_id     INTEGER,
+    opp_name        TEXT    NOT NULL DEFAULT '',
+    opp_abbrev      TEXT    NOT NULL DEFAULT '',
+    opp_logo        TEXT    NOT NULL DEFAULT '',
+    opp_points      REAL,
+    my_games_used   INTEGER,
+    opp_games_used  INTEGER,
+    my_games_today  INTEGER,
+    games_cap       INTEGER
+);
 """
 
 
@@ -286,6 +319,46 @@ class Store:
                 (int(league_id), int(team_id), int(matchup_period)),
             ).fetchone()
         return dict(row) if row else None
+
+    # -- scoreboard --------------------------------------------------------
+
+    #: Written and read by name so the page and the run cannot drift apart on
+    #: column order, and so adding a field is one edit in two places rather
+    #: than three in four.
+    SCOREBOARD_FIELDS = (
+        "run_id", "matchup_period", "scoring_period",
+        "my_team_id", "my_name", "my_abbrev", "my_logo", "my_points",
+        "opp_team_id", "opp_name", "opp_abbrev", "opp_logo", "opp_points",
+        "my_games_used", "opp_games_used", "my_games_today", "games_cap",
+    )
+
+    def record_scoreboard(self, league_id: int, **fields: Any) -> None:
+        """Replace this league's cached head-to-head with the current one.
+
+        Last write wins, unlike :meth:`record_gp_snapshot`. A live score has
+        no historical value and a stale one is actively misleading, so there is
+        one row per league and it is the newest reading.
+
+        Unknown keys are refused rather than ignored: a typo'd field name that
+        silently did nothing would show up as a scoreboard that never updates
+        one of its numbers, which is a long way to debug from the symptom.
+        """
+        bad = set(fields) - set(self.SCOREBOARD_FIELDS)
+        if bad:
+            raise ValueError("not scoreboard columns: %s" % ", ".join(sorted(bad)))
+        cols = ["league_id", "updated_at"] + list(fields)
+        with self._lock, self.db:
+            self.db.execute(
+                "INSERT OR REPLACE INTO scoreboards (%s) VALUES (%s)" % (
+                    ", ".join(cols), ", ".join("?" * len(cols)),
+                ),
+                [int(league_id), _now()] + list(fields.values()),
+            )
+
+    def scoreboards(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self.db.execute("SELECT * FROM scoreboards").fetchall()
+        return [dict(r) for r in rows]
 
     # -- proposals ---------------------------------------------------------
 

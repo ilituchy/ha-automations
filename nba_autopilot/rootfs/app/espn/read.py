@@ -469,6 +469,26 @@ class EspnRead:
         Returns ``None`` when no row for this team exists in the period, which
         happens on a bye and during the preseason. A missing matchup is not an
         error and must not read as a 0-0 tie.
+
+        **Also returns the identity and games-used fields the status page
+        needs**, because they are all in this one response and fetching them
+        separately would be a second request for data already in hand:
+
+        * ``teams[].name`` and ``teams[].abbrev``. ``location`` and
+          ``nickname`` are null for every team on both live leagues, so there
+          is no "City Nickname" to assemble -- ``name`` is the full name and
+          ``abbrev`` the short one.
+        * ``teams[].logo``, present for all 18 teams across both leagues.
+          ``logoType`` says where it came from: ``VECTOR`` is an ESPN-hosted
+          SVG from a logo pack, ``CUSTOM_UPLOAD`` an ESPN-hosted upload, and
+          ``CUSTOM_VALID`` **an arbitrary URL a league member typed in** --
+          observed live pointing at imgflip, twitter and ifunny. The type is
+          not returned because the URL is the thing, but whoever renders it is
+          rendering a third party's address; see ``web._logo``.
+        * ``cumulativeScore.statBySlot`` on *both* sides of the row, which is
+          how the opponent's games-used costs nothing. Confirmed populated for
+          all ten rows of both leagues on 2026-10-23, pooled at the same
+          team-total pseudo-slot ``usage.starts_from_stat_by_slot`` reads.
         """
         team_id = self.cfg.team_id if team_id is None else int(team_id)
         raw = self._get(self._league_url, ("mMatchupScore", "mTeam", "mStatus"))
@@ -476,11 +496,20 @@ class EspnRead:
             matchup_period = _opt_int(
                 (raw.get("status") or {}).get("currentMatchupPeriod")
             )
-        names = {
-            int(t["id"]): str(t.get("name") or t.get("abbrev") or t["id"]).strip()
+        teams = {
+            int(t["id"]): t
             for t in raw.get("teams") or []
             if t.get("id") is not None
         }
+
+        def name_of(tid: Optional[int]) -> str:
+            t = teams.get(tid if tid is not None else -1) or {}
+            fallback = "" if tid is None else str(tid)
+            return str(t.get("name") or t.get("abbrev") or fallback).strip()
+
+        def field_of(tid: Optional[int], key: str) -> str:
+            t = teams.get(tid if tid is not None else -1) or {}
+            return str(t.get(key) or "").strip()
 
         def total(side: Mapping[str, Any]) -> float:
             pts = side.get("totalPoints")
@@ -488,6 +517,21 @@ class EspnRead:
                 return float(pts)
             by_period = side.get("pointsByScoringPeriod") or {}
             return sum(float(v or 0.0) for v in by_period.values())
+
+        def used(side: Optional[Mapping[str, Any]]) -> Optional[int]:
+            """The pooled games-played entry, or ``None`` if ESPN has none.
+
+            ``None`` rather than 0: an unscored row and a row saying nobody has
+            played yet look the same on a scoreboard but are not the same
+            thing, and the page says "not reported" for one of them.
+            """
+            by_slot = ((side or {}).get("cumulativeScore") or {}).get("statBySlot")
+            if not isinstance(by_slot, Mapping):
+                return None
+            entry = by_slot.get(str(ids.TEAM_TOTAL_LIMIT_SLOT)) or by_slot.get(
+                ids.TEAM_TOTAL_LIMIT_SLOT)
+            val = (entry or {}).get("value") if isinstance(entry, Mapping) else None
+            return None if val is None else int(float(val))
 
         for match in raw.get("schedule") or []:
             if matchup_period is not None and _opt_int(
@@ -511,8 +555,15 @@ class EspnRead:
                 my_team_id=team_id,
                 my_points=total(mine),
                 opp_team_id=opp_id,
-                opp_name=names.get(opp_id or -1, "" if opp_id is None else str(opp_id)),
+                opp_name=name_of(opp_id),
                 opp_points=0.0 if theirs is None else total(theirs),
+                my_name=name_of(team_id),
+                my_abbrev=field_of(team_id, "abbrev"),
+                opp_abbrev=field_of(opp_id, "abbrev"),
+                my_logo=field_of(team_id, "logo"),
+                opp_logo=field_of(opp_id, "logo"),
+                my_games_used=used(mine),
+                opp_games_used=used(theirs),
             )
         return None
 
