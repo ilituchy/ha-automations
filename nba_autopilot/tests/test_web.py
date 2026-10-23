@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 import unittest
@@ -928,6 +929,55 @@ class TestRenderUrls(unittest.TestCase):
         out = web.render(web.StatusPage(bot))
         for attr in ("href=/", "src=/", "action=/"):
             self.assertNotIn(attr, out, "absolute URL would escape the prefix")
+
+
+class TestCssScoping(unittest.TestCase):
+    """No bare class selector may match an element nested inside a component.
+
+    The page ships one stylesheet with no build step and no scoping, so a
+    generic rule is global by construction. ``.top`` was the masthead's and
+    also the header row of every run and every applied move; its ``margin:
+    0 0 26px`` landed under each player's name in the log, which is how this
+    was noticed. Renaming the masthead to ``.mast`` fixed it, and this test
+    is what stops the next generic name doing the same.
+    """
+
+    #: Class names used in more than one place in the markup, so a rule on
+    #: them alone is a rule on all of them.
+    SHARED = ("top", "name", "body", "note", "head", "meta", "slots")
+
+    #: Properties that place a box. A shared name may safely carry inherited
+    #: typography -- that is what a utility class like ``.meta`` is for, and
+    #: three dim 12px captions in three components is the intent, not a leak.
+    #: These are the ones that move things, and so the ones that leak.
+    LAYOUT = ("margin", "padding", "display", "position", "gap", "flex",
+              "width", "height", "justify-content", "align-items", "float",
+              "grid")
+
+    def test_shared_class_names_carry_no_unscoped_layout(self):
+        for cls in self.SHARED:
+            # A bare ".cls {" at the start of a selector -- as opposed to
+            # ".parent .cls", which is scoped and therefore fine.
+            for m in re.finditer(r"(?m)^\.%s\s*\{([^}]*)\}" % cls, web.CSS):
+                for prop in self.LAYOUT:
+                    self.assertNotRegex(
+                        m.group(1), r"(?m)(^|[;\s])%s\s*:" % prop,
+                        "'.%s' sets '%s' unscoped; it appears in more than one "
+                        "component, so that box will be placed in all of them"
+                        % (cls, prop))
+
+    def test_every_class_in_the_markup_is_one_the_stylesheet_knows(self):
+        # Catches the other half of a rename: markup updated, CSS not, or the
+        # reverse. Only flags classes the stylesheet never mentions at all.
+        bot = FakeBot(FakeStore(pending=[_proposal()], boards=[_board()]))
+        out = web.render(web.StatusPage(bot))
+        used = set()
+        for attr in re.findall(r"class=(?:'([^']*)'|\"([^\"]*)\"|([^\s>]+))", out):
+            used.update((attr[0] or attr[1] or attr[2]).split())
+        for cls in sorted(used):
+            self.assertIn(".%s" % cls, web.CSS,
+                          "markup uses class '%s' that the stylesheet never "
+                          "mentions -- a rename that missed a side" % cls)
 
 
 class TestStatusPage(unittest.TestCase):

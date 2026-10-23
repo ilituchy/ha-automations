@@ -413,14 +413,18 @@ h1 {
 /* The masthead: title and state on the left, this week's scoreboards in the
    space to the right of them, which was empty. On a phone the row wraps and
    the boards sit under the chips, which is the right order -- "is it live and
-   does it want something" before "how am I doing". */
-.top {
+   does it want something" before "how am I doing".
+
+   Named ``mast`` and not ``top``: ``top`` is also the header row of a run and
+   of an applied move, and an unscoped ``.top`` rule reaches both. It did, and
+   the 26px below was landing under every player's name in the log. */
+.mast {
   display: flex; flex-wrap: wrap; gap: 18px 24px;
   align-items: flex-start; justify-content: space-between;
   margin: 0 0 26px;
 }
-.top .masthead { flex: 1 1 260px; }
-.top .chips { margin: 0; }
+.mast .masthead { flex: 1 1 260px; }
+.mast .chips { margin: 0; }
 .boards { display: flex; flex-wrap: wrap; gap: 10px; }
 .board {
   flex: 1 1 232px; min-width: 232px; max-width: 320px;
@@ -653,7 +657,7 @@ button:active { transform: translateY(1px); }
 .runline { padding: 14px 16px 0; min-width: 0; }
 .runline .top {
   display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
-  margin-bottom: 3px;
+  justify-content: space-between; margin-bottom: 3px;
 }
 .runline .name { font-size: 15px; font-weight: 600; }
 .runbody { padding: 6px 16px 16px; }
@@ -681,8 +685,11 @@ button:active { transform: translateY(1px); }
 .did li + li { border-top: 1px solid var(--line); }
 .did .who { font-size: 15px; font-weight: 600; }
 .did .body { flex: 1; min-width: 0; }
+/* Name left, slot change right. Both of these used to come from the unscoped
+   ``.top`` above; spelling them out here is what lets that rule be scoped. */
 .did .top {
   display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap;
+  justify-content: space-between;
 }
 .did .slots {
   display: flex; align-items: center; gap: 6px; margin-top: 1px;
@@ -1145,7 +1152,7 @@ def render(page: StatusPage, *, user: str = "",
         "<meta name=referrer content=no-referrer>"
         "<title>NBA Autopilot</title><style>%s</style></head><body>"
         "<main class=wrap>" % CSS,
-        "<div class=top><div class=masthead>",
+        "<div class=mast><div class=masthead>",
         "<h1>NBA Autopilot</h1>",
     ]
 
