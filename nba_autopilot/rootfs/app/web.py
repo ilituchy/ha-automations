@@ -352,6 +352,19 @@ h2 .count {
   overflow-wrap: anywhere;
 }
 .leg.out .who { color: var(--secondary-text-color, var(--dim)); }
+/* A linked name keeps the colour of the name it replaced. Twenty blue names
+   down a column reads as a navigation list, and the thing being looked at is
+   the move, not the link. The underline only arrives on hover -- enough to
+   answer "is this clickable" at the moment the question is asked. */
+a.who {
+  color: inherit; text-decoration: none;
+  text-underline-offset: 2px; text-decoration-thickness: 1.5px;
+}
+a.who:hover, a.who:focus-visible { text-decoration: underline; }
+a.who:focus-visible {
+  outline: 2px solid var(--primary-color, #2b7de9);
+  outline-offset: 3px; border-radius: 3px;
+}
 .tag {
   font-size: 10px; font-weight: 700; text-transform: uppercase;
   letter-spacing: .06em; padding: 3px 7px; border-radius: 6px;
@@ -537,6 +550,34 @@ def _face(player_id: Any, extra: str = "", badge: str = "") -> str:
     return "<span class='face %s'%s>%s</span>" % (extra, style, badge)
 
 
+#: ESPN's own player page. The numeric id is the whole path -- ESPN redirects
+#: to the slugged URL itself -- so no name of ours has to be made URL-safe.
+PLAYER_URL = "https://www.espn.com/nba/player/_/id/%d"
+
+
+def _who(player_id: Any, name: Any, cls: str = "who") -> str:
+    """A player's name, linked to his ESPN page when we know his id.
+
+    Every name on this page names a real player the reader may want to read up
+    on, and the id to do it with is already in hand at both call sites. New tab,
+    because the page it leaves is the one with the Approve button on it.
+
+    ``int()`` again rather than ``_e()``: the id is interpolated into a URL, and
+    the only safe thing to put in a URL is a number. An id we cannot parse --
+    an old row, a name with no id behind it -- renders the bare name rather
+    than a link to nowhere.
+    """
+    label = _e(name)
+    try:
+        href = PLAYER_URL % int(player_id)
+    except (TypeError, ValueError):
+        return "<span class=%s>%s</span>" % (cls, label)
+    # noopener as well as noreferrer: the new tab must not keep a handle on
+    # the authenticated frontend it was opened from.
+    return ("<a class='%s link' href='%s' target=_blank "
+            "rel='noopener noreferrer'>%s</a>" % (cls, href, label))
+
+
 #: ESPN's slot abbreviations, as read by someone who did not write them. Only
 #: the ones that are not already the word people use get an entry.
 SLOT_WORDS = {"BE": "Bench"}
@@ -563,8 +604,9 @@ def _swap(payload: Mapping[str, Any], *, small: bool = False) -> str:
             tags = " <span class='tag hold'>waiver claim</span>"
         badge = "<span class='pip %s'>%s</span>" % (
             side, "+" if verb == "ADD" else "−")
-        out.append("<div class='leg %s'>%s<span class=who>%s</span>%s</div>" % (
-            side, _face(pid, "sm" if small else "", badge), _e(name), tags,
+        out.append("<div class='leg %s'>%s%s%s</div>" % (
+            side, _face(pid, "sm" if small else "", badge),
+            _who(pid, name), tags,
         ))
     out.append("</div>")
     return "".join(out)
@@ -577,11 +619,12 @@ def _applied(moves: List[Mapping[str, Any]]) -> str:
         reason = _move_reason(m)
         out.append(
             "<li>%s<div class=body><div class=top>"
-            "<span class=who>%s</span><span class=slots>%s"
+            "%s<span class=slots>%s"
             "<span class=arrow>&rarr;</span><span class=to>%s</span>"
             "</span></div>%s</div></li>" % (
                 _face(m.get("player_id")),
-                _e(m.get("name") or "player %s" % m.get("player_id")),
+                _who(m.get("player_id"),
+                     m.get("name") or "player %s" % m.get("player_id")),
                 _e(_slot(m.get("from"))), _e(_slot(m.get("to"))),
                 ("<div class=note>%s</div>" % _e(reason)) if reason else "",
             )

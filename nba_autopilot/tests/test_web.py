@@ -359,6 +359,68 @@ class TestAppliedMoves(unittest.TestCase):
         self.assertNotIn("<img src=x", out)
 
 
+class TestPlayerLinks(unittest.TestCase):
+    """Every name is a player the owner may want to go and read about.
+
+    The id is already in hand wherever a name is rendered -- the headshot uses
+    it -- so the name carries a link to ESPN's own page for him. The id is
+    interpolated into a URL, so these tests care most about what cannot get
+    into it.
+    """
+
+    def test_a_name_links_to_the_espn_player_page(self):
+        out = web._who(3136195, "Karl-Anthony Towns")
+        self.assertIn("href='https://www.espn.com/nba/player/_/id/3136195'",
+                      out)
+        self.assertIn("Karl-Anthony Towns", out)
+
+    def test_the_link_opens_in_a_new_tab_without_a_handle_on_this_one(self):
+        out = web._who(1, "A")
+        self.assertIn("target=_blank", out)
+        self.assertIn("noopener", out)
+        self.assertIn("noreferrer", out)
+
+    def test_an_unusable_id_renders_the_name_without_a_link(self):
+        for bad in (None, "", "not-a-number", {}):
+            out = web._who(bad, "Nameless Man")
+            self.assertIn("Nameless Man", out)
+            self.assertNotIn("<a", out)
+
+    def test_an_id_cannot_smuggle_anything_into_the_url(self):
+        out = web._who("1' onmouseover='x", "A")
+        self.assertNotIn("onmouseover", out)
+        self.assertNotIn("<a", out)
+
+    def test_the_name_is_still_escaped_inside_the_link(self):
+        self.assertNotIn("<img src=x", web._who(1, "<img src=x>"))
+
+    def test_both_legs_of_a_swap_are_linked(self):
+        out = web._swap({"add": 10, "add_name": "In Man",
+                         "drop": 20, "drop_name": "Out Man", "waiver": False})
+        self.assertIn("/id/10'", out)
+        self.assertIn("/id/20'", out)
+
+    def test_a_lineup_move_links_the_player_it_moved(self):
+        bot = FakeBot(FakeStore(rows=_run_rows([{
+            "kind": "LINEUP", "state": "DONE",
+            "rationale": "Karl-Anthony Towns UTIL->BE",
+            "payload": LINEUP_PAYLOAD,
+        }])))
+        out = web.render(web.StatusPage(bot))
+        self.assertIn("/nba/player/_/id/3136195", out)
+
+    def test_a_recovered_old_move_has_no_id_and_so_no_link(self):
+        """Rows journaled before ``moves`` existed only parse back a name."""
+        bot = FakeBot(FakeStore(rows=_run_rows([{
+            "kind": "LINEUP", "state": "DONE",
+            "rationale": "Anthony Black BE->UTIL",
+            "payload": "{}",
+        }])))
+        out = web.render(web.StatusPage(bot))
+        self.assertIn("Anthony Black", out)
+        self.assertNotIn("/nba/player/_/id/", out)
+
+
 class TestLogsDisclosure(unittest.TestCase):
     """The working notes are for when something looks wrong, not for always."""
 
