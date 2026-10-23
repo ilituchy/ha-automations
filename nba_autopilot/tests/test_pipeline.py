@@ -32,6 +32,8 @@ import pipeline  # noqa: E402
 import usage as usage_mod  # noqa: E402
 from espn import ids  # noqa: E402
 from models import LeagueSettings, Projection, RosterEntry, StatLimit  # noqa: E402
+from solve import projections as projections_mod  # noqa: E402
+from solve import value as value_mod  # noqa: E402
 from solve.calendar import (  # noqa: E402
     SeasonCalendar,
     game_days_for,
@@ -662,6 +664,141 @@ class TestValidateTarget(unittest.TestCase):
             {0: ids.BENCH_SLOT, 1: ids.BENCH_SLOT},
         )
         self.assertTrue(any("benches the entire roster" in p for p in problems))
+
+
+class TestFormInTheRationale(unittest.TestCase):
+    """The rationale states recent form, and states it when it counted for zero.
+
+    Written after a real question: Kessler scored 51 one night and was benched
+    the next day for Turner, who had scored 24. The lineup was right -- ESPN
+    projects Turner far higher and one game is not evidence -- but the note on
+    the page said only ``value 19.9 vs lambda 0.0``, so there was no way to see
+    that the 51 had been considered and discounted rather than never read.
+    These tests are about that sentence existing, not about the weighting.
+    """
+
+    def _model(self):
+        # One point per point, so the priced form value is the stat line and
+        # the assertions below read as the numbers a human would recognise.
+        return value_mod.PointsValue(coefficients={ids.PTS: 1.0})
+
+    def _proj(self, pid=1, points=20.0, form=None, games=0.0, weight=0.0):
+        return Projection(
+            player_id=pid,
+            mean={ids.PTS: points},
+            var={ids.PTS: points},
+            p_play=1.0,
+            minutes=30.0,
+            source="test",
+            as_of=datetime(2026, 10, 23, tzinfo=timezone.utc),
+            form_mean=None if form is None else {ids.PTS: form},
+            form_games=games,
+            form_weight=weight,
+        )
+
+    def test_uncounted_form_is_still_reported(self):
+        bit = pipeline._form_bit(
+            self._proj(points=19.9, form=51.5, games=1.0), self._model())
+        self.assertIn("51.5", bit)
+        self.assertIn("1 game,", bit)       # singular, and not "1 games"
+        self.assertIn("too few to count", bit)
+        self.assertIn("needs 10", bit)
+
+    def test_counted_form_reports_its_weight(self):
+        bit = pipeline._form_bit(
+            self._proj(form=30.0, games=24.0, weight=0.2927), self._model())
+        self.assertIn("30.0 from 24 games", bit)
+        self.assertIn("29% of the mean", bit)
+        self.assertNotIn("too few", bit)
+
+    def test_no_recent_split_says_nothing(self):
+        # A player ESPN has no last-15 for gets no clause at all, rather than
+        # a zero that reads as "he has been scoring nothing".
+        self.assertIsNone(pipeline._form_bit(self._proj(), self._model()))
+
+    def test_form_is_priced_through_the_league_scoring(self):
+        # Not a raw stat sum: a league that pays 2.0 a point must see double.
+        model = value_mod.PointsValue(coefficients={ids.PTS: 2.0})
+        bit = pipeline._form_bit(
+            self._proj(form=25.0, games=1.0), model)
+        self.assertIn("50.0", bit)
+
+    def test_the_clause_reaches_the_move_rationale(self):
+        roster = [player(1, slot=ids.BENCH_SLOT), player(2)]
+        moves = pipeline._moves_for(
+            roster,
+            target={1: 11, 2: ids.BENCH_SLOT},
+            values={1: 19.9, 2: 28.4},
+            projections={1: self._proj(1, 19.9, form=51.5, games=1.0)},
+            plays_today={1: True, 2: True},
+            lam=0.0,
+            availability=None,
+            model=self._model(),
+        )
+        moved = {m.player_id: m.rationale for m in moves}
+        self.assertIn("last-15 51.5 from 1 game", moved[1])
+        # Player 2 has no projection in the map; the run must still produce his
+        # move rather than dropping it or raising.
+        self.assertIn(2, moved)
+
+    def test_no_model_omits_the_clause_rather_than_raising(self):
+        roster = [player(1, slot=ids.BENCH_SLOT)]
+        moves = pipeline._moves_for(
+            roster, target={1: 11}, values={1: 19.9},
+            projections={1: self._proj(1, 19.9, form=51.5, games=1.0)},
+            plays_today={1: True}, lam=0.0, availability=None,
+        )
+        self.assertNotIn("last-15", moves[0].rationale)
+
+
+class TestRecentFormReading(unittest.TestCase):
+    """``recent_form`` reads the split; ``per_game_mean`` decides whether to use
+    it. Split apart so the page can report what was discounted."""
+
+    def splits(self, *, projected=20.0, recent=None, games=0.0):
+        out = {ids.SPLIT_SEASON_PROJECTED: {ids.PTS: projected}}
+        if recent is not None:
+            out[ids.SPLIT_LAST_15] = {ids.PTS: recent}
+        out[ids.SPLIT_SEASON_TOTAL] = {ids.GP_STAT: games}
+        return out
+
+    def test_form_is_read_even_when_it_will_not_be_used(self):
+        form, games, w = projections_mod.recent_form(
+            self.splits(recent=51.0, games=1.0))
+        self.assertEqual(form, {ids.PTS: 51.0})
+        self.assertEqual(games, 1.0)
+        self.assertEqual(w, 0.0)
+
+    def test_the_mean_is_untouched_below_the_gate(self):
+        mean = projections_mod.per_game_mean(
+            self.splits(projected=20.0, recent=51.0, games=1.0))
+        self.assertEqual(mean[ids.PTS], 20.0)
+
+    def test_the_mean_blends_above_the_gate(self):
+        # 12 games -> w = 12/82; the blend is linear in w.
+        mean = projections_mod.per_game_mean(
+            self.splits(projected=20.0, recent=50.0, games=12.0))
+        w = 12.0 / 82.0
+        self.assertAlmostEqual(mean[ids.PTS], 20.0 * (1 - w) + 50.0 * w)
+
+    def test_weight_is_capped_at_half(self):
+        self.assertEqual(projections_mod.form_weight(82.0, True), 0.5)
+        self.assertEqual(projections_mod.form_weight(70.0, True), 0.5)
+
+    def test_absent_split_is_none_not_empty(self):
+        # None and {} mean different things downstream: "no data" versus "he
+        # scored nothing". _form_bit keys off the difference.
+        form, _, _ = projections_mod.recent_form(self.splits(games=4.0))
+        self.assertIsNone(form)
+
+    def test_gp_never_leaks_into_the_form_mean(self):
+        # GP is a season total sitting in a dict of per-game averages. It is
+        # excluded from the projection mean and must be excluded here too, or
+        # a league that scores games-played would price 82 of them.
+        raw = self.splits(recent=51.0, games=12.0)
+        raw[ids.SPLIT_LAST_15][ids.GP_STAT] = 12.0
+        form, _, _ = projections_mod.recent_form(raw)
+        self.assertNotIn(ids.GP_STAT, form)
 
 
 if __name__ == "__main__":

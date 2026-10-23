@@ -188,6 +188,40 @@ All notable changes to this app are documented here. The format follows
 
 ### Added
 
+- **Every lineup move now says what the player has actually been scoring, and
+  how much of it counted.** Prompted by a fair question: Walker Kessler scored
+  51 on 2026-10-22 and was benched the next morning for Myles Turner, who had
+  scored 24. The move was right — ESPN projects Turner at 28.4 against
+  Kessler's 19.9 on this league's own scoring, and one game is not evidence —
+  but the note on the page said only `value 19.9 vs lambda 0.0`, which gives
+  the reader no way to tell a number that was weighed from one that was never
+  read. It now says:
+
+  ```
+  value 19.9 vs lambda 0.0; last-15 51.5 from 1 game, too few to count
+  (needs 10); p_play 0.94: ACTIVE (espn), ESPN projects 75/82 games
+  ```
+
+  The form figure is priced through the same value model as the projection, so
+  the two are in the same units and comparable; a raw sum of ESPN's stat line
+  would invite exactly the wrong comparison. It is stated *especially* when the
+  weight is zero, which is the entire point — "too few to count" is a
+  defensible answer, silence is not.
+
+  No change to how lineups are chosen. `MIN_GAMES_FOR_FORM` stays at 10 and the
+  blend weight stays `games/82` capped at half. Worth recording why, since the
+  obvious reaction to the above is to lower the gate: with the gate removed
+  entirely, one game of Kessler at 51.5 moves him from 19.9 to 20.3 against
+  Turner's 28.4, so it would not have changed the lineup either. It takes about
+  19 games of that split before form flips the call, which is roughly the right
+  amount of evidence to ask for.
+
+  `Projection` gained `form_mean` / `form_games` / `form_weight`, carried for
+  the rationale and read by nothing in the optimizer, which still sees `mean`
+  and nothing else. `recent_form` and `form_weight` were split out of
+  `per_game_mean` so the gate has one definition and the page can report what
+  was discounted without recomputing it.
+
 - **This week's score sits at the top of the status page.** *"i need to know
   the current score, how many players have played, and how many will have been
   played after today."* One panel per league in the space beside the title,

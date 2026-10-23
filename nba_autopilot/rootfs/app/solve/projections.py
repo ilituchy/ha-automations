@@ -60,7 +60,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Iterable, Mapping, Optional, Sequence
+from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from espn import ids
 from models import P_PLAY_PRIOR, Projection, RosterEntry
@@ -76,6 +76,8 @@ __all__ = [
     "NBA_SEASON_GAMES",
     "AvailabilityNote",
     "per_game_mean",
+    "recent_form",
+    "form_weight",
     "variance_from_mean",
     "p_play_for",
     "build_projections",
@@ -140,6 +142,41 @@ class AvailabilityNote:
         return "p_play %.2f: %s" % (self.p_play, ", ".join(bits))
 
 
+def form_weight(games: float, has_recent: bool) -> float:
+    """How much of the last-15 split goes into the mean. Zero means none.
+
+    Split out of :func:`per_game_mean` so that the rationale can state the
+    weight without recomputing it, and so the gate has one definition. The
+    curve is unchanged: nothing below :data:`MIN_GAMES_FOR_FORM`, then
+    ``games/82`` capped at half.
+    """
+    if not has_recent or games < MIN_GAMES_FOR_FORM:
+        return 0.0
+    # Capped so form never fully displaces the projection: a hot fortnight is
+    # partly real and partly a small sample, and the projection already embeds
+    # the prior.
+    return min(games / float(NBA_SEASON_GAMES), 0.5)
+
+
+def recent_form(
+    splits: Mapping[str, Mapping[StatId, float]],
+) -> Tuple[Optional[Dict[StatId, float]], float, float]:
+    """``(last-15 per-game mean, season games played, blend weight)``.
+
+    The mean is returned whether or not it is used, because the page shows what
+    the model is *discounting* as well as what it acted on. A reader who has
+    just watched a player go for 51 is owed the number and the reason it did
+    not move the lineup, rather than a rationale that silently omits it.
+    """
+    recent = {
+        int(k): float(v)
+        for k, v in (splits.get(ids.SPLIT_LAST_15) or {}).items()
+        if int(k) not in _EXCLUDED
+    }
+    games = float((splits.get(ids.SPLIT_SEASON_TOTAL) or {}).get(ids.GP_STAT, 0.0))
+    return (recent or None), games, form_weight(games, bool(recent))
+
+
 def per_game_mean(
     splits: Mapping[str, Mapping[StatId, float]],
 ) -> Optional[Dict[StatId, float]]:
@@ -166,13 +203,8 @@ def per_game_mean(
     if not mean:
         return None
 
-    recent = splits.get(ids.SPLIT_LAST_15) or {}
-    games = float((splits.get(ids.SPLIT_SEASON_TOTAL) or {}).get(ids.GP_STAT, 0.0))
-    if recent and games >= MIN_GAMES_FOR_FORM:
-        # Weight by how much history exists, capped so form never fully
-        # displaces the projection: a hot fortnight is partly real and partly
-        # a small sample, and the projection already embeds the prior.
-        w = min(games / float(NBA_SEASON_GAMES), 0.5)
+    recent, games, w = recent_form(splits)
+    if recent and w > 0.0:
         for stat in list(mean):
             if stat in recent:
                 mean[stat] = (1.0 - w) * mean[stat] + w * float(recent[stat])
@@ -275,6 +307,8 @@ def build_projections(
             by_split.get(ids.SPLIT_SEASON_PROJECTED) or {}
         ).get(ids.GP_STAT)
 
+        form, form_games, form_w = recent_form(by_split)
+
         override = (statuses or {}).get(entry.player_id)
         note = p_play_for(
             entry,
@@ -297,6 +331,9 @@ def build_projections(
             # separate field. Claiming otherwise here is the double-discount bug
             # that `Projection.p_play_applied` exists to prevent.
             p_play_applied=False,
+            form_mean=form,
+            form_games=form_games,
+            form_weight=form_w,
         )
 
     if skipped:

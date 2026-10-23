@@ -42,8 +42,9 @@ Three things this module deliberately does **not** do:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import (
+    Any,
     Dict,
     Iterable,
     List,
@@ -58,7 +59,11 @@ from espn import ids
 from models import LeagueSettings, Move, PlayerId, Projection, RosterEntry, SlotId
 from solve import assign, budget as budget_mod, value as value_mod
 from solve.calendar import SeasonCalendar, team_games_in
-from solve.projections import AvailabilityNote
+from solve.projections import (
+    MIN_GAMES_FOR_FORM,
+    AvailabilityNote,
+    variance_from_mean,
+)
 from usage import GamesUsed
 
 log = logging.getLogger(__name__)
@@ -433,7 +438,8 @@ def plan_lineup(
         )
 
     moves = _moves_for(
-        roster, target, values, projections, plays_today, lam, availability
+        roster, target, values, projections, plays_today, lam, availability,
+        model,
     )
     return LineupPlan(
         target=target,
@@ -555,6 +561,33 @@ def validate_target(
     return problems
 
 
+def _form_bit(proj: Projection, model: Any) -> Optional[str]:
+    """What the player has actually scored lately, and its weight. Or ``None``.
+
+    Priced through the same value model as the projection, so the two numbers
+    in the rationale are comparable. A raw sum of ESPN's stat line would be in
+    different units from ``value`` and invite exactly the wrong comparison.
+
+    Stated even when the weight is zero, which is the point of the line. "Too
+    few to count" is a defensible answer to *why is this man benched the day
+    after 51 points*; saying nothing is not, and saying nothing is what the
+    rationale did before.
+    """
+    form = proj.form_mean
+    if not form:
+        return None
+    priced = model.conditional_value(
+        replace(proj, mean=form, var=variance_from_mean(form))
+    )
+    games = proj.form_games
+    plural = "" if games == 1 else "s"
+    if proj.form_weight > 0.0:
+        return "last-15 %.1f from %.0f game%s, %.0f%% of the mean" % (
+            priced, games, plural, proj.form_weight * 100.0)
+    return "last-15 %.1f from %.0f game%s, too few to count (needs %d)" % (
+        priced, games, plural, MIN_GAMES_FOR_FORM)
+
+
 def _moves_for(
     roster: Sequence[RosterEntry],
     target: Mapping[PlayerId, SlotId],
@@ -563,11 +596,17 @@ def _moves_for(
     plays_today: Mapping[PlayerId, bool],
     lam: float,
     availability: Optional[Mapping[PlayerId, AvailabilityNote]],
+    model: Any = None,
 ) -> Tuple[Move, ...]:
     """One :class:`Move` per actual change, with the numbers behind it.
 
     The rationale is assembled from quantities already computed -- value,
-    shadow price, availability -- and never from prose generated elsewhere.
+    shadow price, availability, recent form -- and never from prose generated
+    elsewhere.
+
+    ``model`` defaults to ``None`` so that a caller who only wants the slot
+    changes is not forced to build a value model; the form clause is simply
+    omitted, as it is for a player ESPN has no recent split for.
     """
     out: List[Move] = []
     for e in roster:
@@ -581,6 +620,11 @@ def _moves_for(
             bits.append("value %.1f vs lambda %.1f" % (v, lam))
         elif not plays_today.get(e.player_id):
             bits.append("no game today")
+        proj = projections.get(e.player_id)
+        if proj is not None and model is not None:
+            form = _form_bit(proj, model)
+            if form:
+                bits.append(form)
         note = (availability or {}).get(e.player_id)
         if note is not None:
             bits.append(note.describe())

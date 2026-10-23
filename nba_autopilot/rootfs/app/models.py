@@ -63,6 +63,17 @@ class Projection:
     as_of: datetime
     p_play_applied: bool = False
 
+    #: What the player has actually done lately, and how much of it is in
+    #: ``mean``. Carried for the rationale, not for the optimizer -- which
+    #: reads ``mean`` and nothing else. A reader who has just watched someone
+    #: score 51 needs to see that number *and* the weight it was given,
+    #: including when the weight is zero. A ``form_weight`` of 0.0 alongside a
+    #: populated ``form_mean`` is the normal early-season state rather than a
+    #: bug; see ``solve/projections.MIN_GAMES_FOR_FORM``.
+    form_mean: Optional[Mapping[StatId, float]] = None
+    form_games: float = 0.0
+    form_weight: float = 0.0
+
     def expected(self) -> Dict[StatId, float]:
         """Availability-weighted mean. Safe to call regardless of provenance."""
         if self.p_play_applied:
