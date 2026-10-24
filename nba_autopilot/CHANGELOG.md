@@ -282,6 +282,11 @@ All notable changes to this app are documented here. The format follows
   and the tip-off were already in the payload `pro_team_scoring_periods`
   parses, and that is where "@DAL 5:00 pm" comes from.
 
+  That payload now has one fetch between its three parsers
+  (`EspnRead.pro_schedule_raw`). Adding a third reader of a several-megabyte,
+  season-static response made it obvious that each of them had been fetching
+  it: the first page load printed three identical request lines in the log.
+
   Saving is behind the same owner check as the approve buttons, which now say
   so in words that are true of both: other members of the household cannot
   bench anybody.

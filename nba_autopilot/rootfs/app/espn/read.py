@@ -149,6 +149,29 @@ class EspnRead:
                                 % r.headers.get("location", "?"))
         return r.json()
 
+    def pro_schedule_raw(self) -> Mapping[str, Any]:
+        """The season's ``proTeamSchedules_wl`` payload, fetched once.
+
+        Three methods parse this and each used to fetch it: the calendar wants
+        one date per scoring period, the budget wants a game count per team per
+        period, and the status page wants the games themselves. It is several
+        megabytes and entirely season-static, so three requests for it was two
+        requests of pure waste on every process -- which showed up as three
+        identical lines in the log the first time the status page was opened.
+
+        Cached for the life of the process, like :meth:`league`. A postponed
+        game would not be picked up until a restart; that is already true of
+        the calendar built from it, and a stale tip-off time is a cosmetic
+        error where a re-fetch on every page load would not be.
+        """
+        key = "season:proTeamSchedules_wl"
+        if key not in self._cache:
+            url = "%s/apis/v3/games/%s/seasons/%d" % (
+                ids.READ_HOST, ids.GAME, self.cfg.season,
+            )
+            self._cache[key] = self._get(url, ("proTeamSchedules_wl",))
+        return self._cache[key]
+
     def league(self, *views: str, refresh: bool = False) -> Mapping[str, Any]:
         key = "|".join(sorted(views))
         if refresh or key not in self._cache:
@@ -684,12 +707,7 @@ class EspnRead:
         ESPN's team list -- a nondeterministic calendar, which is a bad thing
         for something that decides which day a lineup is written to.
         """
-        url = "%s/apis/v3/games/%s/seasons/%d" % (
-            ids.READ_HOST,
-            ids.GAME,
-            self.cfg.season,
-        )
-        raw = self._get(url, ("proTeamSchedules_wl",))
+        raw = self.pro_schedule_raw()
         seen: Dict[int, Set[date]] = {}
         for team in (raw.get("settings") or {}).get("proTeams") or []:
             for period, games in ((team.get("proGamesByScoringPeriod")) or {}).items():
@@ -733,12 +751,7 @@ class EspnRead:
         Dates are now only produced by :meth:`scoring_period_dates`, in one
         place, in one timezone.
         """
-        url = "%s/apis/v3/games/%s/seasons/%d" % (
-            ids.READ_HOST,
-            ids.GAME,
-            self.cfg.season,
-        )
-        raw = self._get(url, ("proTeamSchedules_wl",))
+        raw = self.pro_schedule_raw()
         out: Dict[int, Dict[int, int]] = {}
         for team in (raw.get("settings") or {}).get("proTeams") or []:
             tid = int(team.get("id"))
@@ -753,12 +766,11 @@ class EspnRead:
     def pro_games_by_period(self) -> Dict[int, Dict[ProTeamId, ProGame]]:
         """``scoringPeriod -> {proTeamId: that team's game}``, for the season.
 
-        The same ``proTeamSchedules_wl`` payload
-        :meth:`pro_team_scoring_periods` counts, kept whole instead of reduced
-        to a count. The page needs the other three fields on each game --
-        who, which side, and when -- and they are already in hand; asking for
-        them separately would be a second multi-megabyte request for data
-        already parsed.
+        The same payload :meth:`pro_team_scoring_periods` counts, kept whole
+        instead of reduced to a count. The page needs the other three fields
+        on each game -- who, which side, and when -- and they are already in
+        the response; both read it through :meth:`pro_schedule_raw`, so this
+        is a second parse and not a second request.
 
         Each game appears twice in the source, once under each team, so it is
         indexed under both and no pairing-up is needed. A team playing twice in
@@ -766,10 +778,7 @@ class EspnRead:
         in the NBA, where a scoring period is a calendar day, and the
         alternative is a list per team that every caller would have to unwrap.
         """
-        url = "%s/apis/v3/games/%s/seasons/%d" % (
-            ids.READ_HOST, ids.GAME, self.cfg.season,
-        )
-        raw = self._get(url, ("proTeamSchedules_wl",))
+        raw = self.pro_schedule_raw()
         out: Dict[int, Dict[ProTeamId, ProGame]] = {}
         for team in (raw.get("settings") or {}).get("proTeams") or []:
             tid = _opt_int(team.get("id"))

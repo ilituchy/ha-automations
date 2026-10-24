@@ -1048,3 +1048,44 @@ class TestProGamesWire(unittest.TestCase):
         game = EspnRead(cfg, _ScheduleClient(teams)).pro_games_by_period()[2][3]
         self.assertIsNone(game.tipoff_utc)
         self.assertTrue(game.time_tbd)
+
+
+class _CountingScheduleClient(_ScheduleClient):
+    def __init__(self, pro_teams):
+        super().__init__(pro_teams)
+        self.gets = 0
+
+    def get(self, url, params=None, headers=None):
+        self.gets += 1
+        return super().get(url, params, headers)
+
+
+class TestProSchedulePayloadIsFetchedOnce(unittest.TestCase):
+    """Three parses of one response, not three responses.
+
+    It is several megabytes and season-static, and three methods want
+    different things out of it: a date per period, a game count per team, and
+    the games themselves. Fetching it per caller showed up as three identical
+    lines in the log the first time the status page was opened.
+    """
+
+    def _reader(self):
+        teams = [{"id": 3, "abbrev": "X", "proGamesByScoringPeriod": {"2": [
+            {"awayProTeamId": 11, "homeProTeamId": 3, "date": 1792627200000},
+        ]}}]
+        cfg = EspnConfig(league_id=1, team_id=7, espn_s2="s2", swid="{X}",
+                         season=2027)
+        return EspnRead(cfg, _CountingScheduleClient(teams))
+
+    def test_all_three_parsers_share_one_request(self):
+        r = self._reader()
+        r.scoring_period_dates()
+        r.pro_team_scoring_periods()
+        r.pro_games_by_period()
+        self.assertEqual(r.http.gets, 1)
+
+    def test_each_parser_still_answers_its_own_question(self):
+        r = self._reader()
+        self.assertEqual(r.pro_team_scoring_periods()[3], {2: 1})
+        self.assertEqual(r.pro_games_by_period()[2][3].opponent_id, 11)
+        self.assertIn(2, r.scoring_period_dates())
