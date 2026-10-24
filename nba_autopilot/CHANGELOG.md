@@ -228,6 +228,65 @@ All notable changes to this app are documented here. The format follows
 
 ### Added
 
+- **A matchup sheet behind every scoreboard panel, and a Team tab that edits
+  the lineup.** *"when we click on one of the matchup cards it should take us
+  to this... second is a tab on the top called Team that just shows you your
+  team... this is where you can drag and drop players and manually update and
+  save"*.
+
+  The panel on the overview answers *what is the score* and raises the
+  question it cannot settle: *who is still to play*. Tapping it now opens the
+  matchup — both lineups paired slot by slot, each player's fixture, tip-off
+  and points for the day, and the day's subtotal for each side. Arrows either
+  side of the date walk the days of the matchup week, and no further: the
+  score in the header is the *week's*, and an arrow that stepped outside it
+  would put a day's rows under a total that excludes them.
+
+  The Team tab is the first place in this app where a person moves a player
+  rather than the optimizer. Drag by the handle to swap two players; or tap
+  the slot pill, which is a `<select>`, and pick. The pill is the control and
+  the drag is a gesture that writes to it — so the page works with no script
+  at all, under a keyboard, and under a screen reader, and what was dragged
+  and what gets posted cannot disagree. Pointer events rather than HTML5
+  drag-and-drop, because `dragstart` does not fire for touch and this page is
+  read on a phone.
+
+  Nothing is validated twice. `EspnWrite.set_lineup` already refuses a partial
+  map, a phantom player, an ineligible slot, an over-full slot, a locked
+  player being moved and a roster that would change size, and it is the path
+  every scheduled lineup goes through; the page posts a target and reports
+  what came back. A refusal is shown in ESPN's own words above a roster
+  re-read from ESPN — not the form that was posted, because after a refusal
+  those are different and the useful one is what ESPN has.
+
+  Two findings from probing a live league on 2026-10-24, both of which the
+  obvious implementation gets wrong:
+
+  * `scoringPeriodId` on `mRoster` really does rewind the lineup — the same
+    request for period 4 and period 5 returned different `lineupSlotId`s for
+    the same players, and the played day came back with everyone locked. That
+    is what makes the day arrows show the lineup that was actually fielded.
+  * **a day's points are not `playerPoolEntry.appliedStatTotal`.** That field
+    is populated for a period with no games played, carrying the *previous*
+    day's number: on the probe it claimed 29.5 for a player who had not
+    tipped off. The real figure is the `statSourceId: 0` /
+    `statSplitTypeId: 5` row for that exact period, and **its absence is the
+    answer** on a day not yet played. So `DayEntry.points` is `Optional`, a
+    missing row renders as a dash and a `0.0` renders as `0.0` — one means he
+    has not played, the other that he played and did nothing.
+
+  New on the read side: `EspnRead.day_rosters`, which gets every team's
+  lineup and that day's scores in one request (so a head-to-head costs the
+  same as one team), and `EspnRead.pro_games_by_period`, which keeps the pro
+  schedule whole instead of reducing it to a count — the opponent, the side
+  and the tip-off were already in the payload `pro_team_scoring_periods`
+  parses, and that is where "@DAL 5:00 pm" comes from.
+
+  Saving is behind the same owner check as the approve buttons, which now say
+  so in words that are true of both: other members of the household cannot
+  bench anybody.
+
+
 - **Every lineup move now says what the player has actually been scoring, and
   how much of it counted.** Prompted by a fair question: Walker Kessler scored
   51 on 2026-10-22 and was benched the next morning for Myles Turner, who had

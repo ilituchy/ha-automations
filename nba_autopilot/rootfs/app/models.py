@@ -412,6 +412,48 @@ class GameRef:
 
 
 @dataclass(frozen=True)
+class ProGame:
+    """One NBA game as the status page needs it: who, when, home or away.
+
+    Distinct from :class:`GameRef`, which the solver uses and which is keyed by
+    slate date because that is what a back-to-back is counted in. This one is
+    keyed by ESPN's own ``scoringPeriodId`` and carries the side and the
+    opponent, because what a reader wants under a player's name is "@DAL, 5:00
+    pm" and neither half of that is derivable from a game count.
+
+    ``tipoff_utc`` is ``None`` only when ESPN has not set a time yet, which it
+    flags with ``time_tbd``; the two are separate so that a missing timestamp
+    and a genuinely undecided one do not render the same.
+    """
+
+    scoring_period: int
+    pro_team_id: ProTeamId
+    opponent_id: ProTeamId
+    home: bool
+    tipoff_utc: Optional[datetime] = None
+    time_tbd: bool = False
+
+
+@dataclass(frozen=True)
+class DayEntry:
+    """A roster entry as of one scoring period, with that day's score.
+
+    Composition rather than more fields on :class:`RosterEntry`: that type
+    describes a player's standing *now* -- his market, his eligibility, whether
+    he may be dropped -- and is what the optimizer reads. A day's points belong
+    to the (player, day) pair and to nothing else, and the page asks for them
+    about the opponent's roster as readily as about ours.
+
+    ``points`` is ``None`` when ESPN has no scored row for that player on that
+    day: he has not played yet, or does not play at all. Zero means he played
+    and scored nothing, which is a different and much worse fact.
+    """
+
+    player: "RosterEntry"
+    points: Optional[float] = None
+
+
+@dataclass(frozen=True)
 class Move:
     """A single proposed change. The unit of approval and of journaling."""
 

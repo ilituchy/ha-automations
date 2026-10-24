@@ -453,6 +453,17 @@ class TestPlayerLinks(unittest.TestCase):
         self.assertNotIn("/nba/player/_/id/", out)
 
 
+def _panels(out: str) -> int:
+    """How many scoreboard panels the page rendered.
+
+    Counted by the one element every panel has and nothing else does. The
+    panel's own tag is not stable -- it is an ``<a>`` to the matchup page when
+    the row knows its league and a plain ``<section>`` when it does not -- and
+    these tests are about how many leagues are shown, not about that.
+    """
+    return out.count("<div class=bhead>")
+
+
 def _board(**over):
     """A scoreboard row as ``record_scoreboard`` writes one."""
     row = {
@@ -489,7 +500,7 @@ class TestScoreboard(unittest.TestCase):
         )
         out = web.render(web.StatusPage(bot))
         self.assertLess(out.index("Alpha"), out.index("Beta"))
-        self.assertEqual(out.count("<section class=board>"), 2)
+        self.assertEqual(_panels(out), 2)
 
     def test_a_league_with_no_reading_yet_is_simply_absent(self):
         """A fresh install shows nothing, not a 0-0 placeholder."""
@@ -498,7 +509,7 @@ class TestScoreboard(unittest.TestCase):
             leagues=[FakeLeague(4, "Alpha"), FakeLeague(9, "Beta")],
         )
         out = web.render(web.StatusPage(bot))
-        self.assertEqual(out.count("<section class=board>"), 1)
+        self.assertEqual(_panels(out), 1)
 
     def test_an_unreadable_league_still_holds_its_grid_cell(self):
         """*"matching each column at the top"*.
@@ -683,7 +694,7 @@ class TestLiveScoreboard(unittest.TestCase):
         self.assertFalse(boards[0].get("live"))
         # And the page still renders, buttons and all.
         out = web.render(p, boards=boards)
-        self.assertIn("<section class=board>", out)
+        self.assertEqual(_panels(out), 1)
 
     def test_a_slow_espn_is_given_up_on_rather_than_waited_for(self):
         lg = FakeLeague(4, "Alpha", score=_score(), delay=0.3)
@@ -1004,6 +1015,11 @@ class TestRenderUrls(unittest.TestCase):
             self.assertNotIn(attr, out, "absolute URL would escape the prefix")
 
 
+def _oops_page(page):
+    """The failed-read page, which is markup no happy-path render reaches."""
+    return web.render_team(page, {"league": "A", "error": "Nope."})
+
+
 class TestCssScoping(unittest.TestCase):
     """No bare class selector may match an element nested inside a component.
 
@@ -1042,15 +1058,50 @@ class TestCssScoping(unittest.TestCase):
     def test_every_class_in_the_markup_is_one_the_stylesheet_knows(self):
         # Catches the other half of a rename: markup updated, CSS not, or the
         # reverse. Only flags classes the stylesheet never mentions at all.
-        bot = FakeBot(FakeStore(pending=[_proposal()], boards=[_board()]))
-        out = web.render(web.StatusPage(bot))
+        #
+        # All three pages, because they share one stylesheet: a class renamed
+        # for the index that the lineup editor still emits would show up as a
+        # row with no styling at all, on the page nobody runs the tests for.
+        bot = FakeBot(FakeStore(pending=[_proposal()], boards=[_board()]),
+                      leagues=[FakeLeague(9, "A"), FakeLeague(7, "B")])
+        page = web.StatusPage(bot)
+        pages = [
+            web.render(page),
+            web.render_matchup(page, _matchup_view(
+                [_pl(1, "A", 0, locked=True, status="out", status_word="Out")],
+                [_pl(2, "B", 0, points=3.0)])),
+            web.render_team(page, _team_view(
+                [_pl(1, "A", 0, locked=True), _pl(2, "B", 12)]),
+                note="Saved.", bad=True),
+            _oops_page(page),
+        ]
         used = set()
-        for attr in re.findall(r"class=(?:'([^']*)'|\"([^\"]*)\"|([^\s>]+))", out):
-            used.update((attr[0] or attr[1] or attr[2]).split())
+        for out in pages:
+            for attr in re.findall(
+                    r"class=(?:'([^']*)'|\"([^\"]*)\"|([^\s>]+))", out):
+                used.update((attr[0] or attr[1] or attr[2]).split())
         for cls in sorted(used):
+            if cls in self.HOOKS:
+                continue
             self.assertIn(".%s" % cls, web.CSS,
                           "markup uses class '%s' that the stylesheet never "
                           "mentions -- a rename that missed a side" % cls)
+
+    #: Classes the script finds elements by and the stylesheet has no opinion
+    #: about. ``held`` is on a hidden input, which is invisible by nature, so
+    #: a styling rule for it would be a lie told to pass a test.
+    HOOKS = ("held",)
+
+    def test_every_unstyled_class_is_one_the_script_actually_uses(self):
+        """What stops the exemption above becoming a place to hide a typo.
+
+        A class with no rule in the stylesheet is either a script hook or a
+        mistake, and the only evidence for the first is the script.
+        """
+        for cls in self.HOOKS:
+            self.assertIn(".%s" % cls, web.DRAG_JS,
+                          "'%s' is exempt from the stylesheet check but the "
+                          "script does not use it either" % cls)
 
 
 class TestStatusPage(unittest.TestCase):
@@ -1369,3 +1420,521 @@ class TestStoreQuery(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# The matchup sheet and the lineup editor.
+# ---------------------------------------------------------------------------
+
+
+def _body(out: str) -> str:
+    """The markup, without the stylesheet.
+
+    Every class name this page can use is also a selector in the ``<style>``
+    block, so ``assertNotIn("lgpills", out)`` is always false and says nothing.
+    """
+    return out.split("</style>")[-1]
+
+
+def _pl(pid, name, slot, *, points=None, locked=False, eligible=None,
+        team="CHA", opp="", tip="", status="", status_word=""):
+    """One row of a rendered roster, in the shape ``_row`` produces."""
+    return {
+        "pid": pid, "name": name, "slot": slot, "team": team,
+        "opp": opp, "tip": tip, "points": points, "locked": locked,
+        "status": status, "status_word": status_word,
+        "eligible": sorted(eligible if eligible is not None else [slot, 11, 12]),
+    }
+
+
+#: One starter per position, four UTIL, three bench, one IR -- the shape of the
+#: live league this was built against, trimmed.
+SLOTS = {0: 1, 1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 11: 4, 12: 3, 13: 1}
+
+
+def _team_view(roster, **over):
+    view = {
+        "league": "Dynassty", "league_id": 9, "team_id": 7, "period": 5,
+        "day": "Sat, Oct 24", "slot_counts": dict(SLOTS), "roster": roster,
+    }
+    view.update(over)
+    return view
+
+
+def _matchup_view(mine, theirs, **over):
+    view = {
+        "league": "Dynassty", "league_id": 9, "period": 5,
+        "day": "Sat, Oct 24", "today": True, "prev": 4, "next": 6,
+        "slot_counts": dict(SLOTS), "games_cap": 44,
+        "score": MatchupScore(
+            matchup_period=1, my_team_id=7, my_points=834.0,
+            opp_team_id=6, opp_name="Theirs", opp_points=749.5,
+            my_name="Mine", my_games_used=27, opp_games_used=22,
+        ),
+        "mine": mine, "theirs": theirs,
+    }
+    view.update(over)
+    return view
+
+
+def _page():
+    return web.StatusPage(FakeBot(leagues=[FakeLeague(9, "Dynassty"),
+                                           FakeLeague(7, "Chairman's")]))
+
+
+class TestRowHelpers(unittest.TestCase):
+    """The small decisions, each of which is a thing the page would get wrong."""
+
+    def test_a_missing_score_is_a_dash_and_a_zero_is_a_zero(self):
+        """*He has not played* and *he played and did nothing* are not the same.
+
+        ESPN publishes no row at all for the first and a 0.0 row for the
+        second, and the whole reason ``DayEntry.points`` is Optional is to
+        keep them apart all the way to the screen.
+        """
+        self.assertIn("&mdash;", web._points(None))
+        self.assertIn("0.0", web._points(0.0))
+        self.assertNotIn("&mdash;", web._points(0.0))
+
+    def test_a_scored_number_is_marked_so_it_can_be_inked_differently(self):
+        self.assertIn("scored", web._points(31.5))
+        self.assertNotIn("scored", web._points(None))
+
+    def test_an_initial_replaces_a_first_name_but_never_the_whole_name(self):
+        self.assertEqual(web._short_name("LaMelo Ball"), "L. Ball")
+        self.assertEqual(web._short_name("Jaren Jackson Jr."), "J. Jackson Jr.")
+        # One word is all the name there is; an initial would erase him.
+        self.assertEqual(web._short_name("Wembanyama"), "Wembanyama")
+        self.assertEqual(web._short_name(""), "")
+
+    def test_the_meta_line_drops_his_own_team_only_when_there_is_a_fixture(self):
+        with_game = web._meta(_pl(1, "X", 0, team="MIL", opp="@PHI",
+                                  tip="4:30 pm"))
+        self.assertIn("@PHI", with_game)
+        self.assertIn("4:30 pm", with_game)
+        self.assertNotIn("MIL", with_game)
+        # No fixture: the team is the only thing left worth saying.
+        idle = web._meta(_pl(1, "X", 0, team="MIL"))
+        self.assertIn("MIL", idle)
+        self.assertIn("no game", idle)
+
+    def test_an_injury_takes_the_line_from_the_fixture(self):
+        out = web._meta(_pl(1, "X", 0, team="SAS", opp="@DAL", tip="5:00 pm",
+                            status="dtd", status_word="Day-to-day"))
+        self.assertIn("Day-to-day", out)
+        self.assertNotIn("@DAL", out)
+        self.assertIn("dtd", out)
+
+    def test_the_meta_separator_survives_escaping_and_espn_text_does_not(self):
+        """The entity is ours; the abbreviation is ESPN's and is not trusted."""
+        out = web._meta(_pl(1, "X", 0, team="<b>CHA"))
+        self.assertIn("&middot;", out)
+        self.assertNotIn("&amp;middot;", out)
+        self.assertNotIn("<b>CHA", out)
+
+    def test_a_slot_with_capacity_four_gets_four_seats(self):
+        seats = web._slot_seats(SLOTS)
+        self.assertEqual(seats.count(11), 4)
+        self.assertEqual(seats.count(0), 1)
+        self.assertEqual(len(seats), sum(SLOTS.values()))
+
+    def test_bench_and_ir_sort_after_every_starting_slot(self):
+        order = web._slot_order(SLOTS)
+        self.assertEqual(order[-2:], [12, 13])
+        self.assertEqual(order[0], 0)
+
+    def test_taking_a_seat_hands_out_a_different_player_each_time(self):
+        """Four UTIL seats must not all be filled by the first UTIL player."""
+        rows = [_pl(1, "A", 11), _pl(2, "B", 11), _pl(3, "C", 0)]
+        self.assertEqual(web._seat(rows, 11)["pid"], 1)
+        self.assertEqual(web._seat(rows, 11)["pid"], 2)
+        self.assertIsNone(web._seat(rows, 11))
+        self.assertEqual([r["pid"] for r in rows], [3])
+
+
+class TestMatchupSheet(unittest.TestCase):
+    """*"it should show the matchup, full list of whos playing me against
+    other team"*."""
+
+    def test_the_two_rosters_are_paired_by_lineup_slot(self):
+        out = web.render_matchup(_page(), _matchup_view(
+            [_pl(1, "My Guard", 0)], [_pl(2, "Their Guard", 0)]))
+        row = out.split("<div class=mrow>")[1]
+        # Abbreviated: the sheet is two rosters wide. See ``_short_name``.
+        self.assertLess(row.index("M. Guard"), row.index("PG"))
+        self.assertLess(row.index("PG"), row.index("T. Guard"))
+
+    def test_a_slot_the_other_side_has_not_filled_is_a_dash_not_a_missing_cell(self):
+        out = web.render_matchup(_page(), _matchup_view(
+            [_pl(1, "Mine", 0)], []))
+        self.assertEqual(out.count("<div class=mrow>"), len(web._slot_seats(SLOTS)) - 4)
+
+    def test_the_day_total_adds_up_only_what_espn_has_scored(self):
+        out = web.render_matchup(_page(), _matchup_view(
+            [_pl(1, "Played", 0, points=31.5),
+             _pl(2, "Also played", 1, points=10.0),
+             _pl(3, "Not yet", 2)],
+            [_pl(4, "Theirs", 0, points=5.0)]))
+        tot = out.split("<div class='mrow tot'>")[1]
+        self.assertIn("41.5", tot)
+        self.assertIn("5.0", tot)
+
+    def test_a_day_nobody_has_played_totals_to_a_dash_not_to_zero(self):
+        """0.0 would claim both teams had turned up and scored nothing."""
+        out = web.render_matchup(_page(), _matchup_view(
+            [_pl(1, "Mine", 0)], [_pl(2, "Theirs", 0)]))
+        tot = out.split("<div class='mrow tot'>")[1]
+        self.assertNotIn("0.0", tot)
+        self.assertEqual(tot.count("&mdash;"), 2)
+
+    def test_the_lead_is_said_in_words_and_not_just_in_colour(self):
+        out = web.render_matchup(_page(), _matchup_view([], []))
+        self.assertIn("Ahead by 84.5", out)
+
+    def test_a_bye_is_not_a_win(self):
+        view = _matchup_view([], [], score=MatchupScore(
+            matchup_period=1, my_team_id=7, my_points=100.0,
+            opp_team_id=None, opp_name="", opp_points=0.0, my_name="Mine"))
+        out = web.render_matchup(_page(), view)
+        self.assertIn("Bye week", out)
+        self.assertNotIn("Ahead by", out)
+
+    def test_the_day_arrows_stay_inside_the_matchup_week(self):
+        out = web.render_matchup(_page(), _matchup_view([], [], prev=None,
+                                                        next=6))
+        self.assertIn("dayarrow off", out)
+        self.assertIn("matchup?league=9&amp;sp=6", out)
+
+    def test_a_failed_read_says_so_and_offers_the_way_back(self):
+        out = web.render_matchup(_page(), {"league": "Dynassty",
+                                           "error": "Could not read it."})
+        self.assertIn("Could not read it.", out)
+        self.assertIn("class=back", out)
+        self.assertIn("Nothing has been changed.", out)
+
+    def test_a_player_name_is_escaped_here_too(self):
+        out = web.render_matchup(_page(), _matchup_view(
+            [_pl(1, "O'<script>alert(1)</script> Neal", 0)], []))
+        self.assertNotIn("<script>alert", out)
+
+
+class TestLineupEditor(unittest.TestCase):
+    """*"this is where you can drag and drop players and manually update and
+    save"*.
+
+    The invariant that matters most here is totality: ``set_lineup`` refuses a
+    partial map outright, so a player this page forgets to give a field is not
+    a cosmetic bug -- it is a 403 on every save until somebody notices.
+    """
+
+    def _out(self, roster, **over):
+        return web.render_team(_page(), _team_view(roster, **over))
+
+    def test_every_rostered_player_gets_a_field(self):
+        roster = [_pl(i, "P%d" % i, 11 if i < 4 else 12) for i in range(8)]
+        out = self._out(roster)
+        for i in range(8):
+            self.assertIn("name='slot_%d'" % i, out,
+                          "a player with no field makes the write partial, "
+                          "which the preflight refuses whole")
+
+    def test_a_player_in_a_slot_the_seats_did_not_cover_is_still_given_one(self):
+        """More UTILs than the league has room for: shown, not dropped."""
+        roster = [_pl(i, "P%d" % i, 11) for i in range(6)]
+        out = self._out(roster)
+        self.assertIn("Unplaced", out)
+        for i in range(6):
+            self.assertIn("name='slot_%d'" % i, out)
+
+    def test_a_locked_player_cannot_be_edited_but_is_still_submitted(self):
+        """A disabled control posts nothing, and a lineup short one player is
+        refused whole. The hidden twin is what keeps the map total."""
+        out = self._out([_pl(1, "Tipped off", 0, locked=True)])
+        self.assertIn("disabled", out)
+        self.assertIn("type=hidden class=held name='slot_1' value='0'", out)
+        self.assertIn("data-locked='1'", out)
+
+    def test_an_unlocked_player_gets_exactly_one_field(self):
+        out = self._out([_pl(1, "Free", 0)])
+        self.assertEqual(out.count("name='slot_1'"), 1)
+
+    def test_the_slot_menu_offers_only_slots_he_is_eligible_for(self):
+        out = self._out([_pl(1, "Centre", 4, eligible=[4, 11, 12])])
+        row = out.split("name='slot_1'")[1].split("</select>")[0]
+        self.assertIn(">C<", row)
+        self.assertIn(">UTIL<", row)
+        self.assertNotIn(">PG<", row)
+
+    def test_a_slot_the_league_does_not_have_is_not_offered(self):
+        out = self._out([_pl(1, "X", 0, eligible=[0, 8, 11, 12])],
+                        slot_counts={0: 1, 11: 1, 12: 1})
+        row = out.split("name='slot_1'")[1].split("</select>")[0]
+        self.assertNotIn("G/F", row)
+
+    def test_his_current_slot_is_always_offered_even_if_it_looks_ineligible(self):
+        """Otherwise the select would silently propose moving him on save."""
+        out = self._out([_pl(1, "X", 4, eligible=[11, 12])])
+        row = out.split("name='slot_1'")[1].split("</select>")[0]
+        self.assertIn("<option value='4' selected>C</option>", row)
+
+    def test_the_drag_script_is_told_what_is_legal(self):
+        out = self._out([_pl(1, "X", 0, eligible=[0, 5, 11, 12])])
+        self.assertIn("data-eligible='0 5 11 12'", out)
+
+    def test_an_empty_seat_is_rendered_so_a_drag_has_somewhere_to_land(self):
+        out = self._out([_pl(1, "X", 0)])
+        self.assertIn("Empty", out)
+        self.assertEqual(out.count("class=slotrow "),
+                         len(web._slot_seats(SLOTS)) - 1)
+
+    def test_the_posted_period_is_the_one_that_was_shown(self):
+        """A page left open across midnight must fail on a stale period rather
+        than quietly write tomorrow's lineup."""
+        self.assertIn("name=sp value='5'", self._out([]))
+
+    def test_a_refused_save_is_reported_above_the_roster(self):
+        out = self._out([_pl(1, "X", 0)], )
+        self.assertNotIn("class='card banner", out)
+        out = web.render_team(_page(), _team_view([_pl(1, "X", 0)]),
+                              note="ESPN refused that lineup: no.", bad=True)
+        self.assertIn("ESPN refused that lineup: no.", out)
+        self.assertIn("banner bad", out)
+        self.assertLess(out.index("ESPN refused"), out.index("name='slot_1'"))
+
+    def test_a_player_name_cannot_break_out_of_the_aria_label(self):
+        out = self._out([_pl(1, "' onfocus='alert(1)", 0)])
+        self.assertNotIn("onfocus='alert(1)", out)
+
+    def test_one_league_gets_no_league_strip(self):
+        page = web.StatusPage(FakeBot(leagues=[FakeLeague(9, "Only one")]))
+        self.assertNotIn("lgpills", _body(web.render_team(page, _team_view([]))))
+
+    def test_two_leagues_get_a_strip_with_this_one_lit(self):
+        out = self._out([])
+        self.assertIn("<a class='pill on' href='team?league=9'>", out)
+        self.assertIn("<a class='pill' href='team?league=7'>", out)
+
+
+class TestDetailPageUrls(unittest.TestCase):
+    """Ingress serves this app under a rotating prefix, so every URL it emits
+    has to be relative. The two new pages emit several each."""
+
+    def _pages(self):
+        page = _page()
+        return [
+            web.render(page),
+            web.render_matchup(page, _matchup_view([_pl(1, "A", 0)],
+                                                   [_pl(2, "B", 0)])),
+            web.render_team(page, _team_view([_pl(1, "A", 0)])),
+        ]
+
+    def test_no_absolute_paths_on_any_page(self):
+        for out in self._pages():
+            for attr in ("href=/", "src=/", "action=/", 'href="/', 'action="/'):
+                self.assertNotIn(attr, out,
+                                 "absolute URL would escape the ingress prefix")
+
+    def test_the_lineup_form_posts_relatively(self):
+        out = web.render_team(_page(), _team_view([]))
+        self.assertIn("action=lineup", out)
+
+    def test_the_scoreboard_panel_links_to_its_matchup(self):
+        bot = FakeBot(FakeStore(boards=[_board(league_id=9)]),
+                      leagues=[FakeLeague(9, "Dynassty")])
+        out = web.render(web.StatusPage(bot))
+        self.assertIn("<a class=board href='matchup?league=9'>", out)
+
+    def test_a_panel_with_no_league_stays_an_inert_section(self):
+        """Only reachable from a row written before the column existed, and a
+        link to ``matchup?league=None`` would be a link to an error page."""
+        board = _board()
+        board.pop("league_id")
+        bot = FakeBot(FakeStore(boards=[board]))
+        out = web.render(web.StatusPage(bot))
+        self.assertIn("<section class=board>", out)
+        self.assertNotIn("matchup?league=None", out)
+
+
+class FakeWrite:
+    """``set_lineup`` and nothing else, which is all the save path calls."""
+
+    def __init__(self, result=None, raises=None):
+        self.result = result
+        self.raises = raises
+        self.calls = []
+
+    def set_lineup(self, target, scoring_period=None, **kw):
+        self.calls.append((dict(target), scoring_period))
+        if self.raises is not None:
+            raise self.raises
+        return self.result or _write_result()
+
+
+class _WriteResult:
+    def __init__(self, items=(), shadow=False):
+        self.items = tuple(items)
+        self.shadow = shadow
+        self.ok = True
+
+
+def _write_result(items=(({"playerId": 1},)), shadow=False):
+    return _WriteResult(items, shadow)
+
+
+def _writing_bot(owner="owner", **kw):
+    lg = FakeLeague(9, "Dynassty")
+    lg.write = FakeWrite(**kw)
+    return FakeBot(cfg=FakeCfg(owner=owner), leagues=[lg]), lg
+
+
+class TestLineupAuthorization(unittest.TestCase):
+    """Who may rewrite the roster.
+
+    Ingress has already authenticated the request against Home Assistant; what
+    is decided here is *which* authenticated user. Other members of the
+    household must not be able to bench somebody, and this must fail closed
+    when ingress reports no id at all -- the same rule, and the same failure
+    mode, as the approve buttons.
+    """
+
+    def test_a_stranger_is_refused_before_anything_is_written(self):
+        bot, lg = _writing_bot()
+        note, bad = asyncio.run(web.apply_lineup(
+            bot, league_id="9", period="5", slots={"slot_1": "0"},
+            user_id="someone-else"))
+        self.assertTrue(bad)
+        self.assertEqual(note, web.NOT_OWNER)
+        self.assertEqual(lg.write.calls, [])
+
+    def test_a_missing_identity_is_refused_too(self):
+        bot, lg = _writing_bot()
+        note, bad = asyncio.run(web.apply_lineup(
+            bot, league_id="9", period="5", slots={"slot_1": "0"}, user_id=""))
+        self.assertTrue(bad)
+        self.assertEqual(lg.write.calls, [])
+
+    def test_the_owner_gets_through(self):
+        bot, lg = _writing_bot()
+        note, bad = asyncio.run(web.apply_lineup(
+            bot, league_id="9", period="5", slots={"slot_1": "0"},
+            user_id="owner"))
+        self.assertFalse(bad)
+        self.assertEqual(lg.write.calls, [({1: 0}, 5)])
+
+    def test_an_unconfigured_owner_does_not_lock_the_page_out(self):
+        """Matches ``apply_decision``: no owner set means no owner check."""
+        bot, lg = _writing_bot(owner="")
+        _, bad = asyncio.run(web.apply_lineup(
+            bot, league_id="9", period="5", slots={"slot_1": "0"},
+            user_id="anybody"))
+        self.assertFalse(bad)
+        self.assertEqual(len(lg.write.calls), 1)
+
+    def test_a_league_that_is_not_configured_is_refused(self):
+        bot, lg = _writing_bot()
+        _, bad = asyncio.run(web.apply_lineup(
+            bot, league_id="404", period="5", slots={"slot_1": "0"},
+            user_id="owner"))
+        self.assertTrue(bad)
+        self.assertEqual(lg.write.calls, [])
+
+
+class TestLineupForm(unittest.TestCase):
+    """Parsing the posted lineup. Almost nothing is validated here on purpose:
+    ``set_lineup``'s preflight owns the roster rules and is the path every
+    other lineup in this app goes through."""
+
+    def _save(self, slots, period="5"):
+        bot, lg = _writing_bot()
+        note, bad = asyncio.run(web.apply_lineup(
+            bot, league_id="9", period=period, slots=slots, user_id="owner"))
+        return note, bad, lg.write
+
+    def test_only_slot_fields_become_the_target(self):
+        _, _, w = self._save({"league": "9", "sp": "5",
+                              "slot_11": "0", "slot_22": "12"})
+        self.assertEqual(w.calls[0][0], {11: 0, 22: 12})
+
+    def test_a_malformed_field_refuses_the_whole_write(self):
+        """Skipping the bad pair would post a partial map, which the preflight
+        rejects anyway -- with a message about the wrong thing."""
+        note, bad, w = self._save({"slot_11": "0", "slot_oops": "12"})
+        self.assertTrue(bad)
+        self.assertEqual(w.calls, [])
+        self.assertIn("did not parse", note)
+
+    def test_a_non_numeric_slot_refuses_the_whole_write(self):
+        note, bad, w = self._save({"slot_11": "bench please"})
+        self.assertTrue(bad)
+        self.assertEqual(w.calls, [])
+
+    def test_a_form_naming_nobody_is_refused(self):
+        note, bad, w = self._save({"league": "9", "sp": "5"})
+        self.assertTrue(bad)
+        self.assertEqual(w.calls, [])
+
+    def test_the_period_is_passed_through_as_posted(self):
+        _, _, w = self._save({"slot_1": "0"}, period="7")
+        self.assertEqual(w.calls[0][1], 7)
+
+    def test_an_unparseable_period_is_passed_as_none_not_as_zero(self):
+        """``None`` lets ``set_lineup`` fall back to the league's own current
+        period. Zero would address the write to a period that does not exist."""
+        _, _, w = self._save({"slot_1": "0"}, period="")
+        self.assertIsNone(w.calls[0][1])
+
+    def test_a_preflight_refusal_is_reported_in_its_own_words(self):
+        bot, lg = _writing_bot(raises=RuntimeError(
+            "target puts 2 players in PG but capacity is 1"))
+        note, bad = asyncio.run(web.apply_lineup(
+            bot, league_id="9", period="5", slots={"slot_1": "0"},
+            user_id="owner"))
+        self.assertTrue(bad)
+        self.assertIn("2 players in PG", note)
+
+    def test_an_unchanged_lineup_is_said_to_be_unchanged_and_is_not_an_error(self):
+        bot, lg = _writing_bot(result=_write_result(items=()))
+        note, bad = asyncio.run(web.apply_lineup(
+            bot, league_id="9", period="5", slots={"slot_1": "0"},
+            user_id="owner"))
+        self.assertFalse(bad)
+        self.assertIn("already the lineup", note)
+
+    def test_shadow_mode_says_nothing_was_sent(self):
+        bot, lg = _writing_bot(
+            result=_write_result(items=({"playerId": 1},), shadow=True))
+        note, bad = asyncio.run(web.apply_lineup(
+            bot, league_id="9", period="5", slots={"slot_1": "0"},
+            user_id="owner"))
+        self.assertFalse(bad)
+        self.assertIn("Shadow mode", note)
+        self.assertIn("nothing sent to ESPN", note)
+
+    def test_a_successful_save_counts_what_moved(self):
+        bot, lg = _writing_bot(
+            result=_write_result(items=({"playerId": 1}, {"playerId": 2})))
+        note, bad = asyncio.run(web.apply_lineup(
+            bot, league_id="9", period="5", slots={"slot_1": "0"},
+            user_id="owner"))
+        self.assertFalse(bad)
+        self.assertIn("2 moves", note)
+
+
+class TestSaveOutcomeIsNotAnInjection(unittest.TestCase):
+    """The outcome of a save travels in the query string of a redirect, so by
+    the time it is rendered it is a value off the URL bar."""
+
+    def test_a_note_from_the_url_is_escaped(self):
+        out = web.render_team(_page(), _team_view([]),
+                              note="<img src=x onerror=alert(1)>")
+        self.assertNotIn("<img src=x", out)
+        self.assertIn("&lt;img", out)
+
+    def test_an_espn_refusal_is_clipped_before_it_reaches_a_url(self):
+        bot, lg = _writing_bot(raises=RuntimeError("x" * 500))
+        note, bad = asyncio.run(web.apply_lineup(
+            bot, league_id="9", period="5", slots={"slot_1": "0"},
+            user_id="owner"))
+        self.assertTrue(bad)
+        self.assertLess(len(note), 280)
+        self.assertTrue(note.endswith("…"))

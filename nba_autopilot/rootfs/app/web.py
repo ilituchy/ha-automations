@@ -46,7 +46,12 @@ import logging
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
+
+# Constants only -- no client, no httpx, nothing that opens a socket. The slot
+# and pro-team names belong to ESPN's id space, and a second copy of them here
+# would be a second thing to keep current.
+from espn import ids
 
 log = logging.getLogger("autopilot.web")
 
@@ -307,6 +312,197 @@ class StatusPage:
         """
         return getattr(self.bot, "tz", None)
 
+    # -- the two detail pages ---------------------------------------------
+    #
+    # Both read ESPN synchronously and both are therefore built inside one
+    # ``to_thread`` hop rather than awaiting call by call: every read here goes
+    # through the same ``httpx.Client``, so interleaving them buys nothing and
+    # costs a thread each.
+    #
+    # Neither has the index page's floor. The index can fall back to the row
+    # the last run cached, because a stale decision is still a fact; a matchup
+    # has no cached form at all, so a failed read here renders as a stated
+    # failure with a way back, not as an empty page.
+
+    def league_by_id(self, league_id: Any) -> Optional[Any]:
+        """The configured league with this id, or ``None``.
+
+        Compared as strings because the id arrives off a query string. ``None``
+        rather than defaulting to the first league: every caller of this goes
+        on to read or write a roster, and silently picking the wrong team is
+        the failure mode this whole app is most careful about.
+        """
+        for lg in getattr(self.bot, "leagues", []):
+            if str(lg.ref.league_id) == str(league_id):
+                return lg
+        return None
+
+    def _settings(self, lg: Any) -> Any:
+        """League settings with the scoring period corrected to today's.
+
+        ``Autopilot.settings_now`` is the one supported way to read these, and
+        this page needs it for the same reason every write does: ESPN's
+        ``latestScoringPeriod`` lags by most of a morning, and a lineup
+        addressed to yesterday is rejected whole with ``409
+        TRAN_INVALID_SCORINGPERIOD_NOT_CURRENT``. The Team page writes
+        lineups, so it must agree with the scheduler about what day it is.
+        """
+        now = getattr(self.bot, "settings_now", None)
+        if now is None:
+            return lg.read.league_settings()
+        settings, _ = now(lg)
+        return settings
+
+    def _calendar(self) -> Any:
+        cal = getattr(self.bot, "season_calendar", None)
+        return None if cal is None else cal()
+
+    def _games(self, period: int) -> Mapping[int, Any]:
+        """``proTeamId -> ProGame`` for one scoring period, or ``{}``.
+
+        Empty is a perfectly good answer -- it renders as no opponent line
+        under any name -- so this never raises and never blocks the page.
+        """
+        games = getattr(self.bot, "pro_games", None)
+        if games is None:
+            return {}
+        try:
+            return dict(games().get(int(period), {}))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not read the pro schedule for period %s: %s",
+                        period, exc)
+            return {}
+
+    def _week(self, period: int) -> List[int]:
+        """The scoring periods of ``period``'s matchup week, or just itself.
+
+        What bounds the day arrows on the matchup page. A week rather than the
+        season because the score above them is the *week's* score: letting the
+        reader page into a day the header does not cover would put two
+        unrelated numbers on one screen.
+        """
+        cal = self._calendar()
+        if cal is None or not cal.trustworthy:
+            return [int(period)]
+        try:
+            days = cal.periods_in_matchup(cal.matchup_period_of(int(period)))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not place period %s in a week: %s", period, exc)
+            return [int(period)]
+        return days or [int(period)]
+
+    def _day_label(self, period: int) -> str:
+        """``Sat, Oct 24`` for a scoring period, or ``day 5`` without a calendar.
+
+        The day number is interpolated rather than formatted: ``%-d`` is a
+        glibc extension and the add-on runs on musl, where it comes back
+        through unexpanded. Same reason ``_clock`` builds the hour by hand.
+        """
+        cal = self._calendar()
+        if cal is None or not cal.trustworthy:
+            return "day %d" % int(period)
+        try:
+            day = cal.date_of(int(period))
+        except Exception:  # noqa: BLE001
+            return "day %d" % int(period)
+        return "%s, %s %d" % (day.strftime("%a"), day.strftime("%b"), day.day)
+
+    async def matchup_view(self, league_id: Any,
+                           period: Any = None) -> Dict[str, Any]:
+        lg = self.league_by_id(league_id)
+        if lg is None:
+            return {"error": "That league is not configured."}
+        try:
+            return await asyncio.to_thread(self._matchup_view, lg, period)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not build the matchup page for %s: %s",
+                        league_id, exc)
+            return {"league": self.league_label(lg.ref.league_id),
+                    "league_id": lg.ref.league_id,
+                    "error": "Could not read this matchup from ESPN."}
+
+    def _matchup_view(self, lg: Any, period: Any) -> Dict[str, Any]:
+        settings = self._settings(lg)
+        today = int(settings.current_scoring_period)
+        week = self._week(today)
+        try:
+            want = int(period)
+        except (TypeError, ValueError):
+            want = today
+        # Clamped to the week rather than refused: a stale bookmark from last
+        # Sunday should land on this week's Sunday, not on an error.
+        if want not in week:
+            want = today if today in week else week[-1]
+
+        score = lg.read.matchup_score()
+        if score is None:
+            return {"league": self.league_label(lg.ref.league_id),
+                    "league_id": lg.ref.league_id,
+                    "error": "No matchup this week -- a bye, or the schedule "
+                             "is not out yet."}
+        sides = [score.my_team_id]
+        if score.opp_team_id is not None:
+            sides.append(score.opp_team_id)
+        rosters = lg.read.day_rosters(want, team_ids=sides)
+        games, tz = self._games(want), self.tz()
+        order = week.index(want)
+        # The same figure the scoreboard panel prints, from the same place, so
+        # the two screens cannot disagree about how many games a week allows.
+        try:
+            from solve import budget as budget_mod
+            cap = budget_mod.matchup_cap(settings)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not read the games cap: %s", exc)
+            cap = None
+
+        def rows(team_id: Any) -> List[Dict[str, Any]]:
+            return [_row(d, games, tz) for d in (rosters.get(team_id) or [])]
+
+        return {
+            "league": self.league_label(lg.ref.league_id),
+            "league_id": lg.ref.league_id,
+            "score": score,
+            "period": want,
+            "day": self._day_label(want),
+            "today": want == today,
+            "prev": week[order - 1] if order > 0 else None,
+            "next": week[order + 1] if order + 1 < len(week) else None,
+            "slot_counts": dict(settings.lineup_slot_counts),
+            "games_cap": cap,
+            "mine": rows(score.my_team_id),
+            "theirs": rows(score.opp_team_id),
+        }
+
+    async def team_view(self, league_id: Any) -> Dict[str, Any]:
+        lg = self.league_by_id(league_id)
+        if lg is None:
+            return {"error": "That league is not configured."}
+        try:
+            return await asyncio.to_thread(self._team_view, lg)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not build the team page for %s: %s",
+                        league_id, exc)
+            return {"league": self.league_label(lg.ref.league_id),
+                    "league_id": lg.ref.league_id,
+                    "error": "Could not read this roster from ESPN."}
+
+    def _team_view(self, lg: Any) -> Dict[str, Any]:
+        settings = self._settings(lg)
+        period = int(settings.current_scoring_period)
+        team_id = lg.espn.team_id
+        rosters = lg.read.day_rosters(period, team_ids=[team_id])
+        games, tz = self._games(period), self.tz()
+        return {
+            "league": self.league_label(lg.ref.league_id),
+            "league_id": lg.ref.league_id,
+            "team_id": team_id,
+            "period": period,
+            "day": self._day_label(period),
+            "slot_counts": dict(settings.lineup_slot_counts),
+            "roster": [_row(d, games, tz)
+                       for d in (rosters.get(team_id) or [])],
+        }
+
     def stuck(self) -> List[Mapping[str, Any]]:
         return self.bot.store.stuck_writes()
 
@@ -434,9 +630,17 @@ h1 {
 .masthead { margin: 0 0 20px; }
 .boards { row-gap: 10px; margin: 0 0 26px; }
 .board {
-  padding: 11px 13px 10px; border-radius: 14px;
+  display: block; padding: 11px 13px 10px; border-radius: 14px;
   background: var(--card-background-color, var(--card));
   border: 1px solid var(--line);
+  color: inherit; text-decoration: none;
+}
+/* The panel is a link to the matchup behind it. It must not *read* as one --
+   twelve points of blue underlined team name is not a scoreboard -- so it
+   keeps its own colours and says so by lifting under the cursor instead. */
+a.board:hover { border-color: var(--primary-color, #2b7de9); }
+a.board:focus-visible {
+  outline: 2px solid var(--primary-color, #2b7de9); outline-offset: 2px;
 }
 .bhead {
   display: flex; align-items: baseline; gap: 8px;
@@ -730,6 +934,238 @@ details.logs[open] > summary::after { content: " \\25BE"; }
   border-left: 2px solid var(--line); overflow-wrap: anywhere;
 }
 
+/* -- chrome shared by the three pages ---------------------------------- */
+
+/* Title and tabs on one line, the tabs dropping under the title on a phone.
+   `space-between` and not a gap: the tab strip is a destination, and a reader
+   looks for it at the edge of the page rather than next to the title. */
+.mastrow {
+  display: flex; flex-wrap: wrap; align-items: center;
+  justify-content: space-between; gap: 10px 16px;
+}
+.tabs { display: flex; gap: 4px; padding: 3px; border-radius: 999px;
+        background: var(--chip); }
+.tab {
+  padding: 6px 14px; border-radius: 999px; text-decoration: none;
+  font-size: 13px; font-weight: 600;
+  color: var(--secondary-text-color, var(--dim));
+}
+.tab.on {
+  background: var(--card-background-color, var(--card));
+  color: var(--primary-text-color, var(--fg));
+  box-shadow: 0 1px 2px rgba(16,18,27,.12);
+}
+.tab:hover { color: var(--primary-text-color, var(--fg)); }
+/* A detail page is somewhere you arrived from somewhere, so the way back is
+   the first thing on it and not a browser gesture the reader has to know. */
+.back {
+  display: inline-block; margin: 0 0 12px; text-decoration: none;
+  font-size: 13px; font-weight: 600;
+  color: var(--secondary-text-color, var(--dim));
+}
+.back:hover { color: var(--primary-text-color, var(--fg)); }
+.phead {
+  font-size: 22px; font-weight: 700; letter-spacing: -.02em; margin: 0 0 14px;
+}
+/* A row of links that pick one of several things to look at. One league is
+   the common case and then there is nothing to pick, so the strip is not
+   rendered at all rather than rendered with a single inert pill. */
+.lgpills { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 16px; }
+.pill {
+  padding: 7px 13px; border-radius: 999px; text-decoration: none;
+  font-size: 13px; font-weight: 600; background: var(--chip);
+  color: var(--secondary-text-color, var(--dim));
+}
+.pill.on {
+  background: var(--good-bg); color: var(--good);
+}
+
+/* -- the matchup sheet -------------------------------------------------- */
+
+.vs {
+  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+  gap: 10px; padding: 18px 16px; margin: 0 0 14px;
+  border-radius: 18px; border: 1px solid var(--line);
+  background: var(--card-background-color, var(--card));
+  box-shadow: var(--lift);
+}
+.vsside { display: flex; flex-direction: column; align-items: center;
+          gap: 5px; min-width: 0; text-align: center; }
+.vsside .crest { flex: 0 0 38px; width: 38px; height: 38px; border-radius: 10px; }
+.vspts { font-size: 28px; font-weight: 700; letter-spacing: -.03em;
+         color: var(--secondary-text-color, var(--dim)); }
+.vsside.up .vspts { color: var(--primary-text-color, var(--fg)); }
+.vsname {
+  font-size: 13px; font-weight: 600; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.vsgames { font-size: 11px; color: var(--secondary-text-color, var(--faint)); }
+.vsmid { font-size: 11px; font-weight: 700; text-transform: uppercase;
+         letter-spacing: .06em; color: var(--secondary-text-color, var(--faint)); }
+.vsgap { display: block; margin-top: 3px; font-size: 12px; letter-spacing: 0;
+         text-transform: none; }
+.vsgap.lead { color: var(--good); }
+.vsgap.trail { color: var(--bad); }
+
+.daynav {
+  display: flex; align-items: center; justify-content: center; gap: 4px;
+  margin: 0 0 12px;
+}
+.dayis { flex: 1 1 auto; text-align: center; font-size: 13px; font-weight: 600; }
+.dayis b { color: var(--primary-color, #2b7de9); }
+/* Fixed box whether or not there is a day that way, so the date underneath
+   does not shuffle sideways at the ends of the week. */
+.dayarrow {
+  flex: 0 0 34px; height: 34px; border-radius: 10px; text-decoration: none;
+  display: grid; place-items: center; font-size: 17px;
+  color: var(--secondary-text-color, var(--dim)); background: var(--chip);
+}
+.dayarrow.off { opacity: .32; pointer-events: none; }
+
+.sheet {
+  border-radius: 16px; overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--card-background-color, var(--card));
+  box-shadow: var(--lift);
+}
+.mrow { display: grid; grid-template-columns: 1fr 44px 1fr; align-items: center; }
+.mrow + .mrow { border-top: 1px solid var(--line); }
+.mslot {
+  text-align: center; font-size: 10px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--secondary-text-color, var(--faint));
+  align-self: stretch; display: grid; place-items: center;
+  background: var(--chip);
+}
+.mside { display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+         min-width: 0; }
+.mside.them { flex-direction: row-reverse; text-align: right; }
+/* No headshots on a phone. Two rosters side by side leave about seventy
+   pixels of name each, and a 26px disc spends a third of that on decoration
+   -- so the face is what turns "V. Wembanyama" into "V. Wemb...". ESPN's own
+   matchup tab shows none either. They come back at the width that can afford
+   them, and the Team page, which is one column wide, keeps them throughout. */
+.mside .face { display: none; }
+@media (min-width: 560px) {
+  .mside { gap: 10px; padding: 9px 13px; }
+  .mside .face { display: block; flex-basis: 32px; height: 32px; }
+}
+.mwho { flex: 1 1 auto; min-width: 0; }
+.mside .who {
+  display: block; font-size: 14px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mmeta {
+  display: block; font-size: 10.5px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+  color: var(--secondary-text-color, var(--faint));
+}
+.mmeta.out { color: var(--bad); }
+.mmeta.dtd { color: var(--warn); }
+.mpts { font-size: 15px; font-weight: 700; letter-spacing: -.02em;
+        color: var(--secondary-text-color, var(--dim)); }
+.mpts.scored { color: var(--primary-text-color, var(--fg)); }
+/* The day's subtotal, which is the question the sheet is open for. Reversed
+   out so the eye does not have to find it among eleven rows that look alike. */
+.mrow.tot { background: var(--chip); }
+.mrow.tot .mpts { font-size: 17px; color: var(--primary-text-color, var(--fg)); }
+.mrow.tot .mslot { background: none; }
+
+/* -- the lineup editor -------------------------------------------------- */
+
+.lineup { list-style: none; margin: 0 0 4px; padding: 0;
+          border-radius: 16px; overflow: hidden;
+          border: 1px solid var(--line);
+          background: var(--card-background-color, var(--card)); }
+.slotrow { display: block; }
+.slotrow + .slotrow { border-top: 1px solid var(--line); }
+.plr, .ph { display: flex; align-items: center; gap: 10px; padding: 9px 11px;
+            min-width: 0; }
+.slotrow.filled .ph { display: none; }
+.ph { color: var(--secondary-text-color, var(--faint)); font-size: 12.5px; }
+/* The only part of the row that starts a drag. Dragging from anywhere would
+   be nicer with a mouse and unusable with a thumb: `touch-action: none` is
+   what stops the browser scrolling instead, and applying it to the whole row
+   would mean the page could not be scrolled past the roster at all. */
+.grip {
+  flex: 0 0 18px; height: 26px; cursor: grab; touch-action: none;
+  display: grid; place-items: center;
+  color: var(--secondary-text-color, var(--faint));
+}
+.grip::before {
+  content: ""; width: 10px; height: 14px; opacity: .85;
+  background: radial-gradient(currentColor 1.1px, transparent 1.3px) 0 0/5px 5px;
+}
+.plr.lock .grip { cursor: default; opacity: .3; }
+.pick, .slotpill {
+  flex: 0 0 auto; min-width: 56px; text-align: center;
+  font: inherit; font-size: 11px; font-weight: 700; letter-spacing: .04em;
+  padding: 6px 7px; border-radius: 9px;
+  border: 1px solid var(--line); background-color: var(--chip);
+  color: var(--secondary-text-color, var(--dim));
+  -webkit-appearance: none; appearance: none;
+}
+/* The native control is suppressed so the pill matches the rest of the page,
+   which also suppresses the one thing that said it *was* a control. The
+   chevron puts that back. Drawn rather than drawn from a file for the reason
+   the stylesheet is inline, and in a fixed grey rather than `currentColor`
+   because a background image cannot take one: at 7px it reads on the grey
+   pill and on the green one, in both themes. */
+.pick {
+  cursor: pointer; padding-right: 17px; min-width: 62px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23919aa8' stroke-width='1.7' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 6px center;
+  background-size: 7px 5px;
+}
+.pick:focus-visible { outline: 2px solid var(--primary-color, #2b7de9);
+                      outline-offset: 2px; }
+.pick.start, .slotpill.start { background-color: var(--good-bg);
+                               color: var(--good); border-color: transparent; }
+.pick[disabled] { opacity: .55; cursor: default; background-image: none;
+                  padding-right: 7px; min-width: 56px; }
+.plr .face { flex-basis: 32px; height: 32px; }
+.plwho { flex: 1 1 auto; min-width: 0; }
+.plr .who {
+  display: block; font-size: 14.5px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.plmeta {
+  display: block; font-size: 10.5px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+  color: var(--secondary-text-color, var(--faint));
+}
+.plmeta.out { color: var(--bad); }
+.plmeta.dtd { color: var(--warn); }
+.plpts { font-size: 14px; font-weight: 700; letter-spacing: -.02em;
+         color: var(--secondary-text-color, var(--dim)); }
+.plpts.scored { color: var(--primary-text-color, var(--fg)); }
+
+/* Dragging. The row being carried is a fixed-position clone, so the list
+   underneath keeps its geometry and nothing reflows while the thumb moves. */
+.plr.lifting { opacity: .32; }
+.ghost {
+  position: fixed; z-index: 9; pointer-events: none; left: 0; top: 0;
+  border-radius: 12px; box-shadow: 0 10px 30px -6px rgba(16,18,27,.45);
+  background: var(--card-background-color, var(--card));
+  border: 1px solid var(--line);
+}
+.slotrow.target { background: var(--good-bg); }
+.slotrow.nope { background: var(--bad-bg); }
+
+/* Sticky, because the roster is twenty-seven rows and a Save button that has
+   to be scrolled to is a Save button that gets forgotten. The gradient has to
+   reach full opacity quickly: rows pass *under* this bar, and a half-visible
+   player name behind the button reads as a rendering fault. */
+.savebar {
+  position: sticky; bottom: 0; z-index: 4;
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 4px; padding: 16px 0 10px;
+  background: linear-gradient(to bottom, transparent 0,
+              var(--primary-background-color, var(--bg)) 15px);
+}
+.savebar .count2 { flex: 1 1 auto; font-size: 12.5px;
+                   color: var(--secondary-text-color, var(--dim)); }
+.savebar button { width: auto; flex: 0 0 auto; padding: 11px 20px; }
+
 .empty {
   color: var(--secondary-text-color, var(--dim));
   font-size: 13.5px;
@@ -741,6 +1177,149 @@ footer {
   font-size: 12px; color: var(--secondary-text-color, var(--faint));
 }
 """
+
+#: The one script this app ships, and the only page that loads it.
+#:
+#: It is an *enhancement* and nothing on the Team page depends on it. The
+#: ``<select>`` in every row is the control; this turns the grip into a second
+#: way to set the same value, because picking "UTIL" from a list eleven times
+#: is not how anybody thinks about a lineup. With the script blocked -- a
+#: strict frontend CSP, a reader who turns it off -- the page still renders,
+#: still edits and still saves.
+#:
+#: Pointer events rather than HTML5 drag-and-drop: ``dragstart`` does not fire
+#: for touch, and this page is read on a phone more than anywhere else. The
+#: cost is ``touch-action: none``, which is why only the grip starts a drag --
+#: putting it on the row would make the roster unscrollable.
+#:
+#: Inline rather than a file for the same reason the stylesheet is: serving a
+#: second file needs the static mount this module deliberately does not have.
+DRAG_JS = """<script>
+(function () {
+  var form = document.getElementById('lineup');
+  if (!form || !window.PointerEvent) return;
+  var tally = form.querySelector('.count2');
+  var drag = null;
+
+  function held(li) { return li.querySelector('.plr'); }
+  function field(plr) { return plr.querySelector('.pick, .held'); }
+  function locked(plr) { return plr.getAttribute('data-locked') === '1'; }
+  function fits(plr, li) {
+    return (' ' + plr.getAttribute('data-eligible') + ' ')
+      .indexOf(' ' + li.getAttribute('data-slot') + ' ') >= 0;
+  }
+
+  // A move is legal when both men can sit where the other is sitting, and
+  // neither is locked. Capacity needs no check: every seat holds one player
+  // and a swap is a permutation, so the counts cannot change.
+  function legal(from, to) {
+    if (!from || !to || to === from) return false;
+    var a = held(from), b = held(to);
+    if (!a || !fits(a, to)) return false;
+    return !b || (!locked(b) && fits(b, from));
+  }
+
+  function place(li, plr) {
+    li.insertBefore(plr, li.querySelector('.ph'));
+    li.classList.add('filled');
+    var f = field(plr);
+    if (f) f.value = li.getAttribute('data-slot');
+    var pick = plr.querySelector('.pick');
+    if (pick) pick.classList.toggle('start', li.getAttribute('data-start') === '1');
+  }
+
+  function swap(from, to) {
+    var a = held(from), b = held(to);
+    if (b) place(from, b); else from.classList.remove('filled');
+    place(to, a);
+    count();
+  }
+
+  function count() {
+    var fields = form.querySelectorAll('.pick, .held'), n = 0, i;
+    for (i = 0; i < fields.length; i++) {
+      if (fields[i].value !== fields[i].getAttribute('data-was')) n++;
+    }
+    if (tally) {
+      tally.textContent = n
+        ? n + (n === 1 ? ' player moved.' : ' players moved.') + ' Not saved yet.'
+        : 'Nothing changed yet.';
+    }
+  }
+
+  function paint() {
+    if (!drag) return;
+    drag.ghost.style.transform =
+      'translate(' + (drag.x - drag.dx) + 'px,' + (drag.y - drag.dy) + 'px)';
+    var el = document.elementFromPoint(drag.x, drag.y);
+    var li = el && el.closest ? el.closest('.slotrow') : null;
+    if (li !== drag.over) {
+      if (drag.over) drag.over.classList.remove('target', 'nope');
+      drag.over = li;
+      if (li && li !== drag.from) {
+        li.classList.add(legal(drag.from, li) ? 'target' : 'nope');
+      }
+    }
+    // Edge autoscroll, on the timer rather than on movement: a thumb parked
+    // at the bottom of a 27-row roster has to be able to reach the top of it
+    // without letting go.
+    var h = window.innerHeight;
+    if (drag.y < 78) window.scrollBy(0, -11);
+    else if (drag.y > h - 78) window.scrollBy(0, 11);
+  }
+
+  function stop() {
+    if (!drag) return;
+    var from = drag.from, over = drag.over;
+    clearInterval(drag.timer);
+    if (over) over.classList.remove('target', 'nope');
+    drag.ghost.parentNode.removeChild(drag.ghost);
+    drag.plr.classList.remove('lifting');
+    drag = null;
+    if (legal(from, over)) swap(from, over);
+  }
+
+  form.addEventListener('pointerdown', function (e) {
+    if (e.button) return;
+    var grip = e.target.closest ? e.target.closest('.grip') : null;
+    if (!grip) return;
+    var plr = grip.closest('.plr');
+    if (!plr || locked(plr)) return;
+    var box = plr.getBoundingClientRect();
+    var ghost = plr.cloneNode(true);
+    ghost.className = 'plr ghost';
+    ghost.style.width = box.width + 'px';
+    document.body.appendChild(ghost);
+    plr.classList.add('lifting');
+    drag = {
+      plr: plr, from: plr.closest('.slotrow'), ghost: ghost, over: null,
+      dx: e.clientX - box.left, dy: e.clientY - box.top,
+      x: e.clientX, y: e.clientY, timer: setInterval(paint, 16)
+    };
+    grip.setPointerCapture(e.pointerId);
+    paint();
+    e.preventDefault();
+  });
+
+  document.addEventListener('pointermove', function (e) {
+    if (!drag) return;
+    drag.x = e.clientX;
+    drag.y = e.clientY;
+    paint();
+    e.preventDefault();
+  });
+  document.addEventListener('pointerup', stop);
+  document.addEventListener('pointercancel', stop);
+
+  // The selects are the state, so a change made with one has to be counted
+  // the same as one made by dragging. The row does not move under it -- it
+  // will be in the right place on the next load, and shuffling the list while
+  // somebody is reading it is worse than leaving it alone.
+  form.addEventListener('change', count);
+  count();
+})();
+</script>"""
+
 
 #: Proposal states, mapped onto the three tag colours. Anything unlisted gets
 #: the neutral chip, which is the right default for a state added later: a new
@@ -769,6 +1348,12 @@ KIND_LABELS = {
 def _kind(kind: Any) -> str:
     key = str(kind).upper()
     return KIND_LABELS.get(key, key.replace("_", " ").capitalize())
+
+
+def _clip(text: str, limit: int) -> str:
+    """``text`` at most ``limit`` characters, with an ellipsis if it was cut."""
+    text = str(text)
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "\u2026"
 
 
 def _plural(n: int, word: str) -> str:
@@ -819,7 +1404,10 @@ def _who(player_id: Any, name: Any, cls: str = "who") -> str:
         return "<span class=%s>%s</span>" % (cls, label)
     # noopener as well as noreferrer: the new tab must not keep a handle on
     # the authenticated frontend it was opened from.
-    return ("<a class='%s link' href='%s' target=_blank "
+    # No second class: ``a.who`` is what styles this, and ``link`` was a
+    # leftover the stylesheet has never had a rule for. It survived because
+    # the only fixture that rendered a linked name had no player id in it.
+    return ("<a class='%s' href='%s' target=_blank "
             "rel='noopener noreferrer'>%s</a>" % (cls, href, label))
 
 
@@ -1063,7 +1651,17 @@ def _board(b: Mapping[str, Any], tz: Any) -> str:
     else:
         when = "<span class=bwhen>as of %s</span>" % _e(
             _when(b.get("updated_at"), tz))
-    out = ["<section class=board>",
+    # The whole panel is the link to the matchup behind it, rather than a
+    # "details" affordance in a corner: the panel *is* the summary of that
+    # page, so anywhere on it is the obvious place to press. A board with no
+    # league id -- only reachable from a row written before the column existed
+    # -- stays an inert section rather than linking nowhere.
+    lid = b.get("league_id")
+    open_tag, close_tag = "<section class=board>", "</section>"
+    if lid is not None:
+        open_tag = "<a class=board href='matchup?league=%s'>" % _e(lid)
+        close_tag = "</a>"
+    out = [open_tag,
            "<div class=bhead><span>%s</span>%s</div>"
            % (_e(b.get("league") or ""), when)]
     ahead = (mine is not None and theirs is not None and mine > theirs)
@@ -1095,8 +1693,144 @@ def _board(b: Mapping[str, Any], tz: Any) -> str:
                     if today else "no games left today")
     if foot:
         out.append("<div class=bfoot>%s</div>" % " &middot; ".join(foot))
-    out.append("</section>")
+    out.append(close_tag)
     return "".join(out)
+
+
+#: Injury tiers that earn a coloured meta line. Everything else -- ACTIVE, and
+#: the tiers the outside sources add -- reads as "nothing to say", which is the
+#: common case and should not be shouting.
+STATUS_WORDS = {"OUT": ("out", "Out"), "DAY_TO_DAY": ("dtd", "Day-to-day")}
+
+
+def _row(entry: Any, games: Mapping[int, Any], tz: Any) -> Dict[str, Any]:
+    """One roster entry flattened into the strings a template needs.
+
+    The view model stops here. Everything below this line renders dicts of
+    plain values, which is what makes the two new pages testable without an
+    ESPN type in sight -- the same reason the queue and the run log are built
+    from ``store`` rows rather than from ``Proposal`` objects.
+
+    The opponent line is assembled rather than looked up: ESPN's pro schedule
+    gives a side and an opponent id, and "@DAL" is the two of them together.
+    A player whose team is not playing gets no line at all rather than a
+    placeholder, because "no game" is already said by the dash in the points
+    column.
+    """
+    p = entry.player
+    game = games.get(p.pro_team_id)
+    opp, tip = "", ""
+    if game is not None:
+        opp = "%s%s" % ("" if game.home else "@", ids.pro_team(game.opponent_id))
+        if game.tipoff_utc is not None:
+            when = game.tipoff_utc
+            tip = _clock(when.astimezone(tz) if tz is not None else when)
+        elif game.time_tbd:
+            tip = "TBD"
+    cls, word = STATUS_WORDS.get(p.injury_status, ("", ""))
+    return {
+        "pid": p.player_id,
+        "name": p.name,
+        "slot": int(p.current_slot),
+        "team": ids.pro_team(p.pro_team_id),
+        "opp": opp,
+        "tip": tip,
+        "points": entry.points,
+        "locked": bool(p.lineup_locked),
+        "status": cls,
+        "status_word": word,
+        # Sorted so the markup is stable across loads, which is what makes a
+        # rendered page diffable and a test assertable.
+        "eligible": sorted(int(x) for x in p.eligible_slots),
+    }
+
+
+def _short_name(name: Any) -> str:
+    """``LaMelo Ball`` -> ``L. Ball``. For the matchup sheet, and only there.
+
+    Two rosters side by side on a phone is about seventy pixels of name per
+    side, so the choice is an initial or an ellipsis, and an initial loses
+    less: a surname identifies a player to someone who owns him, and
+    ``Nickeil A...`` identifies nobody. The Team page is one column wide and
+    keeps the full name.
+
+    A one-word name is left alone -- turning it into an initial and nothing
+    would erase it.
+    """
+    parts = str(name or "").split()
+    if len(parts) < 2 or not parts[0]:
+        return str(name or "")
+    return "%s. %s" % (parts[0][0], " ".join(parts[1:]))
+
+
+def _meta(row: Mapping[str, Any], cls: str = "plmeta") -> str:
+    """``CHA @DAL 7:30 pm``, or the injury if there is one to report.
+
+    The injury wins the line. A day-to-day player's tipoff is of no use to
+    somebody deciding whether to start him, and the two together would not fit
+    in a column this narrow anyway.
+    """
+    if row.get("status_word"):
+        bits = [row.get("team") or "", row["status_word"]]
+    elif row.get("opp"):
+        # His own team is left out when he has a game: the opponent line
+        # carries the fixture, and twelve characters of "MIL @PHI 7:30 pm" do
+        # not fit in half a phone. It goes back in below, where there is no
+        # fixture to spend the space on.
+        bits = [row["opp"], row.get("tip") or ""]
+    else:
+        bits = [row.get("team") or "", "&middot;", "no game"]
+    # Escaped piece by piece, so the one entity above survives and anything
+    # arriving from ESPN -- a team abbreviation is still ESPN's string -- does
+    # not. Joining first and escaping the result would print "&amp;middot;".
+    return "<span class='%s %s'>%s</span>" % (
+        cls, row.get("status") or "",
+        " ".join(b if b == "&middot;" else _e(b) for b in bits if b))
+
+
+def _points(value: Any, cls: str = "plpts") -> str:
+    """The day's score, or a dash. ``None`` and ``0.0`` are not the same answer.
+
+    A dash means ESPN has published nothing for this player today -- he has
+    not tipped off, or is not playing. A zero means he played and scored
+    nothing, which is the one number on the page worth being angry about.
+    """
+    if value is None:
+        return "<span class=%s>&mdash;</span>" % cls
+    return "<span class='%s scored'>%s</span>" % (cls, _e("%.1f" % float(value)))
+
+
+def _slot_order(slot_counts: Mapping[int, int]) -> List[int]:
+    """Every slot the league has, starters in ESPN's own id order, bench last.
+
+    Id order is positional order -- PG, SG, SF, PF, C, then the combination
+    slots, then UTIL -- so it needs no table of its own. Bench and IR are
+    pulled to the end because they are not part of the lineup being compared.
+    """
+    starters = sorted(s for s in slot_counts if ids.is_starting_slot(s))
+    tail = [s for s in (ids.BENCH_SLOT, ids.IR_SLOT) if s in slot_counts]
+    return starters + tail
+
+
+def _slot_seats(slot_counts: Mapping[int, int]) -> List[int]:
+    """One entry per *seat*: UTIL with a capacity of four appears four times."""
+    out: List[int] = []
+    for slot in _slot_order(slot_counts):
+        out += [slot] * max(0, int(slot_counts.get(slot, 0)))
+    return out
+
+
+def _seat(rows: List[Dict[str, Any]], slot: int) -> Optional[Dict[str, Any]]:
+    """Take the next player sitting in ``slot``, or ``None`` if the seat is empty.
+
+    Destructive on purpose: called once per seat down a list of seats, so a
+    UTIL slot with a capacity of four hands out four different players rather
+    than the same one four times.
+    """
+    for i, r in enumerate(rows):
+        if r["slot"] == slot:
+            return rows.pop(i)
+    return None
 
 
 def _games_line(used: Optional[float], cap: Optional[float]) -> str:
@@ -1134,10 +1868,101 @@ def _league_columns(page: StatusPage,
         for key in page.league_order():
             groups[key] = []
     for r in rows:
-        groups.setdefault(r["league_id"], []).append(r)
+        # ``.get``: the scoreboard rows go through here too, and one written
+        # before that column existed has no league at all. It gets its own
+        # ``None`` group and a column at the end rather than taking the page
+        # down with it.
+        groups.setdefault(r.get("league_id"), []).append(r)
     order = [k for k in page.league_order() if k in groups]
     order += [k for k in groups if k not in order]  # a league since removed
     return [(page.league_label(k), groups[k]) for k in order]
+
+
+def _open(title: str) -> str:
+    """Everything above the first thing on the page. Shared by all three.
+
+    One stylesheet inline for all of them: it is a few kilobytes, it is served
+    from the same response, and a second file would need the static mount this
+    module deliberately does not have.
+    """
+    return (
+        "<!doctype html><html><head><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        # This document's own URL contains the ingress session token, and the
+        # page loads images from third parties: ESPN's headshot CDN, and
+        # whatever host a league member chose for his team logo. None of them
+        # gets a Referer header.
+        "<meta name=referrer content=no-referrer>"
+        "<title>%s</title><style>%s</style></head><body>"
+        "<main class=wrap>" % (_e(title), CSS)
+    )
+
+
+def _close(user: str = "") -> str:
+    out = []
+    if user:
+        out.append("<footer>signed in as %s</footer>" % _e(user))
+    out.append("</main></body></html>")
+    return "".join(out)
+
+
+#: The two places this app can be. Kept as data because the strip is rendered
+#: on every page and the only thing that differs is which one is lit.
+TABS = (("Overview", "."), ("Team", "team"))
+
+
+def _tabs(here: str) -> str:
+    """The top-level strip. ``here`` is the relative href of the current page.
+
+    Relative hrefs, like every other URL this module emits: ingress serves the
+    app under a rotating prefix, so ``/team`` would leave it. From ``.../team``
+    a bare ``team`` resolves to itself and ``.`` to the directory above, which
+    is the index -- the two cases that have to work.
+    """
+    out = ["<nav class=tabs>"]
+    for label, href in TABS:
+        out.append("<a class='tab%s' href='%s'>%s</a>"
+                   % (" on" if href == here else "", _e(href), _e(label)))
+    out.append("</nav>")
+    return "".join(out)
+
+
+def _league_links(page: StatusPage, here: str, current: Any) -> str:
+    """One pill per configured league, or nothing when there is only one.
+
+    A single inert pill is worse than no pill: it looks like a control and
+    answers a question the reader did not ask. Two leagues is the configuration
+    this was built for and the only one where the strip earns its line.
+    """
+    ids_ = page.league_order()
+    if len(ids_) < 2:
+        return ""
+    out = ["<nav class=lgpills>"]
+    for lid in ids_:
+        out.append("<a class='pill%s' href='%s?league=%s'>%s</a>" % (
+            " on" if str(lid) == str(current) else "",
+            _e(here), _e(lid), _e(page.league_label(lid)),
+        ))
+    out.append("</nav>")
+    return "".join(out)
+
+
+def _oops(page: StatusPage, title: str, message: str) -> str:
+    """A detail page that could not be built. Says so, and offers the way back.
+
+    Worth a function: both pages reach ESPN on every load and neither has a
+    cached form to fall back to, so this is the honest floor rather than an
+    exceptional case. A blank page with a spinner would be the dishonest one.
+    """
+    return "".join([
+        _open(title),
+        "<a class=back href='.'>&larr; Overview</a>",
+        "<h1 class=phead>%s</h1>" % _e(title),
+        "<div class='card empty solo'><b>%s</b>"
+        "The page needs a live read and that read did not come back. "
+        "Nothing has been changed.</div>" % _e(message),
+        _close(),
+    ])
 
 
 def render(page: StatusPage, *, user: str = "",
@@ -1157,17 +1982,9 @@ def render(page: StatusPage, *, user: str = "",
         boards = page.scoreboards()
     tz = page.tz()
     parts: List[str] = [
-        "<!doctype html><html><head><meta charset=utf-8>"
-        "<meta name=viewport content='width=device-width,initial-scale=1'>"
-        # This document's own URL contains the ingress session token, and the
-        # page loads images from third parties: ESPN's headshot CDN, and
-        # whatever host a league member chose for his team logo. None of them
-        # gets a Referer header.
-        "<meta name=referrer content=no-referrer>"
-        "<title>NBA Autopilot</title><style>%s</style></head><body>"
-        "<main class=wrap>" % CSS,
+        _open("NBA Autopilot"),
         "<div class=masthead>",
-        "<h1>NBA Autopilot</h1>",
+        "<div class=mastrow><h1>NBA Autopilot</h1>%s</div>" % _tabs("."),
     ]
 
     # The chips answer, above the fold, the two questions the page is opened
@@ -1308,10 +2125,291 @@ def render(page: StatusPage, *, user: str = "",
             parts.append("</section>")
         parts.append("</div>")
 
-    if user:
-        parts.append("<footer>signed in as %s</footer>" % _e(user))
-    parts.append("</main></body></html>")
+    parts.append(_close(user))
     return "".join(parts)
+
+
+# -- the matchup sheet ------------------------------------------------------
+
+
+def render_matchup(page: StatusPage, view: Mapping[str, Any],
+                   *, user: str = "") -> str:
+    """One league's head-to-head, slot by slot, for one day of the week.
+
+    The question this answers is the one the scoreboard panel raises and
+    cannot settle: *the score is 834-749, who is still to play?* So the rows
+    are paired by lineup slot -- my PG against theirs -- and each carries the
+    opponent, the tipoff and the day's points, which together say whether a
+    number is final or has not started.
+    """
+    if view.get("error"):
+        return _oops(page, view.get("league") or "Matchup", view["error"])
+
+    score = view["score"]
+    parts = [
+        _open("%s matchup" % (view.get("league") or "")),
+        "<a class=back href='.'>&larr; Overview</a>",
+        "<h1 class=phead>%s</h1>" % _e(view.get("league") or "Matchup"),
+        _vs(score, view.get("games_cap")),
+        _daynav(view),
+    ]
+
+    mine, theirs = list(view["mine"]), list(view["theirs"])
+    counts = view["slot_counts"]
+    starters = [s for s in _slot_seats(counts) if ids.is_starting_slot(s)]
+
+    rows, mine_pts, their_pts = [], [], []
+    for slot in starters:
+        a, b = _seat(mine, slot), _seat(theirs, slot)
+        rows.append("<div class=mrow>%s<div class=mslot>%s</div>%s</div>" % (
+            _mside(a, "me"), _e(ids.slot_name(slot)), _mside(b, "them")))
+        for bucket, row in ((mine_pts, a), (their_pts, b)):
+            if row is not None and row["points"] is not None:
+                bucket.append(float(row["points"]))
+
+    # The day's subtotal, which is the arithmetic a reader would otherwise do
+    # down a column of eleven numbers. Summed over what ESPN has actually
+    # scored, so a day not yet played totals to a dash rather than to 0.0.
+    rows.append(
+        "<div class='mrow tot'><div class='mside me'>%s</div>"
+        "<div class=mslot>%s</div>"
+        "<div class='mside them'>%s</div></div>" % (
+            _points(sum(mine_pts) if mine_pts else None, "mpts"),
+            _e("today" if view.get("today") else "day"),
+            _points(sum(their_pts) if their_pts else None, "mpts"),
+        ))
+    parts.append("<div class=sheet>%s</div>" % "".join(rows))
+
+    # Whatever is left in the two lists is everyone not starting. Behind a
+    # disclosure because it is twice as long as the lineup above it and is not
+    # what the page was opened for -- but present, because "who could he still
+    # swap in" is the second question and it should not need another page.
+    if mine or theirs:
+        bench = []
+        for slot in _slot_seats(counts):
+            if ids.is_starting_slot(slot):
+                continue
+            a, b = _seat(mine, slot), _seat(theirs, slot)
+            if a is None and b is None:
+                continue
+            bench.append("<div class=mrow>%s<div class=mslot>%s</div>%s</div>"
+                         % (_mside(a, "me"), _e(ids.slot_name(slot)),
+                            _mside(b, "them")))
+        if bench:
+            parts.append(
+                "<details class=logs><summary>Not starting</summary>"
+                "<div class='sheet' style='margin-top:10px'>%s</div></details>"
+                % "".join(bench))
+
+    parts.append(_close(user))
+    return "".join(parts)
+
+
+def _vs(score: Any, cap: Optional[float] = None) -> str:
+    """The header band: two crests, two totals, and who is up by how much."""
+    mine, theirs = _num(score.my_points), _num(score.opp_points)
+    bye = score.opp_team_id is None
+    ahead = (not bye and mine is not None and theirs is not None
+             and mine > theirs)
+    behind = (not bye and mine is not None and theirs is not None
+              and theirs > mine)
+
+    def side(name: Any, logo: Any, pts: Optional[float], used: Any,
+             leading: bool) -> str:
+        return ("<div class='vsside%s'>%s<span class=vsname>%s</span>"
+                "<span class=vspts>%s</span>%s</div>" % (
+                    " up" if leading else "",
+                    _crest(logo, name), _e(name or "—"),
+                    "—" if pts is None else _e("%.1f" % pts),
+                    ("<span class=vsgames>%s</span>"
+                     % _e(_games_line(_num(used), cap)))
+                    if used is not None else "",
+                ))
+
+    # "by 84.5" between two numbers is ambiguous about whose 84.5 it is, and
+    # the reader of this page has exactly one side. So it is said in words.
+    if bye:
+        gap = "<span class=vsgap>Bye week</span>"
+    elif mine is None or theirs is None:
+        gap = ""
+    elif mine == theirs:
+        gap = "<span class=vsgap>Level</span>"
+    else:
+        gap = "<span class='vsgap %s'>%s by %s</span>" % (
+            "lead" if ahead else "trail", "Ahead" if ahead else "Behind",
+            _e("%.1f" % abs(mine - theirs)))
+    return ("<section class=vs>%s<div class=vsmid>vs%s</div>%s</section>" % (
+        side(score.my_name, score.my_logo, mine, score.my_games_used, ahead),
+        gap,
+        side("No opponent" if bye else score.opp_name, score.opp_logo,
+             None if bye else theirs, score.opp_games_used, behind),
+    ))
+
+
+def _daynav(view: Mapping[str, Any]) -> str:
+    """Previous day, this day, next day -- inside the matchup week and no further.
+
+    Bounded by the week because the score above it is the week's. An arrow
+    that walked out of the matchup period would put a day's rows under a total
+    that does not include them.
+    """
+    def arrow(period: Any, glyph: str, label: str) -> str:
+        if period is None:
+            return "<span class='dayarrow off' aria-hidden=true>%s</span>" % glyph
+        return ("<a class=dayarrow href='matchup?league=%s&amp;sp=%s' "
+                "aria-label='%s'>%s</a>"
+                % (_e(view["league_id"]), _e(period), _e(label), glyph))
+
+    return ("<div class=daynav>%s<span class=dayis>%s%s</span>%s</div>" % (
+        arrow(view.get("prev"), "&lsaquo;", "Previous day"),
+        "<b>Today</b> &middot; " if view.get("today") else "",
+        _e(view.get("day") or ""),
+        arrow(view.get("next"), "&rsaquo;", "Next day"),
+    ))
+
+
+def _mside(row: Optional[Mapping[str, Any]], side: str) -> str:
+    """One half of a matchup row. An empty seat is a dash, not a blank cell."""
+    if row is None:
+        return "<div class='mside %s'><span class=mmeta>—</span></div>" % side
+    return ("<div class='mside %s'>%s<div class=mwho>%s%s</div>%s</div>" % (
+        side, _face(row["pid"]), _who(row["pid"], _short_name(row["name"])),
+        _meta(row, "mmeta"), _points(row["points"], "mpts"),
+    ))
+
+
+# -- the lineup editor ------------------------------------------------------
+
+
+def render_team(page: StatusPage, view: Mapping[str, Any], *, user: str = "",
+                note: str = "", bad: bool = False) -> str:
+    """One team's roster, as a form that posts a whole lineup.
+
+    The control is a ``<select>`` per player, and dragging is a gesture that
+    writes to those selects rather than a second way of saying the same thing.
+    That ordering is deliberate: the selects work with no script at all, on a
+    phone keyboard, and under a screen reader, and they are what the form
+    actually submits -- so the page cannot be left in a state where what was
+    dragged and what gets posted disagree.
+
+    ``note`` carries the outcome of the last save. It is rendered above the
+    roster rather than beside the button because a rejected lineup is the one
+    thing on this page worth reading before anything else.
+    """
+    if view.get("error"):
+        return _oops(page, view.get("league") or "Team", view["error"])
+
+    counts = view["slot_counts"]
+    rows = list(view["roster"])
+    parts = [
+        _open("%s roster" % (view.get("league") or "")),
+        "<div class=masthead><div class=mastrow>"
+        "<h1>Your team</h1>%s</div></div>" % _tabs("team"),
+        _league_links(page, "team", view["league_id"]),
+    ]
+    if note:
+        parts.append(
+            "<div class='card banner%s solo'><div class=bar></div><div>"
+            "<b>%s</b></div></div>" % (" bad" if bad else "", _e(note)))
+    parts.append(
+        "<div class='lede solo'>%s &middot; drag a player onto another to "
+        "swap them, or pick a slot. Nothing is sent to ESPN until you "
+        "save.</div>" % _e(view.get("day") or ""))
+
+    parts.append("<form method=post action=lineup id=lineup>")
+    parts.append("<input type=hidden name=league value='%s'>"
+                 % _e(view["league_id"]))
+    # The period is posted back rather than re-derived on arrival so that the
+    # lineup that was shown and the lineup that is written are addressed to the
+    # same day. A page left open across midnight should fail loudly on a stale
+    # period, which ESPN does with a 409, and not quietly rewrite tomorrow.
+    parts.append("<input type=hidden name=sp value='%s'>" % _e(view["period"]))
+
+    for title, slots in (
+        ("Starters", [s for s in _slot_order(counts) if ids.is_starting_slot(s)]),
+        ("Bench", [ids.BENCH_SLOT]),
+        ("Injured reserve", [ids.IR_SLOT]),
+    ):
+        seats = [s for s in _slot_seats(counts) if s in slots]
+        if not seats:
+            continue
+        parts.append("<h2 class=solo>%s</h2><ul class=lineup>" % _e(title))
+        for slot in seats:
+            parts.append(_seat_row(_seat(rows, slot), slot, counts))
+        parts.append("</ul>")
+
+    # Anyone the seats did not account for: a player in a slot this league
+    # does not have, or one more player in a slot than it has room for. Shown
+    # rather than dropped, because ``set_lineup`` requires a *total* map and a
+    # player with no field in this form would be refused by its preflight --
+    # a 403 explaining nothing instead of a row explaining itself.
+    if rows:
+        parts.append("<h2 class=solo>Unplaced</h2><ul class=lineup>")
+        for row in rows:
+            parts.append(_seat_row(row, row["slot"], counts))
+        parts.append("</ul>")
+
+    parts.append(
+        "<div class=savebar><span class=count2>Nothing changed yet.</span>"
+        "<button class=ok type=submit>Save lineup</button></div>")
+    parts.append("</form>")
+    parts.append(DRAG_JS)
+    parts.append(_close(user))
+    return "".join(parts)
+
+
+def _seat_row(row: Optional[Mapping[str, Any]], slot: int,
+              counts: Mapping[int, int]) -> str:
+    """One seat in the lineup: the player in it, or the fact that it is empty.
+
+    Every seat renders its empty state as well as its player, hidden by the
+    ``filled`` class. That is what lets a drag move a player into a vacancy
+    without the script having to build markup -- it moves one element and
+    toggles one class, and the two states were both rendered by the server.
+    """
+    empty = ("<span class=ph><span class=slotpill>%s</span>"
+             "<span class=plmeta>Empty</span></span>"
+             % _e(ids.slot_name(slot)))
+    start = ids.is_starting_slot(slot)
+    seat = "data-slot='%d' data-start='%d'" % (slot, 1 if start else 0)
+    if row is None:
+        return "<li class=slotrow %s>%s</li>" % (seat, empty)
+
+    eligible = sorted({s for s in row["eligible"] if s in counts} | {slot})
+    opts = "".join(
+        "<option value='%d'%s>%s</option>"
+        % (s, " selected" if s == slot else "", _e(ids.slot_name(s)))
+        for s in eligible
+    )
+    field = (
+        "<select class='pick%s' name='slot_%d' data-was='%d' "
+        "aria-label='Lineup slot for %s'%s>%s</select>" % (
+            " start" if start else "", int(row["pid"]), slot,
+            _e(row["name"]), " disabled" if row["locked"] else "", opts)
+    )
+    if row["locked"]:
+        # A disabled control submits nothing, and a lineup missing one player
+        # is refused whole by the write preflight. The hidden twin is what
+        # keeps the posted map total while the visible one stays unusable.
+        field += ("<input type=hidden class=held name='slot_%d' value='%d' "
+                  "data-was='%d'>" % (int(row["pid"]), slot, slot))
+    return (
+        "<li class='slotrow filled' %s>"
+        "<div class='plr%s' data-pid='%d' data-eligible='%s' data-locked='%d'>"
+        "<span class=grip aria-hidden=true></span>%s%s"
+        "<div class=plwho>%s%s</div>%s</div>%s</li>" % (
+            seat,
+            " lock" if row["locked"] else "",
+            int(row["pid"]),
+            " ".join(str(s) for s in eligible),
+            1 if row["locked"] else 0,
+            field,
+            _face(row["pid"]),
+            _who(row["pid"], row["name"]),
+            _meta(row),
+            _points(row["points"]),
+            empty,
+        ))
 
 
 def _runs(parts: List[str], runs: List[Dict[str, Any]], tz: Any) -> None:
@@ -1442,9 +2540,11 @@ async def read_form(request: Any) -> Dict[str, str]:
     return {k: v[0] for k, v in parsed.items() if v}
 
 
+#: Said by both write paths, so it has to be true of both: approving a swap
+#: and hand-editing a lineup are the same authority over the same roster.
 NOT_OWNER = (
     "This Home Assistant user is not the configured owner of this app, so it "
-    "cannot approve roster moves."
+    "cannot change these rosters."
 )
 
 
@@ -1479,6 +2579,93 @@ async def apply_decision(bot: Any, *, action_id: str, verb: str,
     elif approve:
         await bot.execute_approved()
     return None
+
+
+#: How a saved lineup came back. ``bad`` drives the banner's colour and
+#: nothing else; the page re-reads the roster either way, so a refused write
+#: is shown against what ESPN actually has rather than against what was asked
+#: for.
+LineupResult = Tuple[str, bool]
+
+
+async def apply_lineup(bot: Any, *, league_id: str, period: str,
+                       slots: Mapping[str, str],
+                       user_id: str) -> LineupResult:
+    """Write a hand-edited lineup. ``(what to tell the reader, was it bad)``.
+
+    A module-level function and not a closure in ``build_app``, for the same
+    reason :func:`apply_decision` is: this is a security boundary, FastAPI is
+    not installed in the development environment, and a check that cannot be
+    tested where it is written is a check that will eventually be wrong.
+
+    It validates almost nothing itself, on purpose. ``EspnWrite.set_lineup``
+    already refuses a partial map, a phantom player, an ineligible slot, an
+    over-full slot, a locked player being moved and a roster that would change
+    size -- and it is the path every other lineup in this app goes through. A
+    second, weaker copy of those rules here would be a second place for them
+    to drift, and the one that drifted would be this one.
+
+    What it does own is *who*: ingress has already authenticated the request
+    against Home Assistant, and this decides whether that user is the
+    configured owner. Other members of the household must not be able to bench
+    somebody.
+    """
+    owner = bot.cfg.ha_owner_user_id
+    if owner and user_id != owner:
+        log.warning("refusing a lineup write from user_id=%r (expected owner)",
+                    user_id or None)
+        return NOT_OWNER, True
+
+    lg = None
+    for candidate in getattr(bot, "leagues", []):
+        if str(candidate.ref.league_id) == str(league_id):
+            lg = candidate
+    if lg is None:
+        return "That league is not configured.", True
+
+    target: Dict[int, int] = {}
+    for key, value in slots.items():
+        if not key.startswith("slot_"):
+            continue
+        try:
+            target[int(key[5:])] = int(value)
+        except (TypeError, ValueError):
+            # A field name or value that is not a number did not come from
+            # this page. Refusing the whole write is right: a lineup is only
+            # meaningful entire, and skipping the bad pair would submit a
+            # partial map that the preflight would then reject anyway.
+            log.warning("ignoring a lineup write with a malformed field %r", key)
+            return "That form did not parse; nothing was sent.", True
+    if not target:
+        return "That form named no players; nothing was sent.", True
+
+    try:
+        scoring_period = int(period)
+    except (TypeError, ValueError):
+        scoring_period = None
+
+    try:
+        result = await asyncio.to_thread(
+            lg.write.set_lineup, target, scoring_period=scoring_period)
+    except Exception as exc:  # noqa: BLE001
+        # Includes ``PreflightError`` -- two men in one slot, somebody moved
+        # after his game started -- whose message is written for a person and
+        # is the most useful thing that could be put on the screen.
+        log.warning("manual lineup write for league %s failed: %s",
+                    league_id, exc)
+        # Truncated because this is carried to the next page in a query
+        # string, and a preflight listing every eligible slot of a player with
+        # ten of them runs to several hundred characters. The whole message is
+        # in the log above, which is where a reader goes next anyway.
+        return "ESPN refused that lineup: %s" % _clip(str(exc), 220), True
+
+    if not result.items:
+        return "That is already the lineup; nothing was sent.", False
+
+    moved = _plural(len(result.items), "move")
+    if result.shadow:
+        return ("Shadow mode: %s recorded, nothing sent to ESPN." % moved), False
+    return "Saved. %s written to ESPN." % moved, False
 
 
 # -- routing ---------------------------------------------------------------
@@ -1525,6 +2712,53 @@ def build_app(bot: Any):
         # failing, so this cannot stop the page rendering.
         boards = await page.live_scoreboards()
         return HTMLResponse(render(page, user=name, boards=boards))
+
+    @app.get("/matchup", response_class=HTMLResponse)
+    async def matchup(request: Request):
+        _, name = identify(request)
+        view = await page.matchup_view(
+            request.query_params.get("league"),
+            request.query_params.get("sp"),
+        )
+        return HTMLResponse(render_matchup(page, view, user=name))
+
+    @app.get("/team", response_class=HTMLResponse)
+    async def team(request: Request):
+        _, name = identify(request)
+        # No league named: the first configured one, which is the only answer
+        # that is not a guess. The pills above the roster are how you get to
+        # the other, and with one league there is nothing to choose.
+        order = page.league_order()
+        wanted = request.query_params.get("league") or (
+            order[0] if order else "")
+        view = await page.team_view(wanted)
+        return HTMLResponse(render_team(
+            page, view, user=name,
+            note=request.query_params.get("note") or "",
+            bad=request.query_params.get("bad") == "1",
+        ))
+
+    @app.post("/lineup")
+    async def lineup(request: Request):
+        form = await read_form(request)
+        uid, _ = identify(request)
+        note, bad = await apply_lineup(
+            bot,
+            league_id=str(form.get("league") or ""),
+            period=str(form.get("sp") or ""),
+            slots=form,
+            user_id=uid,
+        )
+        # 303 back to the roster, so a refresh re-reads ESPN instead of
+        # resubmitting the lineup, and the outcome is carried in the query
+        # string rather than in server-side state. The page it lands on shows
+        # what ESPN *has*, which after a refusal is not what was posted -- and
+        # that is the point of re-reading rather than re-rendering the form.
+        return RedirectResponse(
+            "team?league=%s&note=%s&bad=%d" % (
+                quote(str(form.get("league") or "")), quote(note), 1 if bad else 0),
+            status_code=303,
+        )
 
     @app.post("/decide")
     async def decide(request: Request):

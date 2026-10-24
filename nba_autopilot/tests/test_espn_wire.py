@@ -25,7 +25,7 @@ import json
 import os
 import sys
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(
     0,
@@ -840,3 +840,211 @@ class TestWritesCarryTheCallersPeriod(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# The two reads the status page added, both probed against a live league on
+# 2026-10-24. Each test below is a thing the obvious implementation gets wrong.
+# ---------------------------------------------------------------------------
+
+
+def _day_entry(pid, name, slot, *, stats=(), locked=False, pro_team=2,
+               on_team=7):
+    return {
+        "playerId": pid,
+        "lineupSlotId": slot,
+        "playerPoolEntry": {
+            "status": "ONTEAM",
+            "onTeamId": on_team,
+            "lineupLocked": locked,
+            # The field a page must *not* read for a day's score. See below.
+            "appliedStatTotal": 29.5,
+            "player": {
+                "id": pid,
+                "fullName": name,
+                "proTeamId": pro_team,
+                "eligibleSlots": [slot, UTIL, BE],
+                "injuryStatus": "ACTIVE",
+                "stats": list(stats),
+            },
+        },
+    }
+
+
+def _stat(period, applied, *, source=0, split=5):
+    return {
+        "scoringPeriodId": period,
+        "statSourceId": source,
+        "statSplitTypeId": split,
+        "appliedTotal": applied,
+    }
+
+
+class _DayClient:
+    """Answers ``mRoster`` for several teams, and records the query it got."""
+
+    def __init__(self, teams):
+        self.teams = teams
+        self.params = None
+
+    def get(self, url, params=None, headers=None):
+        self.params = list(params or [])
+        return _Resp({"teams": self.teams})
+
+    def post(self, *a, **k):
+        raise AssertionError("read path must not POST")
+
+
+def _day_reader(teams):
+    cfg = EspnConfig(league_id=1, team_id=7, espn_s2="s2", swid="{X}", season=2027)
+    return EspnRead(cfg, _DayClient(teams))
+
+
+class TestDayRosterWire(unittest.TestCase):
+    """``day_rosters`` -- the lineup *as it stood*, and that day's points.
+
+    Probed on 2026-10-24: the same request for period 4 and period 5 returned
+    different ``lineupSlotId`` values for the same players, and period 4 came
+    back with every player locked. So rewinding is real, and the page can show
+    a day already played.
+    """
+
+    def test_the_requested_period_is_sent(self):
+        r = _day_reader([{"id": 7, "roster": {"entries": []}}])
+        r.day_rosters(5)
+        self.assertIn(("scoringPeriodId", "5"), r.http.params)
+
+    def test_the_days_points_come_from_the_split_row_not_the_running_total(self):
+        """``appliedStatTotal`` is a trap and this is the whole test.
+
+        ESPN populates it even for a period with no games played, carrying the
+        *previous* day's number -- 29.5 on the live probe, for a player who had
+        not tipped off. A page built on it reports last night's scores as
+        today's, every morning, and looks right while doing it.
+        """
+        teams = [{"id": 7, "roster": {"entries": [
+            _day_entry(1, "Played", 0, stats=[_stat(5, 31.5)]),
+            _day_entry(2, "Not yet", 1, stats=[_stat(4, 42.0)]),
+        ]}}]
+        rows = {d.player.name: d.points for d in _day_reader(teams).day_rosters(5)[7]}
+        self.assertEqual(rows["Played"], 31.5)
+        self.assertIsNone(rows["Not yet"])
+
+    def test_a_zero_is_a_score_and_not_an_absence(self):
+        """He played and scored nothing. That is not the same as a dash."""
+        teams = [{"id": 7, "roster": {"entries": [
+            _day_entry(1, "Blanked", 0, stats=[_stat(5, 0.0)]),
+        ]}}]
+        rows = _day_reader(teams).day_rosters(5)[7]
+        self.assertEqual(rows[0].points, 0.0)
+        self.assertIsNotNone(rows[0].points)
+
+    def test_a_projection_row_for_the_same_day_is_not_the_score(self):
+        """``statSourceId`` 1 is ESPN's projection and would read as fact."""
+        teams = [{"id": 7, "roster": {"entries": [
+            _day_entry(1, "Projected only", 0,
+                       stats=[_stat(5, 38.0, source=1)]),
+        ]}}]
+        self.assertIsNone(_day_reader(teams).day_rosters(5)[7][0].points)
+
+    def test_a_season_split_for_the_same_day_is_not_the_score(self):
+        """Split 0 is the season total and is 2900 points, not tonight's 31."""
+        teams = [{"id": 7, "roster": {"entries": [
+            _day_entry(1, "Season total", 0, stats=[_stat(5, 2917.5, split=0)]),
+        ]}}]
+        self.assertIsNone(_day_reader(teams).day_rosters(5)[7][0].points)
+
+    def test_every_team_comes_back_from_one_request(self):
+        """A head-to-head costs one request, which is why the page can afford it."""
+        teams = [
+            {"id": 7, "roster": {"entries": [_day_entry(1, "Mine", 0)]}},
+            {"id": 6, "roster": {"entries": [
+                _day_entry(2, "Theirs", 0, on_team=6)]}},
+        ]
+        got = _day_reader(teams).day_rosters(5)
+        self.assertEqual(sorted(got), [6, 7])
+
+    def test_team_ids_filters_without_a_second_request(self):
+        teams = [
+            {"id": 7, "roster": {"entries": [_day_entry(1, "Mine", 0)]}},
+            {"id": 6, "roster": {"entries": [
+                _day_entry(2, "Theirs", 0, on_team=6)]}},
+        ]
+        r = _day_reader(teams)
+        self.assertEqual(list(r.day_rosters(5, team_ids=[7])), [7])
+
+    def test_a_departed_player_is_excluded_here_too(self):
+        """Same ghost as ``roster``: he lingers in ``entries`` with his slot."""
+        teams = [{"id": 7, "roster": {"entries": [
+            _day_entry(1, "Still here", 0),
+            _day_entry(2, "Dropped", 1, on_team=0),
+        ]}}]
+        rows = _day_reader(teams).day_rosters(5)[7]
+        self.assertEqual([d.player.name for d in rows], ["Still here"])
+
+    def test_the_lock_flag_survives(self):
+        """What stops the Team page offering to move a man whose game started."""
+        teams = [{"id": 7, "roster": {"entries": [
+            _day_entry(1, "Tipped off", 0, locked=True),
+        ]}}]
+        self.assertTrue(_day_reader(teams).day_rosters(5)[7][0].player.lineup_locked)
+
+
+class _ScheduleClient:
+    def __init__(self, pro_teams):
+        self.pro_teams = pro_teams
+
+    def get(self, url, params=None, headers=None):
+        return _Resp({"settings": {"proTeams": self.pro_teams}})
+
+    def post(self, *a, **k):
+        raise AssertionError("read path must not POST")
+
+
+class TestProGamesWire(unittest.TestCase):
+    """``pro_games_by_period`` -- who, when, and which side.
+
+    The payload shape is from the live probe: ``awayProTeamId``,
+    ``homeProTeamId``, ``date`` in epoch milliseconds, ``startTimeTBD``.
+    """
+
+    GAME = {"awayProTeamId": 11, "homeProTeamId": 3,
+            "date": 1792627200000, "scoringPeriodId": 2}
+
+    def _read(self):
+        teams = [
+            {"id": 3, "proGamesByScoringPeriod": {"2": [dict(self.GAME)]}},
+            {"id": 11, "proGamesByScoringPeriod": {"2": [dict(self.GAME)]}},
+        ]
+        cfg = EspnConfig(league_id=1, team_id=7, espn_s2="s2", swid="{X}",
+                         season=2027)
+        return EspnRead(cfg, _ScheduleClient(teams)).pro_games_by_period()
+
+    def test_both_sides_are_indexed_so_no_pairing_is_needed(self):
+        games = self._read()[2]
+        self.assertEqual(sorted(games), [3, 11])
+
+    def test_the_side_is_read_from_which_team_the_entry_is_under(self):
+        games = self._read()[2]
+        self.assertTrue(games[3].home)
+        self.assertFalse(games[11].home)
+
+    def test_each_side_names_the_other_as_the_opponent(self):
+        games = self._read()[2]
+        self.assertEqual(games[3].opponent_id, 11)
+        self.assertEqual(games[11].opponent_id, 3)
+
+    def test_the_tipoff_is_a_utc_instant_from_epoch_milliseconds(self):
+        when = self._read()[2][3].tipoff_utc
+        self.assertEqual(when.tzinfo, timezone.utc)
+        self.assertEqual(int(when.timestamp() * 1000), self.GAME["date"])
+
+    def test_a_game_with_no_time_yet_is_dated_none_and_flagged(self):
+        teams = [{"id": 3, "proGamesByScoringPeriod": {"2": [
+            {"awayProTeamId": 11, "homeProTeamId": 3, "startTimeTBD": True},
+        ]}}]
+        cfg = EspnConfig(league_id=1, team_id=7, espn_s2="s2", swid="{X}",
+                         season=2027)
+        game = EspnRead(cfg, _ScheduleClient(teams)).pro_games_by_period()[2][3]
+        self.assertIsNone(game.tipoff_utc)
+        self.assertTrue(game.time_tbd)

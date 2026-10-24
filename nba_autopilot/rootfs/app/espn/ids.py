@@ -219,6 +219,21 @@ SPLIT_LAST_7 = "01"
 SPLIT_LAST_15 = "02"
 SPLIT_LAST_30 = "03"
 
+#: The two halves of that key, as the numbers they are. A *per-day* score is
+#: not reachable through the composite keys above: it is the row whose
+#: ``statSourceId`` is actual-not-projected and whose ``statSplitTypeId`` is
+#: the single-scoring-period split, picked out by its own
+#: ``scoringPeriodId``. Verified live on 2026-10-24: every scored player on
+#: both leagues carried exactly one ``0``/``5`` row per day played.
+#:
+#: Do **not** reach for ``playerPoolEntry.appliedStatTotal`` instead. It is
+#: populated on a request for a period that has not been played yet, carrying
+#: the *previous* day's score -- on the same read, LaMelo Ball's row for a
+#: period with no games showed 29.5, which was the day before. A page built on
+#: it would report last night's scores as today's.
+STAT_SOURCE_ACTUAL = 0
+SPLIT_ONE_SCORING_PERIOD = 5
+
 #: ESPN's roster feed emits only these three. There is deliberately no
 #: ``QUESTIONABLE`` here -- ESPN does not publish that tier, which is the entire
 #: reason ``sources/sleeper.py`` and the official injury report exist. Mapping

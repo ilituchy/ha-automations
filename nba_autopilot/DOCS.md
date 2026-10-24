@@ -375,6 +375,49 @@ while logged in as yourself.
 Note this is the **user** ID, not the **person** entity id — it's hex, not
 something like `person.ian`.
 
+## The status page
+
+Open the add-on and you get three views.
+
+**Overview** is the one it starts on: this week's score for each league, then
+anything waiting on you, then what the recent runs did. Everything is in
+league columns — score at the top, approvals under it, runs under those — so a
+column reads top to bottom as one league's story.
+
+**Tapping a score** opens that league's matchup: both lineups slot by slot,
+each player's opponent, tip-off time and points for the day, and the day's
+subtotal for each side. The arrows either side of the date walk through the
+days of the matchup week. A dash in the points column means ESPN has published
+nothing for that player that day — he has not tipped off, or is not playing. A
+`0.0` means he played and scored nothing.
+
+**Team** is your roster, and the one place in this app where *you* move
+players rather than the optimizer. Drag a player by the handle on the left
+onto another player to swap their slots, or tap the slot pill and pick one.
+Nothing is sent to ESPN until you press **Save lineup**; the bar at the bottom
+counts what you have changed.
+
+A few things the page will not let you do, because ESPN would reject the whole
+write and take the rest of the lineup down with it:
+
+* move a player whose game has already started — his handle is greyed out and
+  his slot pill is disabled;
+* put a player in a slot he is not eligible for — the menu only offers slots
+  he can take, and a drag onto an illegal row turns red;
+* put two players in one slot — a swap is a swap, so the counts cannot change.
+
+If ESPN refuses a save anyway, the reason appears in its own words above the
+roster and nothing has been changed. The roster you are then looking at is
+re-read from ESPN, not the form you posted — so what you see is what ESPN has.
+
+Only the Home Assistant user in `ha_owner_user_id` can save a lineup or
+approve a swap, which is the same check the notification buttons use.
+
+Lineups you set by hand are written through the same path the scheduled runs
+use, so they are journalled the same way. The next scheduled run will
+re-optimize and may move players back; if you want a change to stick, turn
+`autonomy_lineup` off.
+
 ## How a run works
 
 At each time in `run_times`, the app works through your `leagues` one at a time.

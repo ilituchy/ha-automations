@@ -327,6 +327,9 @@ class Autopilot:
         # :meth:`season_calendar`.
         self._calendar: Any = _UNSET
         self._schedule: Optional[Dict[int, Dict[int, int]]] = None
+        #: The same payload kept whole, for the status page. See
+        #: :meth:`pro_games`.
+        self._pro_games: Optional[Mapping[int, Mapping[int, Any]]] = None
         # League-independent but *not* season-scoped: injuries move hourly, so
         # this one carries a TTL rather than living for the process. See
         # :meth:`injury_notes`.
@@ -507,6 +510,24 @@ class Autopilot:
                 log.error("could not read the pro schedule: %s", exc)
                 self._schedule = {}
         return self._schedule
+
+    def pro_games(self) -> Mapping[int, Mapping[int, Any]]:
+        """``scoringPeriod -> {proTeamId: ProGame}``, built once per process.
+
+        Same payload and the same reason as :meth:`pro_schedule` -- which
+        counts the games this keeps whole -- so the two are deliberately two
+        parses of one multi-megabyte response rather than two requests. Only
+        the status page reads this one: the optimizer wants counts and nothing
+        else, and a game's tipoff time is a thing to *show* a reader rather
+        than a thing to decide with.
+        """
+        if self._pro_games is None:
+            try:
+                self._pro_games = self.leagues[0].read.pro_games_by_period()
+            except EspnError as exc:
+                log.error("could not read the pro game schedule: %s", exc)
+                self._pro_games = {}
+        return self._pro_games
 
     def injury_notes(self) -> Optional[Any]:
         """ESPN's injuries page, shared across leagues, refreshed on a TTL.

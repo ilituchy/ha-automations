@@ -22,10 +22,13 @@ import httpx
 
 from espn import ids
 from models import (
+    DayEntry,
     GameRef,
     LeagueSettings,
     MatchupScore,
     MatchupWindow,
+    ProGame,
+    ProTeamId,
     RosterEntry,
     StatLimit,
 )
@@ -319,6 +322,57 @@ class EspnRead:
                     )
             return kept
         raise EspnError("team %d not found in league %d" % (team_id, self.cfg.league_id))
+
+    def day_rosters(
+        self,
+        scoring_period: int,
+        team_ids: Optional[Iterable[int]] = None,
+    ) -> Dict[int, List[DayEntry]]:
+        """Every team's lineup *as it stood* on one scoring period, with scores.
+
+        One request covers the whole league: ``mRoster`` returns a ``roster``
+        block for all of them, so a head-to-head page costs the same as a
+        one-team page. ``team_ids`` only filters what is parsed.
+
+        Two things here are easy to get wrong and were got right by probing a
+        live league on 2026-10-24 rather than by reading ESPN's shape:
+
+        * **``scoringPeriodId`` really does rewind the lineup.** The same
+          request for period 4 and period 5 returned different
+          ``lineupSlotId`` values for the same players, and period 4 -- a day
+          already played -- came back with every player ``lineupLocked``. So
+          this is the honest source for "who did I start on Thursday", not
+          just for today.
+        * **the day's score is not ``appliedStatTotal``.** That field is
+          populated even for a period with no games played, carrying the
+          *previous* day's number; on the probe it claimed 29.5 for a player
+          who had not tipped off yet. The real per-day figure is the
+          ``statSourceId``/``statSplitTypeId`` row this method filters for, and
+          its **absence is the answer** on a day not yet played -- which is why
+          ``DayEntry.points`` is ``Optional`` and why the page can show a dash
+          where ESPN shows one.
+        """
+        period = int(scoring_period)
+        wanted = None if team_ids is None else {int(t) for t in team_ids}
+        raw = self._get(
+            self._league_url, ("mRoster", "mTeam"),
+            params={"scoringPeriodId": period},
+        )
+        out: Dict[int, List[DayEntry]] = {}
+        for team in raw.get("teams") or []:
+            tid = _opt_int(team.get("id"))
+            if tid is None or (wanted is not None and tid not in wanted):
+                continue
+            rows: List[DayEntry] = []
+            for e in (team.get("roster") or {}).get("entries") or []:
+                if not _is_on_team(e, tid):
+                    continue
+                rows.append(DayEntry(
+                    player=_parse_entry(e),
+                    points=_day_points(e, period),
+                ))
+            out[tid] = rows
+        return out
 
     def my_team_ids(self) -> Set[int]:
         """Teams whose ``owners`` include our SWID.
@@ -696,6 +750,59 @@ class EspnRead:
             out[tid] = by_period
         return out
 
+    def pro_games_by_period(self) -> Dict[int, Dict[ProTeamId, ProGame]]:
+        """``scoringPeriod -> {proTeamId: that team's game}``, for the season.
+
+        The same ``proTeamSchedules_wl`` payload
+        :meth:`pro_team_scoring_periods` counts, kept whole instead of reduced
+        to a count. The page needs the other three fields on each game --
+        who, which side, and when -- and they are already in hand; asking for
+        them separately would be a second multi-megabyte request for data
+        already parsed.
+
+        Each game appears twice in the source, once under each team, so it is
+        indexed under both and no pairing-up is needed. A team playing twice in
+        one scoring period would lose one of them here -- that does not happen
+        in the NBA, where a scoring period is a calendar day, and the
+        alternative is a list per team that every caller would have to unwrap.
+        """
+        url = "%s/apis/v3/games/%s/seasons/%d" % (
+            ids.READ_HOST, ids.GAME, self.cfg.season,
+        )
+        raw = self._get(url, ("proTeamSchedules_wl",))
+        out: Dict[int, Dict[ProTeamId, ProGame]] = {}
+        for team in (raw.get("settings") or {}).get("proTeams") or []:
+            tid = _opt_int(team.get("id"))
+            if tid is None:
+                continue
+            for period, games in (team.get("proGamesByScoringPeriod") or {}).items():
+                for g in games or []:
+                    if not g:
+                        continue
+                    home_id = _opt_int(g.get("homeProTeamId"))
+                    away_id = _opt_int(g.get("awayProTeamId"))
+                    if home_id is None or away_id is None:
+                        continue
+                    home = home_id == tid
+                    opp = away_id if home else home_id
+                    ts = g.get("date")
+                    when = None
+                    if ts is not None:
+                        try:
+                            when = datetime.fromtimestamp(
+                                int(ts) / 1000.0, tz=timezone.utc)
+                        except (TypeError, ValueError, OSError):
+                            when = None
+                    out.setdefault(int(period), {})[tid] = ProGame(
+                        scoring_period=int(period),
+                        pro_team_id=tid,
+                        opponent_id=opp,
+                        home=home,
+                        tipoff_utc=when,
+                        time_tbd=bool(g.get("startTimeTBD")),
+                    )
+        return out
+
     # -- transactions ------------------------------------------------------
 
     def pending_transactions(self, team_id: Optional[int] = None) -> List[Mapping[str, Any]]:
@@ -796,6 +903,25 @@ def _is_on_team(entry: Mapping[str, Any], team_id: int) -> bool:
         return False
 
     return True
+
+
+def _day_points(entry: Mapping[str, Any], scoring_period: int) -> Optional[float]:
+    """What this player actually scored on that day, or ``None`` if ESPN has no row.
+
+    ``None`` and ``0.0`` are different answers and the page says so: one is a
+    dash, the other is a player who suited up and did nothing. Deriving the
+    dash from "is the game in the future" instead would be wrong twice over --
+    a player can be out, or ESPN can be late scoring a finished game.
+    """
+    player = (entry.get("playerPoolEntry") or entry).get("player") or {}
+    for st in player.get("stats") or []:
+        if (
+            _opt_int(st.get("scoringPeriodId")) == int(scoring_period)
+            and _opt_int(st.get("statSourceId")) == ids.STAT_SOURCE_ACTUAL
+            and _opt_int(st.get("statSplitTypeId")) == ids.SPLIT_ONE_SCORING_PERIOD
+        ):
+            return _opt_float(st.get("appliedTotal"))
+    return None
 
 
 def _parse_entry(raw: Mapping[str, Any]) -> RosterEntry:
