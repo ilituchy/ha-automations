@@ -89,6 +89,42 @@ All notable changes to this app are documented here. The format follows
 
 ### Changed
 
+- **Player names open the fantasy player list, not ESPN's NBA page.** *"the
+  player link doesnt load the fantasy pl,ayer sctreen... it loads their stats
+  which isnt as helpful"*. Fairly: tapping a name mid-decision is asking "what
+  has he been scoring and does anybody else want him", and the NBA page
+  answers neither.
+
+  A name now goes to that league's fantasy player list, narrowed to his own
+  NBA team — about fifteen rows with him among them, carrying fantasy points,
+  percent rostered and projections. Every name beside a roster knows its
+  league, so this is every name on the matchup sheet, the lineup editor, the
+  approval queue and the run log.
+
+  It is not his own fantasy page because **ESPN does not have one**. Checked
+  three ways on 2026-10-26 rather than assumed:
+
+  * the fantasy app is a Next.js app, so its routes are its page bundles, and
+    the only ones under `/basketball` are `league`, `league/settings`, `team`,
+    `boxscore`, `recentactivity`, `playernews` and `players/add`. `playercard`
+    and `player` fall through to the ESPN homepage — in football too, so the
+    familiar `fantasy.espn.com/football/playercard` is also not a thing;
+  * `players/add` reads exactly `leagueId`, `seasonId`, `status`, `proTeamId`,
+    `lineupSlot`, `playing`, `view`, `replayDate` and `previousSeasonId` off
+    the query string. A `playerId` on it is silently ignored;
+  * the legacy `games.espn.com/fba/playercard?playerId=` 302s to a generic
+    landing page and drops the id.
+
+  `status=ALL` and not ESPN's default: the default availability filter is
+  "available", and most names on this page are players we already roster —
+  exactly the ones it hides. A player whose pro team is unknown is not
+  filtered to team `0`, which is ESPN's "no team" and would list nobody.
+
+  A name with no player id behind it stays unlinked, as before. The league
+  list is not a substitute: without the id there is no pro team either, so
+  nothing would narrow it, and "this player" would resolve to "some players".
+
+
 - **The status page is now three bands of the same league columns.**
   *"this should show two cards on each row saying no updates for each league.
   next for matchip score they should be wider and matching each column at the

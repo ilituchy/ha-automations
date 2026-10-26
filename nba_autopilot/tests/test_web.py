@@ -394,17 +394,56 @@ class TestAppliedMoves(unittest.TestCase):
 class TestPlayerLinks(unittest.TestCase):
     """Every name is a player the owner may want to go and read about.
 
-    The id is already in hand wherever a name is rendered -- the headshot uses
-    it -- so the name carries a link to ESPN's own page for him. The id is
-    interpolated into a URL, so these tests care most about what cannot get
-    into it.
+    *"the player link doesnt load the fantasy pl,ayer sctreen... it loads
+    their stats which isnt as helpful"*. So a name goes to the fantasy view
+    whenever the league is known -- which is everywhere a name sits beside a
+    roster.
+
+    **ESPN fantasy basketball has no per-player URL.** Verified three ways on
+    2026-10-26 and recorded on ``web.FANTASY_URL``; the closest thing is the
+    league's player list narrowed to his own NBA team. These tests pin the
+    shape of that URL, because the alternative to pinning it is finding out
+    from a page that silently lists the wrong fifteen men.
     """
 
-    def test_a_name_links_to_the_espn_player_page(self):
+    def test_a_name_links_to_the_fantasy_player_list_for_its_league(self):
+        out = web._who(3136195, "Karl-Anthony Towns", league=42, pro_team=16)
+        self.assertIn("fantasy.espn.com/basketball/players/add", out)
+        self.assertIn("leagueId=42", out)
+        self.assertIn("Karl-Anthony Towns", out)
+
+    def test_the_list_is_narrowed_to_his_own_nba_team(self):
+        """Fifteen rows with him among them beats three hundred without."""
+        self.assertIn("proTeamId=16",
+                      web._who(1, "A", league=42, pro_team=16))
+
+    def test_every_availability_is_shown_not_just_free_agents(self):
+        """Most names here are players we already roster, and ESPN's default
+        availability filter is the one that hides exactly those."""
+        self.assertIn("status=ALL", web._who(1, "A", league=42, pro_team=16))
+
+    def test_a_player_with_no_pro_team_is_not_filtered_to_team_zero(self):
+        """ESPN's 0 is "no team", which would filter the list to nobody."""
+        for none_ish in (0, None, "", "x"):
+            out = web._who(1, "A", league=42, pro_team=none_ish)
+            self.assertNotIn("proTeamId", out)
+            self.assertIn("leagueId=42", out)
+
+    def test_the_query_is_escaped_for_the_attribute_it_lands_in(self):
+        out = web._who(1, "A", league=42, pro_team=16)
+        self.assertIn("&amp;", out)
+        self.assertNotIn("add?leagueId=42&status", out)
+
+    def test_without_a_league_it_falls_back_to_the_nba_page(self):
+        """A row written before the league was carried still goes somewhere
+        about that player."""
         out = web._who(3136195, "Karl-Anthony Towns")
         self.assertIn("href='https://www.espn.com/nba/player/_/id/3136195'",
                       out)
-        self.assertIn("Karl-Anthony Towns", out)
+
+    def test_an_unresolvable_league_falls_back_rather_than_linking_nowhere(self):
+        out = web._who(3136195, "A", league="not-a-league")
+        self.assertIn("/nba/player/_/id/3136195", out)
 
     def test_the_link_opens_in_a_new_tab_without_a_handle_on_this_one(self):
         out = web._who(1, "A")
@@ -432,6 +471,13 @@ class TestPlayerLinks(unittest.TestCase):
         self.assertIn("/id/10'", out)
         self.assertIn("/id/20'", out)
 
+    def test_a_swap_in_a_known_league_goes_to_that_league(self):
+        out = web._swap({"add": 10, "add_name": "In Man",
+                         "drop": 20, "drop_name": "Out Man", "waiver": False},
+                        league=99)
+        self.assertEqual(out.count("leagueId=99"), 2)
+        self.assertNotIn("/nba/player/", out)
+
     def test_a_lineup_move_links_the_player_it_moved(self):
         bot = FakeBot(FakeStore(rows=_run_rows([{
             "kind": "LINEUP", "state": "DONE",
@@ -439,7 +485,9 @@ class TestPlayerLinks(unittest.TestCase):
             "payload": LINEUP_PAYLOAD,
         }])))
         out = web.render(web.StatusPage(bot))
-        self.assertIn("/nba/player/_/id/3136195", out)
+        self.assertIn("3136195", out)   # the headshot, at least
+        # The run knows its league, so the name goes to the fantasy list.
+        self.assertIn("fantasy.espn.com/basketball/players/add", out)
 
     def test_a_recovered_old_move_has_no_id_and_so_no_link(self):
         """Rows journaled before ``moves`` existed only parse back a name."""
@@ -450,7 +498,9 @@ class TestPlayerLinks(unittest.TestCase):
         }])))
         out = web.render(web.StatusPage(bot))
         self.assertIn("Anthony Black", out)
-        self.assertNotIn("/nba/player/_/id/", out)
+        # No id means no player to link to -- not even a league list, which
+        # would resolve "this player" to "some players".
+        self.assertNotIn("<a class='who'", out)
 
 
 def _panels(out: str) -> int:
@@ -2231,3 +2281,38 @@ class TestTheDayStripIsBuiltFromTheWeek(unittest.TestCase):
         page, lg = _week_page()
         days = page._matchup_view(lg, 15)["days"]
         self.assertEqual([d["sp"] for d in days if d["today"]], [15])
+
+
+class TestWhereTheDetailPagesSendYou(unittest.TestCase):
+    """Both new pages know their league and each row knows its NBA team, so
+    both halves of the fantasy URL are available there and must be used."""
+
+    def test_the_matchup_sheet_links_both_sides_into_the_right_league(self):
+        out = web.render_matchup(_page(), _matchup_view(
+            [dict(_pl(1, "Mine", 0), pro_team=16)],
+            [dict(_pl(2, "Theirs", 0), pro_team=5)]))
+        self.assertIn("leagueId=9&amp;status=ALL&amp;proTeamId=16", out)
+        self.assertIn("leagueId=9&amp;status=ALL&amp;proTeamId=5", out)
+        self.assertNotIn("/nba/player/", out)
+
+    def test_the_lineup_editor_links_every_row(self):
+        out = web.render_team(_page(), _team_view(
+            [dict(_pl(1, "A", 0), pro_team=16),
+             dict(_pl(2, "B", 12), pro_team=5)]))
+        self.assertIn("proTeamId=16", out)
+        self.assertIn("proTeamId=5", out)
+
+    def test_a_row_whose_team_is_unknown_still_reaches_its_league(self):
+        out = web.render_team(_page(), _team_view([_pl(1, "A", 0)]))
+        self.assertIn("leagueId=9", out)
+        self.assertNotIn("proTeamId", out)
+
+    def test_the_row_builder_keeps_the_team_id_as_well_as_its_abbreviation(self):
+        """The abbreviation is for a reader; the id is what narrows the list."""
+        class P:
+            player_id, name, current_slot = 1, "A", 0
+            pro_team_id, injury_status = 16, "ACTIVE"
+            lineup_locked, eligible_slots = False, frozenset({0, 11})
+        row = web._row(type("E", (), {"player": P(), "points": None})(), {}, None)
+        self.assertEqual(row["pro_team"], 16)
+        self.assertEqual(row["team"], "MIN")

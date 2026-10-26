@@ -1539,33 +1539,98 @@ def _face(player_id: Any, extra: str = "", badge: str = "") -> str:
     return "<span class='face %s'%s>%s</span>" % (extra, style, badge)
 
 
-#: ESPN's own player page. The numeric id is the whole path -- ESPN redirects
-#: to the slugged URL itself -- so no name of ours has to be made URL-safe.
+#: ESPN's own NBA player page. The numeric id is the whole path -- ESPN
+#: redirects to the slugged URL itself -- so no name of ours has to be made
+#: URL-safe. The fallback, for a row that does not know its league.
 PLAYER_URL = "https://www.espn.com/nba/player/_/id/%d"
 
+#: The fantasy player list, scoped to a league.
+#:
+#: **ESPN fantasy basketball has no per-player URL.** Checked three ways on
+#: 2026-10-26, because "it loads their stats which isnt as helpful" deserved
+#: a real answer rather than a guess:
+#:
+#: * the app is a Next.js app, so its routes are its page bundles, and the
+#:   only ones under ``/basketball`` are ``league``, ``league/settings``,
+#:   ``team``, ``boxscore``, ``recentactivity``, ``playernews`` and
+#:   ``players/add``. ``playercard`` and ``player`` fall through to the ESPN
+#:   homepage, in football as well as basketball;
+#: * ``players/add`` reads exactly these from the query string -- ``leagueId``,
+#:   ``seasonId``, ``status``, ``proTeamId``, ``lineupSlot``, ``playing``,
+#:   ``view``, ``replayDate``, ``previousSeasonId``. A ``playerId`` on it is
+#:   silently ignored;
+#: * the legacy ``games.espn.com/fba/playercard?playerId=`` redirects to a
+#:   generic landing page and drops the id on the way.
+#:
+#: So the closest thing that exists is this league's player list narrowed to
+#: the man's own NBA team, which is about fifteen rows with him among them --
+#: carrying the fantasy points, the ownership and the projections that the NBA
+#: page does not have, and one tap from his card.
+FANTASY_URL = "https://fantasy.espn.com/basketball/players/add"
 
-def _who(player_id: Any, name: Any, cls: str = "who") -> str:
-    """A player's name, linked to his ESPN page when we know his id.
+#: ``ALL`` rather than the default ``AVAILABLE``. The filter ids come out of
+#: the same bundle: ``ALL``, ``AVAILABLE``, ``TODAY``, ``FREEAGENT``,
+#: ``WAIVERS``, ``ONTEAM``. Most names on this page are players we already
+#: roster, and the default availability filter hides exactly those.
+FANTASY_STATUS = "ALL"
 
-    Every name on this page names a real player the reader may want to read up
-    on, and the id to do it with is already in hand at both call sites. New tab,
-    because the page it leaves is the one with the Approve button on it.
 
-    ``int()`` again rather than ``_e()``: the id is interpolated into a URL, and
-    the only safe thing to put in a URL is a number. An id we cannot parse --
-    an old row, a name with no id behind it -- renders the bare name rather
-    than a link to nowhere.
+def _player_href(player_id: Any, league: Any = None,
+                 pro_team: Any = None) -> Optional[str]:
+    """Where a player's name points, or ``None`` if nowhere useful.
+
+    Fantasy when the league is known, which is everywhere a name is rendered
+    beside a roster; the NBA page otherwise, which is where a row written
+    before the league was carried still lands.
+
+    Numbers only, built with ``%d`` rather than escaped with ``_e``: the only
+    safe thing to interpolate into a URL is an integer, and every component
+    here is one. ``&amp;`` because the result goes straight into an attribute.
+    """
+    # The id is checked first and used last. The fantasy URL does not carry
+    # it -- ESPN has nowhere to put it -- but a name we cannot resolve to a
+    # player is a name we should not be linking at all: without the id there
+    # is no pro team either, so the list would not be narrowed to him, and
+    # "this player" would resolve to "some players".
+    try:
+        pid = int(player_id)
+    except (TypeError, ValueError):
+        return None
+    try:
+        lid = None if league is None else int(league)
+    except (TypeError, ValueError):
+        lid = None
+    if lid is not None:
+        query = ["leagueId=%d" % lid, "status=%s" % FANTASY_STATUS]
+        try:
+            # 0 is ESPN's "no pro team" and would filter to an empty list.
+            team = int(pro_team or 0)
+        except (TypeError, ValueError):
+            team = 0
+        if team:
+            query.append("proTeamId=%d" % team)
+        return "%s?%s" % (FANTASY_URL, "&amp;".join(query))
+    return PLAYER_URL % pid
+
+
+def _who(player_id: Any, name: Any, cls: str = "who", *,
+         league: Any = None, pro_team: Any = None) -> str:
+    """A player's name, linked to where a reader would want to go next.
+
+    Every name on this page names a real player somebody may want to read up
+    on mid-decision, and what they want is the fantasy view -- what he has
+    scored, who else owns him -- not his NBA averages. New tab, because the
+    page it leaves is the one with the Approve button on it.
+
+    A name we cannot build any link for renders as bare text rather than as a
+    link to nowhere.
     """
     label = _e(name)
-    try:
-        href = PLAYER_URL % int(player_id)
-    except (TypeError, ValueError):
+    href = _player_href(player_id, league, pro_team)
+    if href is None:
         return "<span class=%s>%s</span>" % (cls, label)
     # noopener as well as noreferrer: the new tab must not keep a handle on
     # the authenticated frontend it was opened from.
-    # No second class: ``a.who`` is what styles this, and ``link`` was a
-    # leftover the stylesheet has never had a rule for. It survived because
-    # the only fixture that rendered a linked name had no player id in it.
     return ("<a class='%s' href='%s' target=_blank "
             "rel='noopener noreferrer'>%s</a>" % (cls, href, label))
 
@@ -1579,7 +1644,8 @@ def _slot(name: Any) -> str:
     return SLOT_WORDS.get(str(name), str(name))
 
 
-def _swap(payload: Mapping[str, Any], *, small: bool = False) -> str:
+def _swap(payload: Mapping[str, Any], *, small: bool = False,
+          league: Any = None) -> str:
     """The two legs of an add/drop. Shared by the queue and the history.
 
     Add before drop: the move is read as "who am I getting", and the man
@@ -1598,13 +1664,13 @@ def _swap(payload: Mapping[str, Any], *, small: bool = False) -> str:
             side, "+" if verb == "ADD" else "−")
         out.append("<div class='leg %s'>%s%s%s</div>" % (
             side, _face(pid, "sm" if small else "", badge),
-            _who(pid, name), tags,
+            _who(pid, name, league=league), tags,
         ))
     out.append("</div>")
     return "".join(out)
 
 
-def _applied(moves: List[Mapping[str, Any]]) -> str:
+def _applied(moves: List[Mapping[str, Any]], league: Any = None) -> str:
     """The lineup changes a run actually made, one row each."""
     out = ["<ul class=did>"]
     for m in moves:
@@ -1616,7 +1682,8 @@ def _applied(moves: List[Mapping[str, Any]]) -> str:
             "</span></div>%s</div></li>" % (
                 _face(m.get("player_id")),
                 _who(m.get("player_id"),
-                     m.get("name") or "player %s" % m.get("player_id")),
+                     m.get("name") or "player %s" % m.get("player_id"),
+                     league=league),
                 _e(_slot(m.get("from"))), _e(_slot(m.get("to"))),
                 ("<div class=note>%s</div>" % _e(reason)) if reason else "",
             )
@@ -1892,6 +1959,10 @@ def _row(entry: Any, games: Mapping[int, Any], tz: Any) -> Dict[str, Any]:
         "name": p.name,
         "slot": int(p.current_slot),
         "team": ids.pro_team(p.pro_team_id),
+        # The id as well as the abbreviation: the abbreviation is for a
+        # reader, and the id is what narrows ESPN's fantasy player list to
+        # the fifteen men this one is among. See ``_player_href``.
+        "pro_team": int(p.pro_team_id or 0),
         "opp": opp,
         "tip": tip,
         "points": entry.points,
@@ -2239,7 +2310,7 @@ def render(page: StatusPage, *, user: str = "",
                         p["value_delta"]))
                     if p["value_delta"] else "",
                 ))
-            parts.append(_swap(p["payload"]))
+            parts.append(_swap(p["payload"], league=p.get("league_id")))
             if p["rationale"]:
                 parts.append(_why(p["rationale"]))
             parts.append(
@@ -2315,14 +2386,15 @@ def render_matchup(page: StatusPage, view: Mapping[str, Any],
     ]
 
     mine, theirs = list(view["mine"]), list(view["theirs"])
-    counts = view["slot_counts"]
+    counts, lid = view["slot_counts"], view.get("league_id")
     starters = [s for s in _slot_seats(counts) if ids.is_starting_slot(s)]
 
     rows, mine_pts, their_pts = [], [], []
     for slot in starters:
         a, b = _seat(mine, slot), _seat(theirs, slot)
         rows.append("<div class=mrow>%s<div class=mslot>%s</div>%s</div>" % (
-            _mside(a, "me"), _e(ids.slot_name(slot)), _mside(b, "them")))
+            _mside(a, "me", lid), _e(ids.slot_name(slot)),
+            _mside(b, "them", lid)))
         for bucket, row in ((mine_pts, a), (their_pts, b)):
             if row is not None and row["points"] is not None:
                 bucket.append(float(row["points"]))
@@ -2353,8 +2425,8 @@ def render_matchup(page: StatusPage, view: Mapping[str, Any],
             if a is None and b is None:
                 continue
             bench.append("<div class=mrow>%s<div class=mslot>%s</div>%s</div>"
-                         % (_mside(a, "me"), _e(ids.slot_name(slot)),
-                            _mside(b, "them")))
+                         % (_mside(a, "me", lid), _e(ids.slot_name(slot)),
+                            _mside(b, "them", lid)))
         if bench:
             parts.append(
                 "<details class=logs><summary>Not starting</summary>"
@@ -2504,12 +2576,15 @@ def _daypair(mine: Any, theirs: Any) -> str:
     )
 
 
-def _mside(row: Optional[Mapping[str, Any]], side: str) -> str:
+def _mside(row: Optional[Mapping[str, Any]], side: str,
+           league: Any = None) -> str:
     """One half of a matchup row. An empty seat is a dash, not a blank cell."""
     if row is None:
         return "<div class='mside %s'><span class=mmeta>—</span></div>" % side
     return ("<div class='mside %s'>%s<div class=mwho>%s%s</div>%s</div>" % (
-        side, _face(row["pid"]), _who(row["pid"], _short_name(row["name"])),
+        side, _face(row["pid"]),
+        _who(row["pid"], _short_name(row["name"]), league=league,
+             pro_team=row.get("pro_team")),
         _meta(row, "mmeta"), _points(row["points"], "mpts"),
     ))
 
@@ -2571,7 +2646,8 @@ def render_team(page: StatusPage, view: Mapping[str, Any], *, user: str = "",
             continue
         parts.append("<h2 class=solo>%s</h2><ul class=lineup>" % _e(title))
         for slot in seats:
-            parts.append(_seat_row(_seat(rows, slot), slot, counts))
+            parts.append(_seat_row(_seat(rows, slot), slot, counts,
+                                   view["league_id"]))
         parts.append("</ul>")
 
     # Anyone the seats did not account for: a player in a slot this league
@@ -2582,7 +2658,8 @@ def render_team(page: StatusPage, view: Mapping[str, Any], *, user: str = "",
     if rows:
         parts.append("<h2 class=solo>Unplaced</h2><ul class=lineup>")
         for row in rows:
-            parts.append(_seat_row(row, row["slot"], counts))
+            parts.append(_seat_row(row, row["slot"], counts,
+                                   view["league_id"]))
         parts.append("</ul>")
 
     parts.append(
@@ -2595,7 +2672,7 @@ def render_team(page: StatusPage, view: Mapping[str, Any], *, user: str = "",
 
 
 def _seat_row(row: Optional[Mapping[str, Any]], slot: int,
-              counts: Mapping[int, int]) -> str:
+              counts: Mapping[int, int], league: Any = None) -> str:
     """One seat in the lineup: the player in it, or the fact that it is empty.
 
     Every seat renders its empty state as well as its player, hidden by the
@@ -2641,7 +2718,8 @@ def _seat_row(row: Optional[Mapping[str, Any]], slot: int,
             1 if row["locked"] else 0,
             field,
             _face(row["pid"]),
-            _who(row["pid"], row["name"]),
+            _who(row["pid"], row["name"], league=league,
+                 pro_team=row.get("pro_team")),
             _meta(row),
             _points(row["points"]),
             empty,
@@ -2695,12 +2773,12 @@ def _runs(parts: List[str], runs: List[Dict[str, Any]], tz: Any) -> None:
                         STATE_TAGS.get(state, ""), _e(state.lower())),
                 )
             )
-            parts.append(_applied(moves))
+            parts.append(_applied(moves, r.get("league_id")))
         if rows:
             parts.append("<ul class=props>")
             for p, _m in rows:
                 payload = p["payload"] if isinstance(p["payload"], Mapping) else {}
-                swap = (_swap(payload, small=True)
+                swap = (_swap(payload, small=True, league=r.get("league_id"))
                         if payload.get("add") or payload.get("drop") else "")
                 parts.append(
                     "<li><div class=head><span class=kind>%s</span>"
