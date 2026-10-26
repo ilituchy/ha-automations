@@ -398,6 +398,22 @@ week being played, because ESPN's schedule carries every future fixture as a
 real row with 0.0–0.0 on it and there is nothing to see there. A finished week
 says `FINAL` and *Won by* or *Lost by* rather than *Ahead* or *Behind*.
 
+Under each league's approval column is **what it considered** — a dropdown
+listing add/drop swaps that were weighed and did not happen, with both players,
+what became of each one and the reasoning behind a *Show details* control.
+Three things land there:
+
+* *Not put to you* — the reviewer blocked the swap, or could not be reached
+  and it was withheld rather than shown. These never became a question, so
+  without this they were only a line of prose in a run's notes;
+* *You rejected it* — you tapped Reject, on the page or on the notification;
+* *Expired unanswered* — nobody answered within six hours.
+
+It is closed by default and is not rendered at all for a league that weighed
+nothing, so a quiet week costs you nothing. That is the point of it: "Nothing
+waiting" on its own cannot tell a quiet week from one where the reviewer
+turned down six swaps a day, and those call for opposite responses.
+
 **Team** is your roster, and the one place in this app where *you* move
 players rather than the optimizer. Drag a player by the handle on the left
 onto another player to swap their slots, or tap the slot pill and pick one.

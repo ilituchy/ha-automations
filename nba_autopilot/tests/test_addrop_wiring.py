@@ -75,13 +75,24 @@ class _Store:
         self.queued = []
 
     def propose(self, run_id, kind, payload, *, rationale="", value_delta=0.0,
-                auto_approve=False):
+                auto_approve=False, declined=False):
         row = self._Row(len(self.rows) + 1, run_id,
                         "%s:%s:%d" % (run_id, kind, len(self.rows) + 1),
                         kind, dict(payload), rationale, value_delta,
                         auto_approve)
+        # The real store writes BLOCKED straight into the row; here the flag
+        # is enough, because what the tests ask is whether the row exists and
+        # which kind of record it is.
+        row.state = "BLOCKED" if declined else (
+            "APPROVED" if auto_approve else "PROPOSED")
         self.rows.append(row)
         return row
+
+    def pending(self):
+        """What the approval queue would show. A declined row is never in it,
+        which is the property the state machine's own tests prove and this one
+        only has to reflect."""
+        return [r for r in self.rows if r.state == "PROPOSED"]
 
     def claim_for_execution(self, pid):
         self.claims.append(pid)
@@ -379,12 +390,17 @@ class _Harness:
         # and that claim is about ``_consider_addrops``; the score above is the
         # caller's, charged to the run whether or not add/drop is considered.
         del self.lg.read.asked[:]
-        decisions, notes = self.app._consider_addrops(
+        decisions, notes, declined = self.app._consider_addrops(
             self.lg, self.settings, self.roster, self.projections,
             self.plan(target),
             cal=self.cal, matchup_period=1, schedule=self.schedule,
             injuries=injuries, matchup=matchup,
         )
+        # Kept on the harness rather than returned: the swaps a run turned
+        # down are what one small group of tests is about, and threading a
+        # third value through forty call sites would make every other test
+        # mention something it does not care about.
+        self.declined = list(declined)
         return decisions, read_notes + notes
 
     def consider(self, target=None, injuries=None):

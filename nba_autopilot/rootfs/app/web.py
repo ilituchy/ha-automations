@@ -140,6 +140,59 @@ class StatusPage:
         out.reverse()
         return out
 
+    #: Terminal states that mean "this swap was looked at and did not happen".
+    #: ``DONE`` and ``FAILED`` are deliberately absent: one of them happened and
+    #: the other tried to, and both already have a row in the run log. These are
+    #: the ones with nothing else to show for themselves.
+    CONSIDERED = ("BLOCKED", "REJECTED", "EXPIRED")
+
+    #: What each of them should be called on the page. The stored word is for
+    #: the state machine; these are for a reader asking what became of a swap.
+    OUTCOMES = {
+        "BLOCKED": "Not put to you",
+        "REJECTED": "You rejected it",
+        "EXPIRED": "Expired unanswered",
+    }
+
+    def considered(self, limit: int = 12) -> List[Dict[str, Any]]:
+        """Add/drop swaps that were weighed and not made, newest first.
+
+        The answer to the question an empty approval queue invites. "Nothing
+        waiting" is true and unsatisfying: it does not say whether the app
+        looked at anything, and a week of silence reads identically whether
+        the pool was empty or the reviewer turned down six swaps a day.
+
+        Only add/drop. A lineup move nobody was asked about is not a thing that
+        was *considered and declined* -- it is applied or it is not, and either
+        way the run log has it move by move.
+        """
+        marks = ",".join("?" * len(self.CONSIDERED))
+        rows = self.bot.store.query(
+            "SELECT p.*, r.league_id AS league_id FROM proposals p "
+            "LEFT JOIN runs r ON r.run_id = p.run_id "
+            "WHERE p.kind='ADD_DROP' AND p.state IN (%s) "
+            "ORDER BY p.id DESC LIMIT ?" % marks,
+            tuple(self.CONSIDERED) + (int(limit),),
+        )
+        out = []
+        for r in rows:
+            row = dict(r)
+            state = str(row.get("state") or "").upper()
+            out.append({
+                "league_id": row.get("league_id"),
+                "state": state,
+                "outcome": self.OUTCOMES.get(state, state.lower()),
+                "payload": _loads(row.get("payload"), {}),
+                "rationale": row.get("rationale") or "",
+                "value_delta": row.get("value_delta") or 0.0,
+                # Whichever of the three the row actually has. A rejection is
+                # stamped when it was decided, a block when it was written, and
+                # an expiry when it was swept.
+                "when": (row.get("decided_at") or row.get("finished_at")
+                         or row.get("created_at")),
+            })
+        return out
+
     def _league_of_run(self, run_id: str) -> Optional[int]:
         rows = self.bot.store.query(
             "SELECT league_id FROM runs WHERE run_id=?", (run_id,)
@@ -1325,6 +1378,26 @@ details.logs[open] > summary::after { content: " \\25BE"; }
                    color: var(--secondary-text-color, var(--dim)); }
 .savebar button { width: auto; flex: 0 0 auto; padding: 11px 20px; }
 
+/* What a league weighed and did not do, under its approval column. Closed by
+   default: the reader who opens this is asking a follow-up question, and the
+   one who is not should not have to scroll past the answer. */
+.weighed { margin-top: 2px; border-top: 0; }
+.weighed > summary { padding-top: 0; }
+.cand { padding: 11px 0 2px; border-top: 1px solid var(--line); }
+.cand:first-of-type { border-top: 0; }
+.candhead {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-bottom: 8px;
+}
+.candwhen {
+  font-size: 11px; white-space: nowrap;
+  color: var(--secondary-text-color, var(--faint));
+}
+/* Half-strength, because this is a list of things that did not happen and it
+   sits directly under the one card that still might. */
+.cand .who { font-size: 14px; }
+.cand .swap { gap: 6px; }
+
 .empty {
   color: var(--secondary-text-color, var(--dim));
   font-size: 13.5px;
@@ -1488,6 +1561,10 @@ STATE_TAGS = {
     "DONE": "on", "APPROVED": "on",
     "FAILED": "off", "REJECTED": "off", "EXPIRED": "off",
     "PROPOSED": "hold", "EXECUTING": "hold",
+    # Neutral, not red. The app declining a swap is it working, and painting
+    # a week of good judgment the same colour as a week of failed writes is
+    # the thing ``Verdict.errored`` exists upstream to keep apart.
+    "BLOCKED": "",
 }
 
 #: What ``state`` calls a write that landed. Spelled out rather than imported,
@@ -1667,6 +1744,42 @@ def _swap(payload: Mapping[str, Any], *, small: bool = False,
             _who(pid, name, league=league), tags,
         ))
     out.append("</div>")
+    return "".join(out)
+
+
+def _considered(rows: List[Mapping[str, Any]], league: Any, tz: Any) -> str:
+    """What this league weighed and did not do. A disclosure, under the queue.
+
+    *"when it says Nothing waiting for add drop it should have a drop down
+    where i can see what it considered"*. "Nothing waiting" is true and
+    unsatisfying on its own: it does not distinguish a quiet week from one
+    where the reviewer turned down six swaps a day, and those call for
+    opposite responses.
+
+    Closed by default and absent entirely when there is nothing to show, so
+    the common case costs a reader nothing. Each row names both players, says
+    what became of it, and carries the reasoning behind the same "Show
+    details" control the live cards use -- the verdict is a paragraph of
+    somebody else's prose, and a column is not where a paragraph goes.
+    """
+    if not rows:
+        return ""
+    # Not ``_plural``, which pluralizes the last word: "2 swap considereds".
+    out = ["<details class='logs weighed'><summary>%s</summary>"
+           % _e("%d %s considered and not taken"
+                % (len(rows), "swap" if len(rows) == 1 else "swaps"))]
+    for row in rows:
+        out.append(
+            "<div class=cand><div class=candhead>"
+            "<span class='tag %s'>%s</span><span class=candwhen>%s</span>"
+            "</div>%s%s</div>" % (
+                STATE_TAGS.get(row.get("state"), ""),
+                _e(row.get("outcome") or ""),
+                _e(_when(row.get("when"), tz)),
+                _swap(row.get("payload") or {}, small=True, league=league),
+                _why(row["rationale"]) if row.get("rationale") else "",
+            ))
+    out.append("</details>")
     return "".join(out)
 
 
@@ -2080,8 +2193,12 @@ def _games_line(used: Optional[float], cap: Optional[float]) -> str:
 def _league_columns(page: StatusPage,
                     rows: List[Dict[str, Any]],
                     *, all_leagues: bool = False
-                    ) -> List[Tuple[str, List[Dict[str, Any]]]]:
-    """``(label, rows)`` per league, in the order the leagues were configured.
+                    ) -> List[Tuple[Any, str, List[Dict[str, Any]]]]:
+    """``(league_id, label, rows)`` per league, in the configured order.
+
+    The id as well as the label because a column is not only a heading any
+    more: it carries links into that league and a disclosure of what that
+    league turned down, and both need the number rather than the name.
 
     Both lists on this page are grouped the same way, because a reader
     comparing two leagues wants the same league in the same place in both.
@@ -2105,7 +2222,7 @@ def _league_columns(page: StatusPage,
         groups.setdefault(r.get("league_id"), []).append(r)
     order = [k for k in page.league_order() if k in groups]
     order += [k for k in groups if k not in order]  # a league since removed
-    return [(page.league_label(k), groups[k]) for k in order]
+    return [(k, page.league_label(k), groups[k]) for k in order]
 
 
 def _open(title: str) -> str:
@@ -2235,7 +2352,8 @@ def render(page: StatusPage, *, user: str = "",
     # height is sitting directly above the right league.
     if boards:
         parts.append("<div class=boards>")
-        for _, column in _league_columns(page, boards, all_leagues=True):
+        for _, _label, column in _league_columns(page, boards,
+                                                 all_leagues=True):
             # A league whose score could not be read still holds its cell.
             # Collapsing it would shift every column to its left and silently
             # file the next league's score under this league's heading.
@@ -2287,6 +2405,12 @@ def render(page: StatusPage, *, user: str = "",
     # one somebody with two leagues is actually asking. Two cards saying
     # nothing is waiting is two answers; one card is half of one.
     columns = _league_columns(page, pending, all_leagues=True)
+    # Grouped once for the whole band rather than queried per column: it is
+    # one statement over a handful of indexed rows either way, and two leagues
+    # should not mean two round trips to answer the same question.
+    weighed: Dict[Any, List[Dict[str, Any]]] = {}
+    for row in page.considered():
+        weighed.setdefault(row.get("league_id"), []).append(row)
     if not columns:
         # No leagues configured and nothing queued, so there is no column to
         # put a card in. Reachable on a fresh install, before the options are
@@ -2294,7 +2418,7 @@ def render(page: StatusPage, *, user: str = "",
         # nothing under it at all.
         parts.append("<div class='card empty solo'><b>Nothing waiting.</b></div>")
     parts.append("<div class=leagues>")
-    for label, column in columns:
+    for lid, label, column in columns:
         parts.append("<section class=lg><h3 class=lghead>%s</h3>"
                      % _e(label))
         if not column:
@@ -2326,6 +2450,7 @@ def render(page: StatusPage, *, user: str = "",
                 "</div>" % (_e(p["action_id"]), _e(p["action_id"]))
             )
             parts.append("</div>")
+        parts.append(_considered(weighed.get(lid) or [], lid, tz))
         parts.append("</section>")
     parts.append("</div>")
 
@@ -2345,7 +2470,8 @@ def render(page: StatusPage, *, user: str = "",
         # and the other league's approvals, which is the one way this page can
         # mislead a reader who is reading down a column rather than across.
         parts.append("<div class=leagues>")
-        for label, column in _league_columns(page, runs, all_leagues=True):
+        for _lid, label, column in _league_columns(page, runs,
+                                                   all_leagues=True):
             parts.append("<section class=lg><h3 class=lghead>%s</h3>"
                          % _e(label))
             if not column:

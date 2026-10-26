@@ -37,8 +37,19 @@ DONE = "DONE"
 FAILED = "FAILED"
 EXPIRED = "EXPIRED"
 REJECTED = "REJECTED"
+#: The app considered this swap and declined it itself -- the reviewer blocked
+#: it, or could not be reached and it was withheld rather than shown.
+#:
+#: A row rather than a line in the run notes because it *is* a decision about a
+#: named pair of players, and the question it answers -- "it says nothing is
+#: waiting, so what did it look at?" -- is asked of the approval queue and not
+#: of a log. Terminal from birth: ``decide`` is guarded on ``PROPOSED`` and
+#: ``pending`` selects it, so a row in this state can never be approved,
+#: executed or swept, which is exactly the guarantee a record of a refusal
+#: needs.
+BLOCKED = "BLOCKED"
 
-TERMINAL = frozenset({DONE, FAILED, EXPIRED, REJECTED})
+TERMINAL = frozenset({DONE, FAILED, EXPIRED, REJECTED, BLOCKED})
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -126,10 +137,13 @@ CREATE TABLE IF NOT EXISTS gp_snapshots (
 -- the only useful reading is the latest: it is a live score, and yesterday's
 -- is not evidence of anything.
 --
--- It is cached rather than fetched by the page because the page has no ESPN
--- credentials and no event loop. It renders out of SQLite, and the only thing
--- that talks to ESPN is a run. ``updated_at`` is therefore load-bearing and is
--- shown: a score from this morning presented as live is worse than no score.
+-- Written by every run and read by the status page as its floor, not as its
+-- normal path: the page asks ESPN itself on every load and lands here only
+-- when that read fails. ``updated_at`` is therefore load-bearing and is shown
+-- -- a score from this morning presented as live is worse than no score -- and
+-- two of the columns could not be live even in principle, ``games_cap`` being
+-- a season-long league setting and ``my_games_today`` depending on the lineup
+-- the run that wrote it had just set.
 CREATE TABLE IF NOT EXISTS scoreboards (
     league_id       INTEGER PRIMARY KEY,
     run_id          TEXT,
@@ -372,20 +386,31 @@ class Store:
         value_delta: float = 0.0,
         ttl: timedelta = timedelta(hours=6),
         auto_approve: bool = False,
+        declined: bool = False,
     ) -> Proposal:
         """Record an intended move.
 
         ``auto_approve`` is for the autonomous classes (lineup, IR). It still
         creates a row -- autonomy changes who approves, never whether there is
         an audit trail.
+
+        ``declined`` records a move the app decided against *itself*, which
+        never becomes a question for anybody: it is written straight into
+        :data:`BLOCKED`, already finished. The ``expires_at`` it carries is
+        now, which is meaningless for a terminal row and is written only
+        because the column is ``NOT NULL`` -- nothing sweeps it, because
+        ``expire_stale`` only touches ``PROPOSED``.
         """
+        if declined and auto_approve:
+            raise ValueError("a declined move cannot also be auto-approved")
         action_id = "%s:%s:%d" % (run_id, kind, _next_seq(self.db, run_id, kind))
-        expires = datetime.now(timezone.utc) + ttl
-        state = APPROVED if auto_approve else PROPOSED
+        expires = datetime.now(timezone.utc) + (timedelta(0) if declined else ttl)
+        state = BLOCKED if declined else (APPROVED if auto_approve else PROPOSED)
         with self._lock, self.db:
             cur = self.db.execute(
                 "INSERT INTO proposals (run_id, action_id, kind, state, payload, "
-                "rationale, value_delta, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                "rationale, value_delta, created_at, expires_at, finished_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
                     run_id,
                     action_id,
@@ -396,6 +421,7 @@ class Store:
                     float(value_delta),
                     _now(),
                     expires.isoformat(),
+                    _now() if declined else None,
                 ),
             )
             pid = int(cur.lastrowid)

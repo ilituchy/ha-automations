@@ -264,6 +264,40 @@ All notable changes to this app are documented here. The format follows
 
 ### Added
 
+- **What it considered: a dropdown under each league's approval column.**
+  *"id like a way to view rejected add drop reuqests (hidden somewhere in logs
+  or xsomething, like when it says Nothing waiting for add drop it should have
+  a drop down where i can see what it considered"*.
+
+  "Nothing waiting" is true and unsatisfying on its own. It cannot tell a
+  quiet week from one where the reviewer turned down six swaps a day, and
+  those call for opposite responses. The dropdown lists the add/drop swaps
+  that were weighed and did not happen — both players named, what became of
+  each one, and the reasoning behind the same *Show details* control the live
+  cards use. Closed by default, and not rendered at all for a league that
+  weighed nothing.
+
+  Three outcomes reach it: *Not put to you* (the reviewer blocked it, or could
+  not be reached and it was withheld), *You rejected it*, and *Expired
+  unanswered*. `DONE` and `FAILED` are deliberately absent — one of them
+  happened and the other tried to, and both already have a row in the run log.
+
+  A blocked swap used to leave only a line of prose in a run's notes, so it
+  was not retrievable as *a swap* at all. It is now a proposal row in a new
+  state, `BLOCKED`. That is safe for one specific reason: every transition out
+  of a proposal is a guarded `UPDATE` on the state it starts from, so a row
+  born terminal can never be approved, executed or swept — and the tests that
+  matter are the ones that try all three anyway.
+
+  `_consider_addrops` still writes nothing. It returns what it turned down
+  alongside what it chose, and the caller — which holds the `run_id` and owns
+  every write in a run — records it. That separation is why a pool fetch that
+  fails costs the run nothing it had already earned, and it was worth
+  preserving over the shorter change of writing from inside the search.
+  Recording is wrapped whole and swallows everything: it is a record of
+  something that did *not* happen and must not take down something that did.
+
+
 - **Previous matchups, and the week as a strip of days.** *"id love to be able
   to toggle back to previous matchups"*.
 

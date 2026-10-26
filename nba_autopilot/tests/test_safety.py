@@ -32,6 +32,7 @@ from espn.read import EspnConfig  # noqa: E402
 from espn.write import EspnWrite, PreflightError  # noqa: E402
 from models import LeagueSettings, RosterEntry  # noqa: E402
 from solve import addrop  # noqa: E402
+import state  # noqa: E402
 from state import APPROVED, EXECUTING, PROPOSED, REJECTED, Store  # noqa: E402
 
 PG, SG, SF, PF, C, G, F, UTIL, BE, IR = 0, 1, 2, 3, 4, 5, 6, 11, 12, 13
@@ -962,3 +963,78 @@ class TestNotificationDeepLink(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestADeclinedSwapIsARecordAndNotAQuestion(unittest.TestCase):
+    """*"i'd like a way to view rejected add drop requests... i can see what
+    it considered"*.
+
+    A swap the app turned down is written as a proposal in ``BLOCKED``, which
+    is terminal from birth. That choice is only safe because every transition
+    out of a proposal is guarded on the state it starts from, so the tests
+    that matter here are the ones that try to move it anyway.
+    """
+
+    def setUp(self):
+        self.store = Store(":memory:")
+        self.store.start_run("RUN1", 5, True)
+
+    def tearDown(self):
+        self.store.close()
+
+    def _declined(self):
+        return self.store.propose(
+            "RUN1", "ADD_DROP", {"add": 1, "add_name": "In", "drop": 2},
+            rationale="the reviewer blocked it", value_delta=2.4,
+            declined=True)
+
+    def test_it_is_born_blocked_and_finished(self):
+        p = self._declined()
+        self.assertEqual(p.state, state.BLOCKED)
+        row = self.store.get(p.action_id)
+        self.assertEqual(row.state, state.BLOCKED)
+        self.assertIn(state.BLOCKED, state.TERMINAL)
+
+    def test_it_never_appears_in_the_approval_queue(self):
+        self._declined()
+        self.assertEqual(self.store.pending(), [])
+
+    def test_a_tap_cannot_approve_it(self):
+        """The guard that makes a terminal-from-birth row safe to write."""
+        p = self._declined()
+        self.assertIsNone(self.store.decide(p.action_id, True, "owner"))
+        self.assertEqual(self.store.get(p.action_id).state, state.BLOCKED)
+
+    def test_a_tap_cannot_reject_it_either(self):
+        p = self._declined()
+        self.assertIsNone(self.store.decide(p.action_id, False, "owner"))
+        self.assertEqual(self.store.get(p.action_id).state, state.BLOCKED)
+
+    def test_it_cannot_be_claimed_for_execution(self):
+        p = self._declined()
+        self.assertFalse(self.store.claim_for_execution(p.id))
+
+    def test_the_sweeper_leaves_it_alone(self):
+        """Its ``expires_at`` is now, which would sweep a PROPOSED row."""
+        p = self._declined()
+        self.store.expire_stale()
+        self.assertEqual(self.store.get(p.action_id).state, state.BLOCKED)
+
+    def test_it_keeps_the_pair_and_the_reasoning(self):
+        p = self._declined()
+        row = self.store.get(p.action_id)
+        self.assertEqual(row.payload["add"], 1)
+        self.assertEqual(row.rationale, "the reviewer blocked it")
+        self.assertEqual(row.value_delta, 2.4)
+
+    def test_declining_and_auto_approving_are_not_both_possible(self):
+        """They would write two different states into one row."""
+        with self.assertRaises(ValueError):
+            self.store.propose("RUN1", "ADD_DROP", {}, declined=True,
+                               auto_approve=True)
+
+    def test_an_ordinary_proposal_is_untouched_by_the_new_path(self):
+        p = self.store.propose("RUN1", "ADD_DROP", {"add": 1})
+        self.assertEqual(p.state, state.PROPOSED)
+        self.assertEqual([q.action_id for q in self.store.pending()],
+                         [p.action_id])

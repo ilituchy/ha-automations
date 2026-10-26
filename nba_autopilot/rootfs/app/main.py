@@ -714,8 +714,15 @@ class Autopilot:
         schedule: Mapping[int, Mapping[int, int]],
         injuries: Optional[Any] = None,
         matchup: Optional[Any] = None,
-    ) -> Tuple[List["addrop_mod.AddDropPlan"], List[str]]:
+    ) -> Tuple[List["addrop_mod.AddDropPlan"], List[str],
+               List[Tuple["addrop_mod.AddDropPlan", str]]]:
         """Price the pool and decide up to ``addrop_max_moves`` swaps. Reads only.
+
+        Returns the swaps it settled on, the notes, and the ones it turned
+        down with the reason each time. The third list is *returned* rather
+        than written here because this method reads and nothing else -- the
+        caller holds the ``run_id`` and owns every write in a run, and that
+        separation is what makes a pool fetch that fails cost nothing.
 
         Every read here is wrapped, because none of them is worth a run. The
         lineup has already been computed and written by the time this is called
@@ -750,7 +757,7 @@ class Autopilot:
                 "add/drop not considered: this is a %s league and the swap "
                 "arithmetic is in points" % settings.scoring_type
             )
-            return [], notes
+            return [], notes, []
 
         horizon = (
             cal.remaining_periods(matchup_period, settings.current_scoring_period)
@@ -763,14 +770,14 @@ class Autopilot:
                 "period %d, so a pickup's games cannot be counted"
                 % matchup_period
             )
-            return [], notes
+            return [], notes, []
 
         try:
             pool = lg.read.free_agents()
         except Exception as exc:  # noqa: BLE001 - the lineup is already applied
             log.error("could not read the free-agent pool: %s", exc)
             notes.append("add/drop not considered: pool read failed (%s)" % exc)
-            return [], notes
+            return [], notes, []
 
         model = value_mod.build_value_model(settings)
         values = dict(plan.values)
@@ -783,7 +790,7 @@ class Autopilot:
                 notes.append(
                     "add/drop not considered: pool projections failed (%s)" % exc
                 )
-                return [], notes
+                return [], notes, []
             pool_projections, _pool_avail, unprojected = (
                 projections_mod.build_projections(
                     pool, splits, as_of=datetime.now(timezone.utc)
@@ -846,6 +853,11 @@ class Autopilot:
         # it, which reads as a misconfiguration he then goes looking for.
         vetoed_names: List[str] = []
         vetoed_adds: set = set()
+        # Every swap this run looked at and would not put in front of the
+        # owner, with why. Kept so the question the empty approval queue
+        # invites -- "so what did it consider?" -- has an answer that names
+        # the two players rather than a line of prose in a run log.
+        declined: List[Tuple["addrop_mod.AddDropPlan", str]] = []
         # Protected for the rest of the run, and reported as such rather than
         # as a ``never_drop`` entry they are not.
         just_added: List[int] = []
@@ -935,6 +947,13 @@ class Autopilot:
             )
             notes.extend(review_notes)
             if reviewed is None:
+                # The verdict is the last note the review added, which is the
+                # sentence written for a person. Recorded whether the reviewer
+                # judged it or could not be reached: both ended the same way
+                # for this swap, and only the words say which.
+                declined.append(
+                    (decision, review_notes[-1] if review_notes else
+                     "the reviewer did not approve it"))
                 if unreachable:
                     # Not a judgment about this swap, so the next one would be
                     # withheld for the same non-reason. Stop rather than spend
@@ -975,7 +994,53 @@ class Autopilot:
                 % (attempts, attempts - len(accepted), budget)
             )
 
-        return accepted, notes
+        return accepted, notes, declined
+
+    @staticmethod
+    def _addrop_payload(decision: Any, matchup_period: int) -> Dict[str, Any]:
+        """Both ids *and* both names.
+
+        The ids are what the write path needs; the names are what the approval
+        card and the notification show, and re-reading them at approval time
+        would mean a second ESPN round trip to answer a question we already
+        knew the answer to when we decided. A swap that was declined is
+        recorded in the same shape as one that was offered, so the page can
+        render either with the same code.
+
+        ``bid`` is always ``None``. A FAAB league never reaches here --
+        ``plan_addrop`` declines rather than bidding zero -- so there is no bid
+        to carry, and writing ``0`` would look like a deliberate minimum bid to
+        anyone reading the row later.
+        """
+        return {
+            "add": int(decision.add.player_id),
+            "add_name": decision.add.name,
+            "drop": int(decision.drop.player_id) if decision.drop else None,
+            "drop_name": decision.drop.name if decision.drop else None,
+            "bid": None,
+            "waiver": bool(decision.add.waiver),
+            "matchup_period": int(matchup_period),
+            "reason": decision.reason,
+        }
+
+    def _record_declined(self, run_id: str, decision: Any, why: str,
+                         matchup_period: int) -> None:
+        """Journal a swap the app turned down. Never raises.
+
+        Wrapped whole: this is a record of something that did *not* happen, and
+        failing to write it must not cost the run anything that did. The
+        decision has already been made and acted on by the time this is called.
+        """
+        try:
+            self.store.propose(
+                run_id, "ADD_DROP",
+                self._addrop_payload(decision, matchup_period),
+                rationale="%s\n\n%s" % (why, decision.rationale),
+                value_delta=decision.gain,
+                declined=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not record the declined swap: %s", exc)
 
     def _review_addrop(
         self,
@@ -1249,12 +1314,14 @@ class Autopilot:
         # time-critical half; add/drop is the permanent half and needs several
         # more ESPN reads. Doing it second means a pool fetch that hangs or
         # fails costs the run nothing it had already earned.
-        decisions, addrop_notes = self._consider_addrops(
+        decisions, addrop_notes, declined = self._consider_addrops(
             lg, settings, roster, projections, plan,
             cal=cal, matchup_period=matchup_period, schedule=schedule,
             injuries=injuries, matchup=matchup,
         )
         notes.extend(addrop_notes)
+        for turned_down, why in declined:
+            self._record_declined(run_id, turned_down, why, matchup_period)
         # Best first, each its own approval. Offered in the order they were
         # priced, because that is the order their estimates assume: the second
         # was computed as if the first went through. Nothing here waits for an
@@ -1572,16 +1639,7 @@ class Autopilot:
         to carry, and writing ``0`` would look like a deliberate minimum bid to
         anyone reading the row later.
         """
-        payload: Dict[str, Any] = {
-            "add": int(decision.add.player_id),
-            "add_name": decision.add.name,
-            "drop": int(decision.drop.player_id) if decision.drop else None,
-            "drop_name": decision.drop.name if decision.drop else None,
-            "bid": None,
-            "waiver": bool(decision.add.waiver),
-            "matchup_period": int(matchup_period),
-            "reason": decision.reason,
-        }
+        payload = self._addrop_payload(decision, matchup_period)
         auto = bool(self.cfg.autonomy_add_drop)
         proposal = self.store.propose(
             run_id, "ADD_DROP", payload,

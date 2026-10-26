@@ -696,3 +696,88 @@ class TestABlockIsNotAMove(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWhatItConsideredIsKept(unittest.TestCase):
+    """*"id like a way to view rejected add drop reuqests... when it says
+    Nothing waiting for add drop it should have a drop down where i can see
+    what it considered"*.
+
+    "Nothing waiting" is true and unsatisfying on its own: a quiet week and a
+    week where the reviewer refused six swaps a day read identically, and they
+    call for opposite responses. So a refused swap is now recorded as a row
+    with both names on it, not only as a line of prose in a run log.
+    """
+
+    def test_a_vetoed_swap_comes_back_with_the_reason(self):
+        h = funnel(judge=_PerSwapJudge(
+            lambda p: judge_mod.Verdict(False, "his minutes are not real yet")))
+        h.consider_all(target=funnel_target())
+        self.assertTrue(h.declined)
+        plan, why = h.declined[0]
+        self.assertEqual(plan.add.name, "FA90")
+        self.assertIn("his minutes are not real yet", why)
+
+    def test_an_unreachable_reviewer_is_recorded_too_and_says_so(self):
+        """Blocked and withheld end the same way for the swap, and only the
+        words say which. Both are things the run considered."""
+        h = funnel(judge=_PerSwapJudge(
+            lambda p: judge_mod.Verdict(False, "timed out", errored=True)))
+        h.consider_all(target=funnel_target())
+        self.assertEqual(len(h.declined), 1)
+        self.assertIn("could not be reached", h.declined[0][1])
+
+    def test_an_approved_swap_is_not_in_the_declined_list(self):
+        h = funnel(judge=_PerSwapJudge(lambda p: judge_mod.Verdict(True, "ok")))
+        decisions, _notes = h.consider_all(target=funnel_target())
+        self.assertTrue(decisions)
+        self.assertEqual(h.declined, [])
+
+    def test_every_refusal_is_kept_not_only_the_first(self):
+        h = funnel(max_moves=1, judge=_PerSwapJudge(
+            lambda p: judge_mod.Verdict(False, "no to %s" % p.add.name)))
+        h.consider_all(target=funnel_target())
+        self.assertGreater(len(h.declined), 1)
+        self.assertEqual(len({p.add.name for p, _ in h.declined}),
+                         len(h.declined))
+
+    def test_considering_still_writes_nothing_itself(self):
+        """``_consider_addrops`` reads and nothing else -- that is why a pool
+        fetch that fails costs the run nothing it had already earned. The
+        caller holds the run id and owns every write."""
+        h = funnel(judge=_PerSwapJudge(lambda p: judge_mod.Verdict(False, "no")))
+        h.consider_all(target=funnel_target())
+        self.assertEqual(h.app.store.rows, [])
+
+    def test_the_caller_writes_them_in_the_shape_a_proposal_has(self):
+        """Same payload as an offered swap, so the page renders either with
+        the same code."""
+        h = funnel(judge=_PerSwapJudge(lambda p: judge_mod.Verdict(False, "no")))
+        h.consider_all(target=funnel_target())
+        plan, why = h.declined[0]
+        h.app._record_declined("RUN1", plan, why, 1)
+        rows = h.app.store.rows
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].state, "BLOCKED")
+        self.assertEqual(rows[0].kind, "ADD_DROP")
+        self.assertEqual(rows[0].payload["add_name"], plan.add.name)
+        self.assertIn("add", rows[0].payload)
+        self.assertIn("drop_name", rows[0].payload)
+        self.assertIn(why, rows[0].rationale)
+
+    def test_a_failure_to_record_does_not_cost_the_run(self):
+        """It is a record of something that did not happen, and must not take
+        down something that did."""
+        h = funnel(judge=_PerSwapJudge(lambda p: judge_mod.Verdict(False, "no")))
+        h.consider_all(target=funnel_target())
+        plan, why = h.declined[0]
+
+        class Broken:
+            def propose(self, *a, **kw):
+                raise RuntimeError("disk is full")
+
+        h.app.store, saved = Broken(), h.app.store
+        try:
+            h.app._record_declined("RUN1", plan, why, 1)   # must not raise
+        finally:
+            h.app.store = saved
