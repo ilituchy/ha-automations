@@ -595,6 +595,24 @@ class EspnRead:
             by_period = side.get("pointsByScoringPeriod") or {}
             return sum(float(v or 0.0) for v in by_period.values())
 
+        def by_period(side: Optional[Mapping[str, Any]]) -> Dict[int, float]:
+            """Each day of the week, as ESPN totalled it.
+
+            ``null`` for a week that has not started and partial for one in
+            progress, so a missing key is "no day yet" rather than zero -- the
+            same distinction the per-player scores make.
+            """
+            raw_days = (side or {}).get("pointsByScoringPeriod") or {}
+            out: Dict[int, float] = {}
+            for period, points in raw_days.items():
+                if points is None:
+                    continue
+                try:
+                    out[int(period)] = float(points)
+                except (TypeError, ValueError):
+                    continue
+            return out
+
         def used(side: Optional[Mapping[str, Any]]) -> Optional[int]:
             """The pooled games-played entry, or ``None`` if ESPN has none.
 
@@ -627,6 +645,19 @@ class EspnRead:
                  if _opt_int(v.get("teamId")) != team_id), None,
             )
             opp_id = _opt_int((theirs or {}).get("teamId"))
+            # ``winner`` is HOME/AWAY/UNDECIDED, which only means something to
+            # something that knows which side of the row we are on. This is
+            # the one place that knows, so it is the one place that normalizes
+            # it. ``TIE`` has not been observed and is handled anyway: the cost
+            # of being wrong is calling a draw a loss.
+            my_side = next((k for k, v in sides.items() if v is mine), "")
+            winner = str(match.get("winner") or "").upper()
+            if winner in ("HOME", "AWAY"):
+                outcome = "WIN" if winner == my_side.upper() else "LOSS"
+            elif winner == "TIE":
+                outcome = "TIE"
+            else:
+                outcome = ""
             return MatchupScore(
                 matchup_period=int(matchup_period or 0),
                 my_team_id=team_id,
@@ -641,6 +672,9 @@ class EspnRead:
                 opp_logo=field_of(opp_id, "logo"),
                 my_games_used=used(mine),
                 opp_games_used=used(theirs),
+                my_by_period=by_period(mine),
+                opp_by_period=by_period(theirs),
+                outcome=outcome,
             )
         return None
 

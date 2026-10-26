@@ -20,7 +20,7 @@ import re
 import sys
 import time
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 sys.path.insert(
     0,
@@ -1461,10 +1461,17 @@ def _team_view(roster, **over):
     return view
 
 
+def _days(on=5, scores=((4, 110.0, 92.0), (5, None, None), (6, None, None))):
+    return [{"sp": sp, "label": "D%d" % sp, "mine": a, "theirs": b,
+             "on": sp == on, "today": sp == 5} for sp, a, b in scores]
+
+
 def _matchup_view(mine, theirs, **over):
     view = {
         "league": "Dynassty", "league_id": 9, "period": 5,
-        "day": "Sat, Oct 24", "today": True, "prev": 4, "next": 6,
+        "day": "Sat, Oct 24", "today": True,
+        "days": _days(), "week": 2, "week_span": "Oct 20\u201325",
+        "this_week": True, "prev_week": 1, "next_week": None,
         "slot_counts": dict(SLOTS), "games_cap": 44,
         "score": MatchupScore(
             matchup_period=1, my_team_id=7, my_points=834.0,
@@ -1599,11 +1606,36 @@ class TestMatchupSheet(unittest.TestCase):
         self.assertIn("Bye week", out)
         self.assertNotIn("Ahead by", out)
 
-    def test_the_day_arrows_stay_inside_the_matchup_week(self):
-        out = web.render_matchup(_page(), _matchup_view([], [], prev=None,
-                                                        next=6))
-        self.assertIn("dayarrow off", out)
+    def test_the_day_strip_links_to_every_other_day_of_the_week(self):
+        out = web.render_matchup(_page(), _matchup_view([], []))
+        self.assertIn("matchup?league=9&amp;sp=4", out)
         self.assertIn("matchup?league=9&amp;sp=6", out)
+
+    def test_the_day_being_looked_at_is_not_a_link_to_itself(self):
+        out = web.render_matchup(_page(), _matchup_view([], []))
+        self.assertIn("<span class='day on' aria-current=date>", out)
+        self.assertNotIn("matchup?league=9&amp;sp=5", out)
+
+    def test_each_chip_carries_what_both_sides_scored_that_day(self):
+        """The point of the strip: which day the week was decided on, visible
+        before anything is tapped."""
+        out = web.render_matchup(_page(), _matchup_view([], []))
+        chip = out.split("<nav class=days>")[1].split("</nav>")[0]
+        self.assertIn("110", chip)
+        self.assertIn("92", chip)
+
+    def test_a_day_espn_has_published_nothing_for_is_a_dash(self):
+        out = web.render_matchup(_page(), _matchup_view([], []))
+        chip = out.split("<nav class=days>")[1].split("</nav>")[0]
+        self.assertEqual(chip.count("&mdash;"), 2)   # the two unplayed days
+
+    def test_a_week_with_one_day_falls_back_to_naming_it(self):
+        """No calendar means no week to lay out, and a strip of one chip is a
+        label pretending to be a control."""
+        out = web.render_matchup(_page(), _matchup_view(
+            [], [], days=_days(scores=((5, None, None),))))
+        self.assertNotIn("<nav class=days>", out)
+        self.assertIn("Sat, Oct 24", out)
 
     def test_a_failed_read_says_so_and_offers_the_way_back(self):
         out = web.render_matchup(_page(), {"league": "Dynassty",
@@ -1938,3 +1970,264 @@ class TestSaveOutcomeIsNotAnInjection(unittest.TestCase):
         self.assertTrue(bad)
         self.assertLess(len(note), 280)
         self.assertTrue(note.endswith("…"))
+
+
+class TestMatchupWeekNavigation(unittest.TestCase):
+    """*"id love to be able to toggle back to previous matchups"*."""
+
+    def test_the_week_is_named_above_the_card_whose_totals_it_is(self):
+        out = web.render_matchup(_page(), _matchup_view([], []))
+        self.assertIn("Week 2", out)
+        self.assertLess(out.index("Week 2"), out.index("<section class=vs>"))
+
+    def test_the_arrows_link_to_the_first_day_of_the_week_either_side(self):
+        out = web.render_matchup(_page(), _matchup_view(
+            [], [], prev_week=1, next_week=14))
+        self.assertIn("href='matchup?league=9&amp;sp=1' "
+                      "aria-label='Previous matchup'", out)
+        self.assertIn("href='matchup?league=9&amp;sp=14' "
+                      "aria-label='Next matchup'", out)
+
+    def test_there_is_no_way_forward_from_the_week_being_played(self):
+        """ESPN's schedule carries every future fixture as a real row with a
+        real opponent and 0.0-0.0 on it, so an unbounded arrow walks into
+        seventeen matchups that have not happened."""
+        out = web.render_matchup(_page(), _matchup_view([], [], next_week=None))
+        self.assertIn("dayarrow off", out)
+        self.assertNotIn("Next matchup", out)
+
+    def test_the_current_week_says_so_instead_of_its_dates(self):
+        out = web.render_matchup(_page(), _matchup_view([], [], this_week=True))
+        self.assertIn("This week", out)
+
+    def test_a_past_week_is_labelled_with_its_dates(self):
+        out = web.render_matchup(_page(), _matchup_view(
+            [], [], this_week=False, week=1, week_span="Oct 20–25"))
+        self.assertIn("Oct 20", out)
+        self.assertNotIn("This week", out)
+
+    def test_no_calendar_means_no_week_strip_rather_than_a_guessed_one(self):
+        out = web.render_matchup(_page(), _matchup_view([], [], week=None))
+        self.assertNotIn("class=weeknav", _body(out))
+
+
+class TestFinishedMatchupReadsInThePastTense(unittest.TestCase):
+    """A decided week that still says "Ahead by" reads as one still being
+    played, which is the whole reason the page knows the difference."""
+
+    def _score(self, **over):
+        kw = dict(matchup_period=1, my_team_id=7, my_points=1392.0,
+                  opp_team_id=6, opp_name="Theirs", opp_points=1287.0,
+                  my_name="Mine")
+        kw.update(over)
+        return MatchupScore(**kw)
+
+    def test_a_running_week_is_ahead_and_a_finished_one_is_won(self):
+        running = web.render_matchup(_page(), _matchup_view(
+            [], [], score=self._score()))
+        self.assertIn("Ahead by 105.0", running)
+        self.assertNotIn("Won by", running)
+
+        done = web.render_matchup(_page(), _matchup_view(
+            [], [], score=self._score(outcome="WIN")))
+        self.assertIn("Won by 105.0", done)
+        self.assertNotIn("Ahead by", done)
+
+    def test_a_lost_week_says_lost(self):
+        out = web.render_matchup(_page(), _matchup_view(
+            [], [], score=self._score(my_points=1190.0, opp_points=1221.5,
+                                      outcome="LOSS")))
+        self.assertIn("Lost by 31.5", out)
+
+    def test_the_middle_of_the_card_says_which_it_is(self):
+        self.assertIn(">vs", web.render_matchup(
+            _page(), _matchup_view([], [], score=self._score())))
+        self.assertIn(">final", web.render_matchup(
+            _page(), _matchup_view([], [], score=self._score(outcome="WIN"))))
+
+    def test_level_becomes_tied_once_it_is_over(self):
+        out = web.render_matchup(_page(), _matchup_view(
+            [], [], score=self._score(my_points=100.0, opp_points=100.0,
+                                      outcome="TIE")))
+        self.assertIn("Tied", out)
+        self.assertNotIn("Level", out)
+
+
+class TestDayPair(unittest.TestCase):
+    def test_both_sides_missing_is_one_dash_not_two(self):
+        self.assertEqual(web._daypair(None, None), "&mdash;")
+
+    def test_the_winner_of_the_day_is_marked(self):
+        self.assertIn("d1 up", web._daypair(110.0, 92.0))
+        self.assertIn("d1 dn", web._daypair(92.0, 110.0))
+
+    def test_a_level_day_marks_neither(self):
+        out = web._daypair(50.0, 50.0)
+        self.assertNotIn("up", out)
+        self.assertNotIn("dn", out)
+
+    def test_one_side_reported_and_the_other_not_still_shows_the_one(self):
+        out = web._daypair(110.0, None)
+        self.assertIn("110", out)
+        self.assertIn("&mdash;", out)
+
+
+class FakeDayRead:
+    """``matchup_score`` and ``day_rosters``, recording what they were asked."""
+
+    def __init__(self, by_period=None, rosters=None):
+        self.asked = []
+        self.periods = []
+        self.by_period = by_period or {1: 110.0, 2: 92.0}
+        self.rosters = rosters or {}
+
+    def matchup_score(self, team_id=None, matchup_period=None):
+        self.asked.append(matchup_period)
+        return MatchupScore(
+            matchup_period=matchup_period or 0, my_team_id=7, my_points=1.0,
+            opp_team_id=6, opp_name="Theirs", opp_points=2.0, my_name="Mine",
+            my_by_period=dict(self.by_period), opp_by_period={},
+        )
+
+    def day_rosters(self, scoring_period, team_ids=None):
+        self.periods.append(scoring_period)
+        return dict(self.rosters)
+
+    def league_settings(self):
+        raise AssertionError("the page must go through settings_now")
+
+
+class FakeCalendar:
+    """Weeks of ``size`` days starting at period 1, like the real one."""
+
+    trustworthy = True
+
+    def __init__(self, size=7, weeks=6, first=date(2026, 10, 20)):
+        self.size = size
+        self.weeks = weeks
+        self.first = first
+
+    def matchup_period_of(self, period):
+        return (int(period) - 1) // self.size + 1
+
+    def periods_in_matchup(self, week):
+        if week < 1 or week > self.weeks:
+            return []
+        lo = (int(week) - 1) * self.size + 1
+        return list(range(lo, lo + self.size))
+
+    def matchup_period_bounds(self, week):
+        days = self.periods_in_matchup(week)
+        return (self.date_of(days[0]), self.date_of(days[-1])) if days else None
+
+    def date_of(self, period):
+        return self.first + timedelta(days=int(period) - 1)
+
+
+class FakeSettings:
+    def __init__(self, sp, mp):
+        self.current_scoring_period = sp
+        self.current_matchup_period = mp
+        self.lineup_slot_counts = dict(SLOTS)
+        self.lineup_slot_stat_limits = None
+
+
+def _week_page(sp=15, mp=3, **cal_kw):
+    """A page whose "today" is scoring period ``sp``, in matchup week ``mp``."""
+    lg = FakeLeague(9, "Dynassty")
+    lg.read = FakeDayRead()
+    lg.espn = type("E", (), {"team_id": 7})()
+    bot = FakeBot(leagues=[lg])
+    bot.season_calendar = lambda: FakeCalendar(**cal_kw)
+    bot.settings_now = lambda league: (FakeSettings(sp, mp), None)
+    bot.pro_games = lambda: {}
+    return web.StatusPage(bot), lg
+
+
+class TestWhichWeekThePageOpens(unittest.TestCase):
+    """The clamping. Every one of these is a URL somebody can type or keep."""
+
+    def test_no_day_asked_for_opens_on_today(self):
+        page, lg = _week_page()
+        view = page._matchup_view(lg, None)
+        self.assertEqual(view["period"], 15)
+        self.assertEqual(view["week"], 3)
+        self.assertTrue(view["this_week"])
+
+    def test_the_score_is_read_for_the_week_being_shown_not_the_current_one(self):
+        """Otherwise a past week's rows would sit under this week's total --
+        and under this week's opponent, who is a different person."""
+        page, lg = _week_page()
+        page._matchup_view(lg, 3)
+        self.assertEqual(lg.read.asked, [1])
+
+    def test_a_past_day_opens_its_own_week_and_can_come_forward(self):
+        page, lg = _week_page()
+        view = page._matchup_view(lg, 3)
+        self.assertEqual(view["week"], 1)
+        self.assertFalse(view["this_week"])
+        self.assertIsNone(view["prev_week"])      # no week zero
+        self.assertEqual(view["next_week"], 8)    # first day of week 2
+
+    def test_the_week_being_played_has_no_way_forward(self):
+        page, lg = _week_page()
+        view = page._matchup_view(lg, 15)
+        self.assertEqual(view["prev_week"], 8)
+        self.assertIsNone(view["next_week"])
+
+    def test_a_day_past_the_current_week_is_clamped_back_to_it(self):
+        """A hand-edited link, or a bookmark kept past the end of the season."""
+        page, lg = _week_page()
+        view = page._matchup_view(lg, 400)
+        self.assertEqual(view["week"], 3)
+        self.assertEqual(view["period"], 15)
+
+    def test_a_day_below_the_season_is_clamped_to_the_first_week(self):
+        page, lg = _week_page()
+        view = page._matchup_view(lg, -5)
+        self.assertEqual(view["week"], 1)
+        self.assertEqual(view["period"], 1)
+
+    def test_rubbish_in_the_query_string_opens_today(self):
+        page, lg = _week_page()
+        self.assertEqual(page._matchup_view(lg, "tuesday")["period"], 15)
+
+    def test_espn_being_ahead_of_the_calendar_does_not_hide_the_live_week(self):
+        """The calendar is the authority on dates -- that is the fix for the
+        409s -- but a disagreement must cost history, not the week in play."""
+        page, lg = _week_page(sp=15, mp=4)
+        self.assertEqual(page._matchup_view(lg, 25)["week"], 4)
+
+    def test_the_roster_is_read_for_the_day_being_shown(self):
+        page, lg = _week_page()
+        page._matchup_view(lg, 3)
+        self.assertEqual(lg.read.periods, [3])
+
+
+class TestTheDayStripIsBuiltFromTheWeek(unittest.TestCase):
+    def test_one_entry_per_day_of_the_week(self):
+        page, lg = _week_page(size=6, weeks=6)
+        days = page._matchup_view(lg, 3)["days"]
+        self.assertEqual([d["sp"] for d in days], [1, 2, 3, 4, 5, 6])
+
+    def test_exactly_one_day_is_the_one_being_looked_at(self):
+        page, lg = _week_page()
+        days = page._matchup_view(lg, 3)["days"]
+        self.assertEqual([d["sp"] for d in days if d["on"]], [3])
+
+    def test_the_scores_come_off_the_matchup_row_already_read(self):
+        page, lg = _week_page()
+        days = {d["sp"]: d["mine"] for d in page._matchup_view(lg, 3)["days"]}
+        self.assertEqual(days[1], 110.0)
+        self.assertEqual(days[2], 92.0)
+
+    def test_a_day_the_row_says_nothing_about_stays_none(self):
+        """``None`` is what renders as a dash; 0.0 would claim it was played."""
+        page, lg = _week_page()
+        days = {d["sp"]: d["mine"] for d in page._matchup_view(lg, 3)["days"]}
+        self.assertIsNone(days[5])
+
+    def test_today_is_marked_even_when_another_day_is_open(self):
+        page, lg = _week_page()
+        days = page._matchup_view(lg, 15)["days"]
+        self.assertEqual([d["sp"] for d in days if d["today"]], [15])

@@ -365,6 +365,27 @@ class MatchupScore:
     #: to put in front of a human; the reconciliation lives in the run notes.
     my_games_used: Optional[int] = None
     opp_games_used: Optional[int] = None
+    #: ``scoringPeriodId -> points``, each side day by day, straight off the
+    #: same matchup row the totals come from. ESPN publishes it for every week
+    #: that has started and ``null`` for one that has not, and the keys are the
+    #: scoring periods of that week -- so this is what lets a reader see which
+    #: day of a finished week the match was actually lost on without a request
+    #: per day.
+    my_by_period: Mapping[int, float] = field(default_factory=dict)
+    opp_by_period: Mapping[int, float] = field(default_factory=dict)
+    #: ``WIN``, ``LOSS``, ``TIE``, or ``""`` while the week is still running.
+    #:
+    #: Normalized here because ESPN reports ``winner`` as ``HOME``/``AWAY``,
+    #: which is only meaningful to something that knows which side of the row
+    #: we are on -- and that is known exactly once, where the row is read.
+    #: ``""`` is also the honest answer for a bye and for a league whose
+    #: schedule does not carry the field.
+    outcome: str = ""
+
+    @property
+    def final(self) -> bool:
+        """Has this week been decided? Drives the word, not the arithmetic."""
+        return self.outcome in ("WIN", "LOSS", "TIE")
 
     @property
     def margin(self) -> float:

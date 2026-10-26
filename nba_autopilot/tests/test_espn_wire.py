@@ -1089,3 +1089,90 @@ class TestProSchedulePayloadIsFetchedOnce(unittest.TestCase):
         self.assertEqual(r.pro_team_scoring_periods()[3], {2: 1})
         self.assertEqual(r.pro_games_by_period()[2][3].opponent_id, 11)
         self.assertIn(2, r.scoring_period_dates())
+
+
+class TestMatchupOutcomeWire(unittest.TestCase):
+    """``winner`` is HOME/AWAY, which means nothing without knowing our side.
+
+    This is the only place that knows it, so this is the only place that can
+    normalize it. Probed on 2026-10-26: one live league won week 1 from the
+    away side (``winner: AWAY``) and the other lost it from the away side
+    (``winner: HOME``), which is exactly the pair that a naive reading gets
+    backwards for one of them.
+    """
+
+    def _read(self, *, winner, my_side):
+        them = "away" if my_side == "home" else "home"
+        match = {"matchupPeriodId": 1, "winner": winner,
+                 my_side: _side(7, points=1190.0),
+                 them: _side(6, points=1221.5)}
+        reader, _ = _score_reader([match])
+        return reader.matchup_score(matchup_period=1)
+
+    def test_winning_from_the_home_side(self):
+        self.assertEqual(self._read(winner="HOME", my_side="home").outcome, "WIN")
+
+    def test_winning_from_the_away_side(self):
+        self.assertEqual(self._read(winner="AWAY", my_side="away").outcome, "WIN")
+
+    def test_losing_from_the_away_side(self):
+        self.assertEqual(self._read(winner="HOME", my_side="away").outcome, "LOSS")
+
+    def test_losing_from_the_home_side(self):
+        self.assertEqual(self._read(winner="AWAY", my_side="home").outcome, "LOSS")
+
+    def test_a_week_still_running_has_no_outcome_and_is_not_final(self):
+        score = self._read(winner="UNDECIDED", my_side="home")
+        self.assertEqual(score.outcome, "")
+        self.assertFalse(score.final)
+
+    def test_a_decided_week_is_final(self):
+        self.assertTrue(self._read(winner="HOME", my_side="home").final)
+
+    def test_a_missing_winner_field_is_undecided_rather_than_a_loss(self):
+        match = {"matchupPeriodId": 1,
+                 "home": _side(7, points=10.0), "away": _side(6, points=5.0)}
+        reader, _ = _score_reader([match])
+        self.assertEqual(reader.matchup_score(matchup_period=1).outcome, "")
+
+
+class TestMatchupByPeriodWire(unittest.TestCase):
+    """``pointsByScoringPeriod`` -- the week day by day, free with the totals.
+
+    Keyed by ``scoringPeriodId`` as strings, ``null`` for a week that has not
+    started, partial for one in progress. A missing key is "not played yet"
+    and must not read as zero, the same distinction the per-player scores
+    make.
+    """
+
+    def _read(self, mine, theirs=None):
+        match = {"matchupPeriodId": 1,
+                 "home": _side(7, points=1190.0, by_period=mine),
+                 "away": _side(6, points=1221.5, by_period=theirs)}
+        reader, _ = _score_reader([match])
+        return reader.matchup_score(matchup_period=1)
+
+    def test_the_keys_become_integers(self):
+        score = self._read({"1": 45.0, "2": 317.5})
+        self.assertEqual(score.my_by_period, {1: 45.0, 2: 317.5})
+
+    def test_both_sides_are_read(self):
+        score = self._read({"1": 45.0}, {"1": 52.0})
+        self.assertEqual(score.opp_by_period, {1: 52.0})
+
+    def test_a_week_that_has_not_started_is_empty_not_missing(self):
+        score = self._read(None)
+        self.assertEqual(score.my_by_period, {})
+
+    def test_a_null_day_is_dropped_rather_than_read_as_zero(self):
+        """Nothing played and nothing scored are different answers."""
+        score = self._read({"1": 45.0, "2": None})
+        self.assertEqual(score.my_by_period, {1: 45.0})
+        self.assertNotIn(2, score.my_by_period)
+
+    def test_a_genuine_zero_is_kept(self):
+        self.assertEqual(self._read({"7": 0.0}).my_by_period, {7: 0.0})
+
+    def test_an_unparseable_day_is_skipped_and_the_rest_survive(self):
+        score = self._read({"1": 45.0, "oops": "nope"})
+        self.assertEqual(score.my_by_period, {1: 45.0})

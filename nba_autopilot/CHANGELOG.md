@@ -228,6 +228,42 @@ All notable changes to this app are documented here. The format follows
 
 ### Added
 
+- **Previous matchups, and the week as a strip of days.** *"id love to be able
+  to toggle back to previous matchups"*.
+
+  Arrows beside the week number step back through finished matchups — a
+  different opponent each week, each with its own final score, its own
+  games-used and its own day-by-day. They stop at the week being played:
+  ESPN's schedule carries every *future* fixture as a real row with a real
+  opponent and 0.0–0.0 on it, so an unbounded arrow walks into seventeen
+  matchups that have not happened and all look alike.
+
+  The pair of day arrows underneath is gone, replaced by the whole week as a
+  row of chips, each carrying what **both** sides scored that day. The arrows
+  made a reader page blindly through six days to find the one that decided the
+  week; the strip puts it on one line — *we lost it on Thursday* is visible
+  before anything is tapped, and Thursday is one tap away. The numbers are
+  free: `pointsByScoringPeriod` is on the same matchup row the totals already
+  come from. A day ESPN has published nothing for shows a dash rather than a
+  zero, the same distinction the per-player column makes.
+
+  A finished week now reads in the past tense — `FINAL`, and *Won by 105.0* or
+  *Lost by 31.5* instead of *Ahead* or *Behind*. `MatchupScore.outcome`
+  normalizes this where it can be done correctly and nowhere else: ESPN
+  reports `winner` as `HOME`/`AWAY`, which means nothing without knowing which
+  side of the row we are on, and the row is the only thing that knows. Probed
+  on 2026-10-26, one live league won week 1 from the away side and the other
+  lost week 1 from the away side — exactly the pair a naive reading gets
+  backwards for one of them.
+
+  The URL still carries one parameter, the scoring period, and the week is
+  derived from it. Two would be two things that can contradict each other. A
+  day outside the season, or past the week being played, is clamped onto a
+  real day of a real week rather than refused — a kept link should land
+  somewhere, and a hand-edited one should not be able to address a read to
+  somebody else's fixture.
+
+
 - **A matchup sheet behind every scoreboard panel, and a Team tab that edits
   the lineup.** *"when we click on one of the matchup cards it should take us
   to this... second is a tab on the top called Team that just shows you your

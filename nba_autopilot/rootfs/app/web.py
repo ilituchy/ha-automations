@@ -373,23 +373,66 @@ class StatusPage:
                         period, exc)
             return {}
 
-    def _week(self, period: int) -> List[int]:
-        """The scoring periods of ``period``'s matchup week, or just itself.
+    def _matchup_of(self, period: int) -> Optional[int]:
+        """Which matchup week a scoring period falls in, or ``None``.
 
-        What bounds the day arrows on the matchup page. A week rather than the
-        season because the score above them is the *week's* score: letting the
-        reader page into a day the header does not cover would put two
-        unrelated numbers on one screen.
+        ``None`` means the calendar could not say, and every caller treats
+        that as "there is one week, the current one" rather than guessing a
+        number -- a wrong week number here would address the score read to
+        somebody else's fixture.
         """
         cal = self._calendar()
         if cal is None or not cal.trustworthy:
-            return [int(period)]
+            return None
         try:
-            days = cal.periods_in_matchup(cal.matchup_period_of(int(period)))
+            return int(cal.matchup_period_of(int(period)))
         except Exception as exc:  # noqa: BLE001
             log.warning("could not place period %s in a week: %s", period, exc)
+            return None
+
+    def _week(self, period: int) -> List[int]:
+        """The scoring periods of ``period``'s matchup week, or just itself.
+
+        What the day strip is drawn from, and what bounds it. A week rather
+        than the season because the score above it is the *week's* score:
+        letting the reader step into a day the header does not cover would put
+        two unrelated numbers on one screen.
+        """
+        week = self._matchup_of(period)
+        if week is None:
             return [int(period)]
+        days = self._calendar().periods_in_matchup(week)
         return days or [int(period)]
+
+    def _week_span(self, week: Optional[int]) -> str:
+        """``Oct 20 - 25``, or ``""`` when there is no calendar to ask."""
+        cal = self._calendar()
+        if week is None or cal is None or not cal.trustworthy:
+            return ""
+        try:
+            bounds = cal.matchup_period_bounds(int(week))
+        except Exception:  # noqa: BLE001
+            return ""
+        if not bounds:
+            return ""
+        first, last = bounds
+        # The month is repeated only when the week straddles one, which is
+        # most of what makes this readable at a glance rather than a date
+        # range to be parsed.
+        if first.month == last.month:
+            return "%s %d\u2013%d" % (first.strftime("%b"), first.day, last.day)
+        return "%s %d \u2013 %s %d" % (first.strftime("%b"), first.day,
+                                       last.strftime("%b"), last.day)
+
+    def _weekday(self, period: int) -> str:
+        """``Mon``, or ``d7`` without a calendar. Three letters, for a chip."""
+        cal = self._calendar()
+        if cal is None or not cal.trustworthy:
+            return "d%d" % int(period)
+        try:
+            return cal.date_of(int(period)).strftime("%a")
+        except Exception:  # noqa: BLE001
+            return "d%d" % int(period)
 
     def _day_label(self, period: int) -> str:
         """``Sat, Oct 24`` for a scoring period, or ``day 5`` without a calendar.
@@ -424,17 +467,40 @@ class StatusPage:
     def _matchup_view(self, lg: Any, period: Any) -> Dict[str, Any]:
         settings = self._settings(lg)
         today = int(settings.current_scoring_period)
-        week = self._week(today)
         try:
             want = int(period)
         except (TypeError, ValueError):
             want = today
-        # Clamped to the week rather than refused: a stale bookmark from last
-        # Sunday should land on this week's Sunday, not on an error.
-        if want not in week:
-            want = today if today in week else week[-1]
 
-        score = lg.read.matchup_score()
+        # Which week is being looked at, and which weeks exist to look at.
+        #
+        # The forward bound matters more than it sounds: ESPN's schedule
+        # carries every *future* week too, each one a real row with a real
+        # opponent and 0.0-0.0 on it. Without a bound the arrows would walk
+        # into seventeen fixtures that have not happened, all identical.
+        this_week = self._matchup_of(today)
+        last_week = this_week
+        if last_week is not None:
+            # ESPN's own number as a floor. The two agree on both live
+            # leagues; taking the larger means a disagreement costs a week of
+            # history rather than hiding the week being played.
+            last_week = max(last_week,
+                            int(getattr(settings, "current_matchup_period", 0) or 0))
+        want_week = self._matchup_of(want)
+        if last_week is not None and want_week is not None:
+            want_week = max(1, min(want_week, last_week))
+            if want_week != self._matchup_of(want):
+                # A hand-edited or stale link. Land on that week rather than
+                # erroring, which is what the day clamp below does too.
+                want = self._calendar().periods_in_matchup(want_week)[0]
+
+        week = self._week(want)
+        # Clamped to its own week rather than refused: a stale bookmark should
+        # land on a real day of a real week, not on an error.
+        if want not in week:
+            want = today if today in week else week[0]
+
+        score = lg.read.matchup_score(matchup_period=want_week)
         if score is None:
             return {"league": self.league_label(lg.ref.league_id),
                     "league_id": lg.ref.league_id,
@@ -445,7 +511,6 @@ class StatusPage:
             sides.append(score.opp_team_id)
         rosters = lg.read.day_rosters(want, team_ids=sides)
         games, tz = self._games(want), self.tz()
-        order = week.index(want)
         # The same figure the scoreboard panel prints, from the same place, so
         # the two screens cannot disagree about how many games a week allows.
         try:
@@ -454,6 +519,19 @@ class StatusPage:
         except Exception as exc:  # noqa: BLE001
             log.warning("could not read the games cap: %s", exc)
             cap = None
+
+        # One chip per day of the week, each carrying what both sides scored
+        # on it. Off the matchup row that was already read, so the whole strip
+        # is free -- and it turns "page blindly through six days" into "the
+        # week was lost on Thursday, look at Thursday".
+        days = [{
+            "sp": sp,
+            "label": self._weekday(sp),
+            "mine": score.my_by_period.get(sp),
+            "theirs": score.opp_by_period.get(sp),
+            "on": sp == want,
+            "today": sp == today,
+        } for sp in week]
 
         def rows(team_id: Any) -> List[Dict[str, Any]]:
             return [_row(d, games, tz) for d in (rosters.get(team_id) or [])]
@@ -465,13 +543,37 @@ class StatusPage:
             "period": want,
             "day": self._day_label(want),
             "today": want == today,
-            "prev": week[order - 1] if order > 0 else None,
-            "next": week[order + 1] if order + 1 < len(week) else None,
+            "days": days,
+            "week": want_week,
+            "week_span": self._week_span(want_week),
+            "this_week": want_week is not None and want_week == this_week,
+            "prev_week": self._week_link(want_week, -1, last_week),
+            "next_week": self._week_link(want_week, 1, last_week),
             "slot_counts": dict(settings.lineup_slot_counts),
             "games_cap": cap,
             "mine": rows(score.my_team_id),
             "theirs": rows(score.opp_team_id),
         }
+
+    def _week_link(self, week: Optional[int], step: int,
+                   last: Optional[int]) -> Optional[int]:
+        """The scoring period to link to for the week ``step`` away, or ``None``.
+
+        A *scoring period*, not a week number, because that is the only thing
+        the URL carries: one parameter means the day and the week can never
+        contradict each other. Its first day, so a week is entered at the top
+        the way it is read.
+        """
+        if week is None or last is None:
+            return None
+        target = int(week) + step
+        if target < 1 or target > last:
+            return None
+        try:
+            days = self._calendar().periods_in_matchup(target)
+        except Exception:  # noqa: BLE001
+            return None
+        return days[0] if days else None
 
     async def team_view(self, league_id: Any) -> Dict[str, Any]:
         lg = self.league_by_id(league_id)
@@ -1002,10 +1104,67 @@ details.logs[open] > summary::after { content: " \\25BE"; }
 .vsgames { font-size: 11px; color: var(--secondary-text-color, var(--faint)); }
 .vsmid { font-size: 11px; font-weight: 700; text-transform: uppercase;
          letter-spacing: .06em; color: var(--secondary-text-color, var(--faint)); }
+.vsgap { white-space: nowrap; }
 .vsgap { display: block; margin-top: 3px; font-size: 12px; letter-spacing: 0;
          text-transform: none; }
 .vsgap.lead { color: var(--good); }
 .vsgap.trail { color: var(--bad); }
+
+/* Which week, above the card whose totals are that week's. Named before the
+   numbers are read, rather than after. */
+.weeknav {
+  display: flex; align-items: center; justify-content: center; gap: 4px;
+  margin: 0 0 12px;
+}
+.weekis {
+  flex: 1 1 auto; text-align: center;
+  font-size: 13px; font-weight: 700; letter-spacing: -.01em;
+}
+.weekspan {
+  display: block; font-size: 11px; font-weight: 500; letter-spacing: 0;
+  color: var(--secondary-text-color, var(--faint));
+}
+
+/* The week as one line of chips. This replaced a pair of arrows and a date:
+   the arrows made a reader page blindly through six days to find the one that
+   decided the week, and the day's two scores are free -- they are on the same
+   matchup row as the totals above. Scrolls rather than wraps, because a week
+   is a sequence and a second row of it reads as a second week. */
+.days {
+  display: flex; gap: 6px; margin: 0 0 12px;
+  overflow-x: auto; scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.days::-webkit-scrollbar { display: none; }
+.day {
+  flex: 1 0 auto; min-width: 62px; text-align: center; text-decoration: none;
+  padding: 7px 8px; border-radius: 11px;
+  background: var(--chip); color: var(--secondary-text-color, var(--dim));
+  border: 1px solid transparent;
+}
+.day.on {
+  background: var(--card-background-color, var(--card));
+  border-color: var(--primary-color, #2b7de9);
+  color: var(--primary-text-color, var(--fg));
+}
+/* Today, when today is not the day being looked at. A ring rather than the
+   fill, so "where I am" and "where now is" never look like the same thing. */
+.day.now { border-color: var(--line); }
+.day:hover { color: var(--primary-text-color, var(--fg)); }
+.dayname {
+  display: block; font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .06em;
+}
+.dayscore {
+  display: block; margin-top: 2px; font-size: 11.5px; white-space: nowrap;
+}
+.dayscore b { font-weight: 700; }
+.dayscore i { font-style: normal; opacity: .45; margin: 0 1px; }
+/* Only the day's winner is in full-strength ink, the same rule the scoreboard
+   panel uses on the two team totals. */
+.dayscore .d1, .dayscore .d2 { color: inherit; }
+.dayscore .d1.up { color: var(--good); }
+.dayscore .d1.dn { color: var(--bad); }
 
 .daynav {
   display: flex; align-items: center; justify-content: center; gap: 4px;
@@ -2150,8 +2309,9 @@ def render_matchup(page: StatusPage, view: Mapping[str, Any],
         _open("%s matchup" % (view.get("league") or "")),
         "<a class=back href='.'>&larr; Overview</a>",
         "<h1 class=phead>%s</h1>" % _e(view.get("league") or "Matchup"),
+        _weeknav(view),
         _vs(score, view.get("games_cap")),
-        _daynav(view),
+        _daystrip(view),
     ]
 
     mine, theirs = list(view["mine"]), list(view["theirs"])
@@ -2227,45 +2387,121 @@ def _vs(score: Any, cap: Optional[float] = None) -> str:
                 ))
 
     # "by 84.5" between two numbers is ambiguous about whose 84.5 it is, and
-    # the reader of this page has exactly one side. So it is said in words.
+    # the reader of this page has exactly one side. So it is said in words --
+    # and in the right tense, because a finished week that still says "Ahead
+    # by" reads as a match still being played.
+    done = bool(getattr(score, "final", False))
     if bye:
         gap = "<span class=vsgap>Bye week</span>"
     elif mine is None or theirs is None:
         gap = ""
     elif mine == theirs:
-        gap = "<span class=vsgap>Level</span>"
+        gap = "<span class=vsgap>%s</span>" % ("Tied" if done else "Level")
     else:
         gap = "<span class='vsgap %s'>%s by %s</span>" % (
-            "lead" if ahead else "trail", "Ahead" if ahead else "Behind",
+            "lead" if ahead else "trail",
+            ("Won" if ahead else "Lost") if done else
+            ("Ahead" if ahead else "Behind"),
             _e("%.1f" % abs(mine - theirs)))
-    return ("<section class=vs>%s<div class=vsmid>vs%s</div>%s</section>" % (
+    return ("<section class=vs>%s<div class=vsmid>%s%s</div>%s</section>" % (
         side(score.my_name, score.my_logo, mine, score.my_games_used, ahead),
+        "final" if done else "vs",
         gap,
         side("No opponent" if bye else score.opp_name, score.opp_logo,
              None if bye else theirs, score.opp_games_used, behind),
     ))
 
 
-def _daynav(view: Mapping[str, Any]) -> str:
-    """Previous day, this day, next day -- inside the matchup week and no further.
+def _dayhref(view: Mapping[str, Any], period: Any) -> str:
+    """The page's only URL shape. One parameter, so the day and the week
+    carried by a link can never contradict each other."""
+    return "matchup?league=%s&amp;sp=%s" % (_e(view["league_id"]), _e(period))
 
-    Bounded by the week because the score above it is the week's. An arrow
-    that walked out of the matchup period would put a day's rows under a total
-    that does not include them.
+
+def _weeknav(view: Mapping[str, Any]) -> str:
+    """Which matchup week is on screen, and the way to the ones either side.
+
+    Forward stops at the week being played. ESPN's schedule carries every
+    future fixture as a real row with a real opponent and 0.0-0.0 on it, so
+    without that bound the arrow walks into seventeen matchups that have not
+    happened and all look alike.
+
+    Rendered above the score card because it labels that card: the totals
+    under it are the week's, and the week has to be named before they are
+    read, not after.
     """
+    week = view.get("week")
+    if week is None:
+        return ""
+
     def arrow(period: Any, glyph: str, label: str) -> str:
         if period is None:
             return "<span class='dayarrow off' aria-hidden=true>%s</span>" % glyph
-        return ("<a class=dayarrow href='matchup?league=%s&amp;sp=%s' "
-                "aria-label='%s'>%s</a>"
-                % (_e(view["league_id"]), _e(period), _e(label), glyph))
+        return ("<a class=dayarrow href='%s' aria-label='%s'>%s</a>"
+                % (_dayhref(view, period), _e(label), glyph))
 
-    return ("<div class=daynav>%s<span class=dayis>%s%s</span>%s</div>" % (
-        arrow(view.get("prev"), "&lsaquo;", "Previous day"),
-        "<b>Today</b> &middot; " if view.get("today") else "",
-        _e(view.get("day") or ""),
-        arrow(view.get("next"), "&rsaquo;", "Next day"),
-    ))
+    span = view.get("week_span") or ""
+    return ("<div class=weeknav>%s<span class=weekis>Week %s%s</span>%s</div>"
+            % (
+                arrow(view.get("prev_week"), "&lsaquo;", "Previous matchup"),
+                _e(week),
+                ("<span class=weekspan>%s</span>"
+                 % _e("This week" if view.get("this_week") else span))
+                if (span or view.get("this_week")) else "",
+                arrow(view.get("next_week"), "&rsaquo;", "Next matchup"),
+            ))
+
+
+def _daystrip(view: Mapping[str, Any]) -> str:
+    """Every day of the week as a chip, carrying what both sides scored on it.
+
+    This replaced a pair of arrows and a date. The arrows made the reader page
+    blindly through six days to find the one that decided the week; the chips
+    put the whole week on one line, so "we lost it on Thursday" is visible
+    before anything is tapped, and Thursday is one tap away.
+
+    The numbers are free: they come off the same matchup row the totals above
+    them do. A day ESPN has published nothing for shows a dash -- it has not
+    been played -- which is the same distinction the per-player column makes.
+    """
+    days = view.get("days") or []
+    if len(days) < 2:
+        # One day is not a week and a strip of one chip is just a label.
+        return ("<div class=daynav><span class=dayis>%s%s</span></div>" % (
+            "<b>Today</b> &middot; " if view.get("today") else "",
+            _e(view.get("day") or ""),
+        ))
+    out = ["<nav class=days>"]
+    for day in days:
+        inner = ("<span class=dayname>%s</span>"
+                 "<span class=dayscore>%s</span>" % (
+                     _e(day["label"]),
+                     _daypair(day.get("mine"), day.get("theirs")),
+                 ))
+        if day.get("on"):
+            # No link to where you already are, and marked for a screen
+            # reader rather than only by colour.
+            out.append("<span class='day on' aria-current=date>%s</span>" % inner)
+        else:
+            out.append("<a class='day%s' href='%s'>%s</a>" % (
+                " now" if day.get("today") else "",
+                _dayhref(view, day["sp"]), inner))
+    out.append("</nav>")
+    return "".join(out)
+
+
+def _daypair(mine: Any, theirs: Any) -> str:
+    """``118-96`` for one day, with the better side in full-strength ink."""
+    if mine is None and theirs is None:
+        return "&mdash;"
+    a, b = _num(mine), _num(theirs)
+    up = "" if a is None or b is None or a == b else (" up" if a > b else " dn")
+    return "<b class='d1%s'>%s</b><i>%s</i><b class=d2>%s</b>" % (
+        up,
+        "&mdash;" if a is None else _e("%.0f" % a),
+        "&ndash;",
+        "&mdash;" if b is None else _e("%.0f" % b),
+    )
 
 
 def _mside(row: Optional[Mapping[str, Any]], side: str) -> str:

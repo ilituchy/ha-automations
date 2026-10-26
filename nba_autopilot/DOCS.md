@@ -386,10 +386,17 @@ column reads top to bottom as one league's story.
 
 **Tapping a score** opens that league's matchup: both lineups slot by slot,
 each player's opponent, tip-off time and points for the day, and the day's
-subtotal for each side. The arrows either side of the date walk through the
-days of the matchup week. A dash in the points column means ESPN has published
+subtotal for each side. A dash in the points column means ESPN has published
 nothing for that player that day — he has not tipped off, or is not playing. A
 `0.0` means he played and scored nothing.
+
+Under the score card is the week, one chip per day, each showing what both
+sides scored that day. Tap one to see that day's lineups. The arrows beside
+the week number go back through **previous matchups** — a different opponent
+each week, with its own final score and its own day-by-day — and stop at the
+week being played, because ESPN's schedule carries every future fixture as a
+real row with 0.0–0.0 on it and there is nothing to see there. A finished week
+says `FINAL` and *Won by* or *Lost by* rather than *Ahead* or *Behind*.
 
 **Team** is your roster, and the one place in this app where *you* move
 players rather than the optimizer. Drag a player by the handle on the left
