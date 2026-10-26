@@ -2318,51 +2318,84 @@ class TestWhereTheDetailPagesSendYou(unittest.TestCase):
         self.assertEqual(row["team"], "MIN")
 
 
-def _considered_row(state="BLOCKED", league_id=9, add=10, drop=20,
-                    rationale="the reviewer blocked it", when=None):
+def _considered_row(declined="blocked", league_id=9, add=10, drop=20,
+                    rationale="the reviewer blocked it", when=None,
+                    run_id="R9"):
+    """A BLOCKED proposal row, as ``_record_declined`` writes one."""
     return {
-        "id": add, "state": state, "kind": "ADD_DROP", "league_id": league_id,
+        "id": add, "state": "BLOCKED", "kind": "ADD_DROP",
+        "run_id": run_id, "league_id": league_id,
         "payload": json.dumps({"add": add, "add_name": "In %d" % add,
                                "drop": drop, "drop_name": "Out %d" % drop,
-                               "waiver": False}),
+                               "waiver": False, "declined": declined}),
         "rationale": rationale, "value_delta": 1.5,
-        "decided_at": when, "finished_at": when,
+        "finished_at": when or "2026-10-26T16:00:00+00:00",
         "created_at": when or "2026-10-26T16:00:00+00:00",
+        "started_at": when or "2026-10-26T16:00:00+00:00",
     }
 
 
-class _ConsideredStore(FakeStore):
-    """Answers the one statement ``considered`` makes, filtering as it does."""
+def _run_with_notes(notes, run_id="R1", league_id=9,
+                    started_at="2026-10-22T16:00:00+00:00"):
+    return {"run_id": run_id, "league_id": league_id,
+            "started_at": started_at, "notes": json.dumps(list(notes))}
 
-    def __init__(self, considered=(), **kw):
+
+#: The sentence the live code writes when the reviewer says no. Spelled out
+#: here so the test below can prove the parser still matches what is written.
+BLOCKED_NOTE = ("Malik Monk for Keegan Murray was not proposed -- the "
+                "reviewer blocked it: Murray is owned in 77% of leagues.")
+
+
+class _ConsideredStore(FakeStore):
+    """Answers the two statements ``considered`` makes."""
+
+    def __init__(self, considered=(), runs=(), **kw):
         super().__init__(**kw)
         self._considered = list(considered)
+        self._runs = list(runs)
         self.asked = []
 
     def query(self, sql, args=()):
         if "FROM proposals p" in sql:
             self.asked.append((sql, args))
-            wanted = set(args[:-1])
-            return [r for r in self._considered
-                    if r["state"] in wanted and r["kind"] == "ADD_DROP"]
+            return list(self._considered)
+        if "notes FROM runs" in sql:
+            self.asked.append((sql, args))
+            return list(self._runs)
         return super().query(sql, args)
 
 
-def _considered_page(rows, leagues=((9, "Dynassty"), (7, "Chairman's"))):
-    bot = FakeBot(_ConsideredStore(considered=rows),
+def _considered_page(rows=(), runs=(),
+                     leagues=((9, "Dynassty"), (7, "Chairman's"))):
+    bot = FakeBot(_ConsideredStore(considered=rows, runs=runs),
                   leagues=[FakeLeague(i, n) for i, n in leagues])
     return web.StatusPage(bot), bot
 
 
-class TestWhatItConsidered(unittest.TestCase):
-    """*"id like a way to view rejected add drop reuqests... when it says
-    Nothing waiting for add drop it should have a drop down where i can see
-    what it considered"*.
+class TestWhatItDidNotPutToYou(unittest.TestCase):
+    """*"no i dont care about what I did. i care about the ones you and the ai
+    judge decided to not surface"*.
 
-    "Nothing waiting" is true and unsatisfying on its own: a quiet week and a
-    week where the reviewer refused six swaps a day read identically from it,
-    and they call for opposite responses.
+    So only the app's own refusals. A swap the owner rejected and one that
+    expired unanswered are his own decisions, already known, and the run log
+    has them.
     """
+
+    def test_only_the_apps_own_refusals_are_read(self):
+        page, _ = _considered_page()
+        web.render(page)
+        sql, _args = page.bot.store.asked[0]
+        self.assertIn("state='BLOCKED'", sql)
+        self.assertNotIn("REJECTED", sql)
+        self.assertNotIn("EXPIRED", sql)
+
+    def test_only_add_drop(self):
+        """A lineup move nobody was asked about was applied or it was not, and
+        either way the run log has it move by move."""
+        page, _ = _considered_page()
+        web.render(page)
+        self.assertIn("kind='ADD_DROP'", page.bot.store.asked[0][0])
 
     def test_the_dropdown_appears_under_the_league_that_weighed_them(self):
         page, _ = _considered_page([_considered_row(league_id=9),
@@ -2373,95 +2406,63 @@ class TestWhatItConsidered(unittest.TestCase):
         self.assertIn("In 10", dyn)
         self.assertNotIn("In 11", dyn)
 
-    def test_a_league_that_weighed_nothing_gets_no_dropdown(self):
-        """The common case must cost a reader nothing."""
-        page, _ = _considered_page([_considered_row(league_id=9)])
-        out = web.render(page)
-        self.assertEqual(out.count("<details class='logs weighed'>"), 1)
-
-    def test_nothing_considered_anywhere_renders_no_dropdown_at_all(self):
-        page, _ = _considered_page([])
+    def test_nothing_refused_anywhere_renders_no_dropdown(self):
+        page, _ = _considered_page()
         self.assertNotIn("weighed", _body(web.render(page)))
 
-    def test_the_summary_counts_what_is_inside_it(self):
+    def test_the_summary_says_what_the_list_is(self):
         page, _ = _considered_page([_considered_row(add=10),
-                                    _considered_row(add=11),
-                                    _considered_row(add=12)])
-        self.assertIn("3 swaps considered and not taken", web.render(page))
+                                    _considered_row(add=11)])
+        self.assertIn("2 swaps it did not put to you", web.render(page))
 
     def test_one_swap_is_not_called_swaps(self):
         page, _ = _considered_page([_considered_row()])
-        self.assertIn("1 swap considered and not taken", web.render(page))
+        self.assertIn("1 swap it did not put to you", web.render(page))
 
-    def test_each_outcome_is_said_in_words_a_reader_asked_for(self):
+    def test_a_judgment_and_a_fault_do_not_render_the_same(self):
+        """``Verdict.errored`` exists upstream to keep these apart, and a page
+        that folds them together makes a week of outages look like a week of
+        good judgment."""
         page, _ = _considered_page([
-            _considered_row(state="BLOCKED", add=10),
-            _considered_row(state="REJECTED", add=11),
-            _considered_row(state="EXPIRED", add=12),
+            _considered_row(declined="blocked", add=10),
+            _considered_row(declined="unreachable", add=11),
         ])
         out = web.render(page)
-        self.assertIn("Not put to you", out)
-        self.assertIn("You rejected it", out)
-        self.assertIn("Expired unanswered", out)
+        self.assertIn("<span class='tag '>Reviewer said no</span>", out)
+        self.assertIn("<span class='tag hold'>Review unavailable</span>", out)
 
-    def test_the_app_declining_is_not_painted_as_a_failure(self):
-        """It is the reviewer working. A week of good judgment must not look
-        like a week of failed writes."""
-        page, _ = _considered_page([_considered_row(state="BLOCKED")])
-        out = web.render(page)
-        block = out.split("Not put to you")[0][-60:]
-        self.assertNotIn("tag off", block)
-
-    def test_a_rejection_is(self):
-        page, _ = _considered_page([_considered_row(state="REJECTED")])
-        out = web.render(page)
-        self.assertIn("<span class='tag off'>You rejected it</span>", out)
-
-    def test_both_players_are_named(self):
+    def test_the_app_refusing_is_not_painted_as_a_failure(self):
         page, _ = _considered_page([_considered_row()])
+        out = web.render(page)
+        self.assertNotIn("tag off", out.split("Reviewer said no")[0][-60:])
+
+    def test_both_players_are_named_and_linked_into_their_league(self):
+        page, _ = _considered_page([_considered_row(league_id=9)])
         out = web.render(page)
         self.assertIn("In 10", out)
         self.assertIn("Out 20", out)
+        self.assertIn("leagueId=9", out)
 
     def test_the_reasoning_is_behind_the_same_control_the_live_cards_use(self):
-        """A verdict is a paragraph of somebody else's prose, and a column is
-        not where a paragraph goes."""
         page, _ = _considered_page([_considered_row(
             rationale="the reviewer blocked it: his minutes are not real")])
         out = web.render(page)
         self.assertIn("class=why", out)
         self.assertIn("his minutes are not real", out)
 
-    def test_a_row_with_no_reasoning_renders_without_the_control(self):
-        page, _ = _considered_page([_considered_row(rationale="")])
-        out = web.render(page)
-        self.assertIn("In 10", out)
-        self.assertNotIn("class=why", _body(out))
-
     def test_the_verdict_is_escaped(self):
         """It is LLM output, which the project treats as untrusted."""
         page, _ = _considered_page([_considered_row(
             rationale="<script>alert(1)</script>")])
-        out = web.render(page)
-        self.assertNotIn("<script>alert", out)
-
-    def test_only_add_drop_and_only_the_states_that_went_nowhere(self):
-        """A lineup move nobody was asked about was applied or it was not, and
-        either way the run log has it move by move. DONE and FAILED belong to
-        swaps that happened or tried to."""
-        page, _ = _considered_page([])
-        web.render(page)
-        sql, args = page.bot.store.asked[0]
-        self.assertIn("kind='ADD_DROP'", sql)
-        self.assertEqual(set(args[:-1]), {"BLOCKED", "REJECTED", "EXPIRED"})
-        self.assertNotIn("DONE", args)
-        self.assertNotIn("FAILED", args)
+        self.assertNotIn("<script>alert", web.render(page))
 
     def test_it_is_read_once_for_the_whole_band_not_once_per_column(self):
         page, _ = _considered_page([_considered_row(league_id=9),
                                     _considered_row(league_id=7, add=11)])
         web.render(page)
-        self.assertEqual(len(page.bot.store.asked), 1)
+        self.assertEqual(
+            len([a for a in page.bot.store.asked if "FROM proposals p" in a[0]]),
+            1)
 
     def test_a_swap_still_waiting_is_shown_above_it_not_inside_it(self):
         bot = FakeBot(_ConsideredStore(considered=[_considered_row()],
@@ -2471,6 +2472,142 @@ class TestWhatItConsidered(unittest.TestCase):
         out = _body(web.render(web.StatusPage(bot)))
         self.assertLess(out.index("Approve"), out.index("weighed"))
 
-    def test_the_names_link_into_the_league_that_considered_them(self):
-        page, _ = _considered_page([_considered_row(league_id=9)])
-        self.assertIn("leagueId=9", web.render(page))
+
+class TestOlderRefusalsAreRecoveredFromTheNotes(unittest.TestCase):
+    """Blocked swaps became rows on 2026-10-26. Before that the run's notes
+    were the whole record, written for a person to read, and they are still
+    the only account of what the reviewer said on those days."""
+
+    def test_a_note_about_a_blocked_swap_becomes_an_entry(self):
+        page, _ = _considered_page(runs=[_run_with_notes([BLOCKED_NOTE])])
+        out = web.render(page)
+        self.assertIn("Malik Monk for Keegan Murray", out)
+        self.assertIn("Reviewer said no", out)
+        self.assertIn("owned in 77% of leagues", out)
+
+    def test_an_unreachable_reviewer_note_is_marked_as_a_fault(self):
+        page, _ = _considered_page(runs=[_run_with_notes([
+            "A for B was not proposed -- the reviewer could not be reached: "
+            "timed out after 20s"])])
+        out = web.render(page)
+        self.assertIn("Review unavailable", out)
+
+    def test_the_other_phrasing_is_matched_too(self):
+        page, _ = _considered_page(runs=[_run_with_notes([
+            "add/drop review unavailable, so A for B was withheld rather "
+            "than shown"])])
+        out = web.render(page)
+        self.assertIn("A for B", out)
+        self.assertIn("Review unavailable", out)
+
+    def test_notes_about_anything_else_are_left_alone(self):
+        """A run's notes are mostly about the calendar, the budget and which
+        players were undroppable. A loose match would fill a list titled
+        "swaps it did not put to you" with sentences that are not swaps."""
+        page, _ = _considered_page(runs=[_run_with_notes([
+            "not droppable: Aaron Gordon (starting today)",
+            "3 acquisition(s) left in matchup period 2",
+            "Jared McCain cleared review -- the reviewer approved it",
+            "no change needed",
+        ])])
+        self.assertNotIn("weighed", _body(web.render(page)))
+
+    def test_a_run_that_recorded_rows_never_has_its_notes_read(self):
+        """Otherwise every new refusal would be listed twice -- once as the
+        row and once as the note the same run also wrote."""
+        page, _ = _considered_page(
+            rows=[_considered_row(run_id="R1")],
+            runs=[_run_with_notes([BLOCKED_NOTE], run_id="R1")])
+        out = web.render(page)
+        self.assertIn("1 swap it did not put to you", out)
+        self.assertNotIn("Malik Monk", out)
+
+    def test_a_run_that_recorded_nothing_still_answers_for_itself(self):
+        page, _ = _considered_page(
+            rows=[_considered_row(run_id="R9")],
+            runs=[_run_with_notes([BLOCKED_NOTE], run_id="R1")])
+        self.assertIn("2 swaps it did not put to you", web.render(page))
+
+    def test_a_recovered_entry_is_one_line_and_claims_no_faces(self):
+        """The note kept names and not ids, so there is nothing to draw."""
+        page, _ = _considered_page(runs=[_run_with_notes([BLOCKED_NOTE])])
+        out = web.render(page)
+        self.assertIn("<div class=candswap>", out)
+        self.assertNotIn("class=swap", out.split("candswap")[1][:200])
+
+    def test_a_recovered_swap_name_is_escaped(self):
+        page, _ = _considered_page(runs=[_run_with_notes([
+            "<img src=x> was not proposed -- the reviewer blocked it: no"])])
+        self.assertNotIn("<img src=x>", web.render(page))
+
+    def test_newest_first_across_both_sources(self):
+        page, _ = _considered_page(
+            rows=[_considered_row(add=10, when="2026-10-20T10:00:00+00:00",
+                                  run_id="R9")],
+            runs=[_run_with_notes([BLOCKED_NOTE], run_id="R1",
+                                  started_at="2026-10-25T10:00:00+00:00")])
+        out = web.render(page)
+        self.assertLess(out.index("Malik Monk"), out.index("In 10"))
+
+
+class TestTheNoteParserStillMatchesWhatIsWritten(unittest.TestCase):
+    """Prose is a bad thing to parse and a worse thing to depend on silently.
+
+    The parser only ever reads runs that recorded no rows, so it retires
+    itself -- but while it is live, the failure mode of the wording moving is
+    a dropdown that quietly goes empty. This is the test that makes that loud
+    instead.
+    """
+
+    def test_the_blocked_sentence_is_the_one_the_reviewer_path_writes(self):
+        import judge as judge_mod
+        verdict = judge_mod.Verdict(False, "his minutes are not real")
+        note = "%s was not proposed -- %s" % ("A for B", verdict.describe())
+        found = web._blocked_note(note)
+        self.assertIsNotNone(found)
+        swap, why, unreachable = found
+        self.assertEqual(swap, "A for B")
+        self.assertIn("his minutes are not real", why)
+        self.assertFalse(unreachable)
+
+    def test_the_unreachable_sentence_is_recognised_as_a_fault(self):
+        import judge as judge_mod
+        verdict = judge_mod.Verdict(False, "timed out", errored=True)
+        note = "%s was not proposed -- %s" % ("A for B", verdict.describe())
+        found = web._blocked_note(note)
+        self.assertIsNotNone(found)
+        self.assertTrue(found[2])
+
+    def test_a_caveat_on_the_verdict_does_not_break_the_match(self):
+        import judge as judge_mod
+        verdict = judge_mod.Verdict(False, "no", concern="thin minutes")
+        note = "%s was not proposed -- %s" % ("A for B", verdict.describe())
+        self.assertIsNotNone(web._blocked_note(note))
+
+    def test_an_approval_note_is_not_a_refusal(self):
+        import judge as judge_mod
+        verdict = judge_mod.Verdict(True, "fine")
+        note = "%s cleared review -- %s" % ("A for B", verdict.reason)
+        self.assertIsNone(web._blocked_note(note))
+
+    def test_one_busy_league_cannot_crowd_the_other_out_of_its_column(self):
+        """A cap over the whole list would have the quiet league answer
+        "nothing" while it had a fortnight of history."""
+        page, _ = _considered_page(
+            rows=[_considered_row(league_id=9, add=i, run_id="R%d" % i,
+                                  when="2026-10-26T1%d:00:00+00:00" % (i % 10))
+                  for i in range(30)]
+            + [_considered_row(league_id=7, add=99, run_id="R99",
+                               when="2026-10-01T10:00:00+00:00")])
+        out = web.render(page)
+        self.assertEqual(out.count("<details class='logs weighed'>"), 2)
+        chair = out.split("Chairman&#x27;s</h3>")[1].split("</section>")[0]
+        self.assertIn("In 99", chair)
+
+    def test_a_league_shows_at_most_its_share(self):
+        page, _ = _considered_page(
+            rows=[_considered_row(league_id=9, add=i, run_id="R%d" % i)
+                  for i in range(30)])
+        out = web.render(page)
+        self.assertIn("%d swaps it did not put to you"
+                      % web.StatusPage.CONSIDERED_PER_LEAGUE, out)

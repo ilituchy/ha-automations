@@ -43,6 +43,7 @@ import asyncio
 import html
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -140,57 +141,110 @@ class StatusPage:
         out.reverse()
         return out
 
-    #: Terminal states that mean "this swap was looked at and did not happen".
-    #: ``DONE`` and ``FAILED`` are deliberately absent: one of them happened and
-    #: the other tried to, and both already have a row in the run log. These are
-    #: the ones with nothing else to show for themselves.
-    CONSIDERED = ("BLOCKED", "REJECTED", "EXPIRED")
-
-    #: What each of them should be called on the page. The stored word is for
-    #: the state machine; these are for a reader asking what became of a swap.
-    OUTCOMES = {
-        "BLOCKED": "Not put to you",
-        "REJECTED": "You rejected it",
-        "EXPIRED": "Expired unanswered",
+    #: How a swap the app refused is labelled, and in which colour.
+    #:
+    #: Only the app's own refusals are here. *"i dont care about what I did. i
+    #: care about the ones you and the ai judge decided to not surface"* --
+    #: a swap the owner rejected and one that expired unanswered are his own
+    #: decisions, already known, and the run log has them.
+    #:
+    #: The two are kept apart because they are different events: one is the
+    #: gate working, the other is a degraded run. Folding them together would
+    #: make a week of outages look like a week of good judgment, which is the
+    #: same distinction ``judge.Verdict.errored`` exists upstream to preserve.
+    DECLINED = {
+        "blocked": ("Reviewer said no", ""),
+        "unreachable": ("Review unavailable", "hold"),
     }
 
-    def considered(self, limit: int = 12) -> List[Dict[str, Any]]:
-        """Add/drop swaps that were weighed and not made, newest first.
+    #: How many refusals one league shows. The cap is per league and not over
+    #: the list, because a global one lets the busier league crowd the other
+    #: out of its own column -- two leagues would mean one of them silently
+    #: answering "nothing" while it had a fortnight of history.
+    CONSIDERED_PER_LEAGUE = 10
+
+    def considered(self, limit: int = 60) -> List[Dict[str, Any]]:
+        """Add/drop swaps the app weighed and did not put to the owner.
 
         The answer to the question an empty approval queue invites. "Nothing
-        waiting" is true and unsatisfying: it does not say whether the app
-        looked at anything, and a week of silence reads identically whether
-        the pool was empty or the reviewer turned down six swaps a day.
+        waiting" is true and unsatisfying: a quiet week and a week where the
+        reviewer refused six swaps a day read identically from it, and they
+        call for opposite responses.
 
-        Only add/drop. A lineup move nobody was asked about is not a thing that
-        was *considered and declined* -- it is applied or it is not, and either
-        way the run log has it move by move.
+        Two sources, and which one answers for a run is decided per run.
+        Blocked swaps have been recorded as rows since 2026-10-26; before
+        that they existed only as a line in the run's notes, written for a
+        person to read. Those lines are still the whole record of what the
+        reviewer said on those days, so they are parsed back rather than
+        thrown away -- and a run that has rows of its own never has its notes
+        read, so nothing is listed twice and the fallback retires itself as
+        the rows accumulate.
         """
-        marks = ",".join("?" * len(self.CONSIDERED))
         rows = self.bot.store.query(
-            "SELECT p.*, r.league_id AS league_id FROM proposals p "
-            "LEFT JOIN runs r ON r.run_id = p.run_id "
-            "WHERE p.kind='ADD_DROP' AND p.state IN (%s) "
-            "ORDER BY p.id DESC LIMIT ?" % marks,
-            tuple(self.CONSIDERED) + (int(limit),),
+            "SELECT p.*, r.league_id AS league_id, r.started_at AS started_at "
+            "FROM proposals p LEFT JOIN runs r ON r.run_id = p.run_id "
+            "WHERE p.kind='ADD_DROP' AND p.state='BLOCKED' "
+            "ORDER BY p.id DESC LIMIT ?",
+            (int(limit),),
         )
-        out = []
+        out: List[Dict[str, Any]] = []
+        recorded = set()
         for r in rows:
             row = dict(r)
-            state = str(row.get("state") or "").upper()
+            recorded.add(row.get("run_id"))
+            payload = _loads(row.get("payload"), {})
+            label, tag = self.DECLINED.get(
+                str(payload.get("declined") or "blocked"),
+                self.DECLINED["blocked"])
             out.append({
                 "league_id": row.get("league_id"),
-                "state": state,
-                "outcome": self.OUTCOMES.get(state, state.lower()),
-                "payload": _loads(row.get("payload"), {}),
+                "label": label,
+                "tag": tag,
+                "payload": payload,
                 "rationale": row.get("rationale") or "",
-                "value_delta": row.get("value_delta") or 0.0,
-                # Whichever of the three the row actually has. A rejection is
-                # stamped when it was decided, a block when it was written, and
-                # an expiry when it was swept.
-                "when": (row.get("decided_at") or row.get("finished_at")
-                         or row.get("created_at")),
+                "note": "",
+                "when": (row.get("finished_at") or row.get("created_at")
+                         or row.get("started_at")),
             })
+        out.extend(self._considered_from_notes(limit, recorded))
+        # Newest first across both sources. Sorted on the stored timestamp,
+        # which is ISO-8601 UTC everywhere, so a string sort is a time sort.
+        out.sort(key=lambda e: str(e.get("when") or ""), reverse=True)
+        return out[:int(limit)]
+
+    def _considered_from_notes(self, limit: int,
+                               skip: Any) -> List[Dict[str, Any]]:
+        """Blocked swaps recovered from the notes of runs that recorded none.
+
+        Text only: the note names both players but carries no ids, so these
+        entries have no headshots and no links. That is the honest shape --
+        less was kept at the time -- and it is why the rows above are the
+        preferred source rather than a second rendering of the same thing.
+        """
+        out: List[Dict[str, Any]] = []
+        runs = self.bot.store.query(
+            "SELECT run_id, league_id, started_at, notes FROM runs "
+            "ORDER BY started_at DESC LIMIT ?", (int(limit) * 4,))
+        for run in runs:
+            row = dict(run)
+            if row.get("run_id") in skip:
+                continue
+            for note in _loads(row.get("notes"), []):
+                found = _blocked_note(note)
+                if found is None:
+                    continue
+                swap, why, unreachable = found
+                label, tag = self.DECLINED[
+                    "unreachable" if unreachable else "blocked"]
+                out.append({
+                    "league_id": row.get("league_id"),
+                    "label": label,
+                    "tag": tag,
+                    "payload": {},
+                    "rationale": why,
+                    "note": swap,
+                    "when": row.get("started_at"),
+                })
         return out
 
     def _league_of_run(self, run_id: str) -> Optional[int]:
@@ -1397,6 +1451,9 @@ details.logs[open] > summary::after { content: " \\25BE"; }
    sits directly under the one card that still might. */
 .cand .who { font-size: 14px; }
 .cand .swap { gap: 6px; }
+/* A swap recovered from a run's notes: one line, because that line is the
+   whole record. No faces, because the note kept names and not ids. */
+.candswap { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
 
 .empty {
   color: var(--secondary-text-color, var(--dim));
@@ -1563,7 +1620,9 @@ STATE_TAGS = {
     "PROPOSED": "hold", "EXECUTING": "hold",
     # Neutral, not red. The app declining a swap is it working, and painting
     # a week of good judgment the same colour as a week of failed writes is
-    # the thing ``Verdict.errored`` exists upstream to keep apart.
+    # the thing ``Verdict.errored`` exists upstream to keep apart. The
+    # dropdown that lists these picks its own colour per reason; this entry is
+    # for a BLOCKED row met anywhere else, such as in a run's own card.
     "BLOCKED": "",
 }
 
@@ -1747,6 +1806,47 @@ def _swap(payload: Mapping[str, Any], *, small: bool = False,
     return "".join(out)
 
 
+#: The two sentences ``Autopilot._review_addrop`` writes when a swap does not
+#: get put to the owner. Matched here so that runs from before those swaps were
+#: recorded as rows still have their history read back.
+#:
+#: Prose is a bad thing to parse and a worse thing to depend on, which is why
+#: this is only ever consulted for a run that recorded no rows, and why
+#: ``test_web`` asserts that the live code still writes sentences these match.
+#: When that assertion fails the wording has moved and this has stopped finding
+#: anything -- which is the point of it: the alternative to a failing test is a
+#: dropdown that quietly goes empty.
+_NOT_PROPOSED = re.compile(r"^(?P<swap>.+?) was not proposed -- (?P<why>.+)$",
+                           re.S)
+_WITHHELD = re.compile(
+    r"^add/drop review unavailable, so (?P<swap>.+?) was withheld "
+    r"rather than shown$", re.S)
+
+#: What ``Verdict.describe`` says when it could not ask rather than was told.
+_UNREACHABLE = "the reviewer could not be reached"
+
+
+def _blocked_note(note: Any) -> Optional[Tuple[str, str, bool]]:
+    """``(swap, why, unreachable)`` for a note about a withheld swap, else None.
+
+    Deliberately narrow. A run's notes are mostly about other things -- the
+    calendar, the budget, which players were undroppable -- and a loose match
+    here would fill a list titled "swaps it did not put to you" with sentences
+    that are not about swaps at all.
+    """
+    text = " ".join(str(note or "").split())
+    hit = _NOT_PROPOSED.match(text)
+    if hit:
+        why = hit.group("why")
+        return hit.group("swap"), why, why.startswith(_UNREACHABLE)
+    hit = _WITHHELD.match(text)
+    if hit:
+        return (hit.group("swap"),
+                "%s to review it, so it was withheld rather than shown"
+                % _UNREACHABLE, True)
+    return None
+
+
 def _considered(rows: List[Mapping[str, Any]], league: Any, tz: Any) -> str:
     """What this league weighed and did not do. A disclosure, under the queue.
 
@@ -1764,19 +1864,25 @@ def _considered(rows: List[Mapping[str, Any]], league: Any, tz: Any) -> str:
     """
     if not rows:
         return ""
-    # Not ``_plural``, which pluralizes the last word: "2 swap considereds".
+    # Not ``_plural``, which pluralizes the last word: "2 swap not put to yous".
     out = ["<details class='logs weighed'><summary>%s</summary>"
-           % _e("%d %s considered and not taken"
+           % _e("%d %s it did not put to you"
                 % (len(rows), "swap" if len(rows) == 1 else "swaps"))]
     for row in rows:
+        payload = row.get("payload") or {}
         out.append(
             "<div class=cand><div class=candhead>"
             "<span class='tag %s'>%s</span><span class=candwhen>%s</span>"
             "</div>%s%s</div>" % (
-                STATE_TAGS.get(row.get("state"), ""),
-                _e(row.get("outcome") or ""),
+                _e(row.get("tag") or ""),
+                _e(row.get("label") or ""),
                 _e(_when(row.get("when"), tz)),
-                _swap(row.get("payload") or {}, small=True, league=league),
+                # A recovered entry has names and no ids, so it is the one
+                # line the note kept rather than two faces that cannot be
+                # drawn. Not a degraded version of the card above it -- a
+                # smaller record, shown as what it is.
+                _swap(payload, small=True, league=league) if payload
+                else "<div class=candswap>%s</div>" % _e(row.get("note") or ""),
                 _why(row["rationale"]) if row.get("rationale") else "",
             ))
     out.append("</details>")
@@ -2410,7 +2516,9 @@ def render(page: StatusPage, *, user: str = "",
     # should not mean two round trips to answer the same question.
     weighed: Dict[Any, List[Dict[str, Any]]] = {}
     for row in page.considered():
-        weighed.setdefault(row.get("league_id"), []).append(row)
+        column = weighed.setdefault(row.get("league_id"), [])
+        if len(column) < page.CONSIDERED_PER_LEAGUE:
+            column.append(row)
     if not columns:
         # No leagues configured and nothing queued, so there is no column to
         # put a card in. Reachable on a fresh install, before the options are

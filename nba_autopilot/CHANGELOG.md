@@ -264,23 +264,46 @@ All notable changes to this app are documented here. The format follows
 
 ### Added
 
-- **What it considered: a dropdown under each league's approval column.**
-  *"id like a way to view rejected add drop reuqests (hidden somewhere in logs
-  or xsomething, like when it says Nothing waiting for add drop it should have
-  a drop down where i can see what it considered"*.
+- **The swaps it did not put to you: a dropdown under each league's approval
+  column.** *"id like a way to view rejected add drop reuqests (hidden
+  somewhere in logs or xsomething, like when it says Nothing waiting for add
+  drop it should have a drop down where i can see what it considered"*, then
+  *"no i dont care about what I did. i care about the ones you and the ai
+  judge decided to not surface"*.
+
+  So only the app's own refusals: a swap the owner rejected and one that
+  expired unanswered are his own decisions, already known, and the run log has
+  them. Two outcomes remain, kept apart because they are different events --
+  *Reviewer said no* is the gate working, *Review unavailable* is a degraded
+  run, and folding them together would make a week of outages look like a week
+  of good judgment. That is the same distinction `judge.Verdict.errored`
+  exists upstream to preserve, and it now rides in the stored payload so the
+  page never has to read it back out of prose.
+
+  Refusals from before this landed were never rows: the only account of them
+  is the sentence the run wrote in its own notes. Those are parsed back and
+  listed, so the feature is useful on the day it ships rather than in a week
+  -- 26 of them on the live instance, with the reviewer's full reasoning. A
+  run that recorded rows never has its notes read, so nothing is listed twice
+  and the fallback retires itself as rows accumulate. A recovered entry is one
+  line with no headshots and no links, because that is all the note kept; it
+  is shown as the smaller record it is rather than as a degraded card.
+
+  Prose is a bad thing to parse and a worse thing to depend on silently, so a
+  test asserts that the live reviewer path still writes sentences the parser
+  matches. The failure mode of the wording moving is otherwise a dropdown that
+  quietly goes empty.
+
+  The cap is per league and not over the list. A global one would let the
+  busier league crowd the other out of its own column, leaving a league with a
+  fortnight of history answering "nothing".
 
   "Nothing waiting" is true and unsatisfying on its own. It cannot tell a
   quiet week from one where the reviewer turned down six swaps a day, and
-  those call for opposite responses. The dropdown lists the add/drop swaps
-  that were weighed and did not happen — both players named, what became of
-  each one, and the reasoning behind the same *Show details* control the live
-  cards use. Closed by default, and not rendered at all for a league that
-  weighed nothing.
-
-  Three outcomes reach it: *Not put to you* (the reviewer blocked it, or could
-  not be reached and it was withheld), *You rejected it*, and *Expired
-  unanswered*. `DONE` and `FAILED` are deliberately absent — one of them
-  happened and the other tried to, and both already have a row in the run log.
+  those call for opposite responses. The dropdown names both players, says
+  why, and puts the reviewer's own words behind the same *Show details*
+  control the live cards use. Closed by default, and not rendered at all for a
+  league that withheld nothing.
 
   A blocked swap used to leave only a line of prose in a run's notes, so it
   was not retrievable as *a swap* at all. It is now a proposal row in a new

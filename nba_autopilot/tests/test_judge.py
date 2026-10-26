@@ -714,9 +714,10 @@ class TestWhatItConsideredIsKept(unittest.TestCase):
             lambda p: judge_mod.Verdict(False, "his minutes are not real yet")))
         h.consider_all(target=funnel_target())
         self.assertTrue(h.declined)
-        plan, why = h.declined[0]
+        plan, why, unreachable = h.declined[0]
         self.assertEqual(plan.add.name, "FA90")
         self.assertIn("his minutes are not real yet", why)
+        self.assertFalse(unreachable)
 
     def test_an_unreachable_reviewer_is_recorded_too_and_says_so(self):
         """Blocked and withheld end the same way for the swap, and only the
@@ -726,6 +727,9 @@ class TestWhatItConsideredIsKept(unittest.TestCase):
         h.consider_all(target=funnel_target())
         self.assertEqual(len(h.declined), 1)
         self.assertIn("could not be reached", h.declined[0][1])
+        # Carried beside the prose, not read back out of it: the page colours
+        # a fault differently from a judgment and must not have to guess.
+        self.assertTrue(h.declined[0][2])
 
     def test_an_approved_swap_is_not_in_the_declined_list(self):
         h = funnel(judge=_PerSwapJudge(lambda p: judge_mod.Verdict(True, "ok")))
@@ -738,7 +742,7 @@ class TestWhatItConsideredIsKept(unittest.TestCase):
             lambda p: judge_mod.Verdict(False, "no to %s" % p.add.name)))
         h.consider_all(target=funnel_target())
         self.assertGreater(len(h.declined), 1)
-        self.assertEqual(len({p.add.name for p, _ in h.declined}),
+        self.assertEqual(len({p.add.name for p, _why, _u in h.declined}),
                          len(h.declined))
 
     def test_considering_still_writes_nothing_itself(self):
@@ -754,7 +758,7 @@ class TestWhatItConsideredIsKept(unittest.TestCase):
         the same code."""
         h = funnel(judge=_PerSwapJudge(lambda p: judge_mod.Verdict(False, "no")))
         h.consider_all(target=funnel_target())
-        plan, why = h.declined[0]
+        plan, why, _unreachable = h.declined[0]
         h.app._record_declined("RUN1", plan, why, 1)
         rows = h.app.store.rows
         self.assertEqual(len(rows), 1)
@@ -764,13 +768,23 @@ class TestWhatItConsideredIsKept(unittest.TestCase):
         self.assertIn("add", rows[0].payload)
         self.assertIn("drop_name", rows[0].payload)
         self.assertIn(why, rows[0].rationale)
+        self.assertEqual(rows[0].payload["declined"], "blocked")
+
+    def test_an_unreachable_reviewer_is_marked_as_such_in_the_record(self):
+        """A degraded run and a working gate must not render the same."""
+        h = funnel(judge=_PerSwapJudge(
+            lambda p: judge_mod.Verdict(False, "timed out", errored=True)))
+        h.consider_all(target=funnel_target())
+        plan, why, unreachable = h.declined[0]
+        h.app._record_declined("RUN1", plan, why, 1, unreachable=unreachable)
+        self.assertEqual(h.app.store.rows[0].payload["declined"], "unreachable")
 
     def test_a_failure_to_record_does_not_cost_the_run(self):
         """It is a record of something that did not happen, and must not take
         down something that did."""
         h = funnel(judge=_PerSwapJudge(lambda p: judge_mod.Verdict(False, "no")))
         h.consider_all(target=funnel_target())
-        plan, why = h.declined[0]
+        plan, why, _unreachable = h.declined[0]
 
         class Broken:
             def propose(self, *a, **kw):

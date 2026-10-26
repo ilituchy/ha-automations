@@ -715,7 +715,7 @@ class Autopilot:
         injuries: Optional[Any] = None,
         matchup: Optional[Any] = None,
     ) -> Tuple[List["addrop_mod.AddDropPlan"], List[str],
-               List[Tuple["addrop_mod.AddDropPlan", str]]]:
+               List[Tuple["addrop_mod.AddDropPlan", str, bool]]]:
         """Price the pool and decide up to ``addrop_max_moves`` swaps. Reads only.
 
         Returns the swaps it settled on, the notes, and the ones it turned
@@ -857,7 +857,7 @@ class Autopilot:
         # owner, with why. Kept so the question the empty approval queue
         # invites -- "so what did it consider?" -- has an answer that names
         # the two players rather than a line of prose in a run log.
-        declined: List[Tuple["addrop_mod.AddDropPlan", str]] = []
+        declined: List[Tuple["addrop_mod.AddDropPlan", str, bool]] = []
         # Protected for the rest of the run, and reported as such rather than
         # as a ``never_drop`` entry they are not.
         just_added: List[int] = []
@@ -951,9 +951,19 @@ class Autopilot:
                 # sentence written for a person. Recorded whether the reviewer
                 # judged it or could not be reached: both ended the same way
                 # for this swap, and only the words say which.
-                declined.append(
-                    (decision, review_notes[-1] if review_notes else
-                     "the reviewer did not approve it"))
+                # The verdict is the last note the review added, which is
+                # the sentence written for a person. ``unreachable`` is
+                # carried beside it rather than read back out of the prose:
+                # "the reviewer said no" and "the reviewer could not be
+                # asked" are different events -- that distinction is the
+                # whole reason ``Verdict.errored`` exists -- and the page
+                # colours them differently.
+                declined.append((
+                    decision,
+                    review_notes[-1] if review_notes
+                    else "the reviewer did not approve it",
+                    bool(unreachable),
+                ))
                 if unreachable:
                     # Not a judgment about this swap, so the next one would be
                     # withheld for the same non-reason. Stop rather than spend
@@ -1024,17 +1034,25 @@ class Autopilot:
         }
 
     def _record_declined(self, run_id: str, decision: Any, why: str,
-                         matchup_period: int) -> None:
+                         matchup_period: int, *,
+                         unreachable: bool = False) -> None:
         """Journal a swap the app turned down. Never raises.
 
         Wrapped whole: this is a record of something that did *not* happen, and
         failing to write it must not cost the run anything that did. The
         decision has already been made and acted on by the time this is called.
+
+        ``unreachable`` rides in the payload so the page never has to read it
+        back out of the prose. A swap the reviewer judged and a swap it could
+        not be asked about are not the same event -- one is the gate working
+        and the other is a degraded run -- and a page that cannot tell them
+        apart makes a week of outages look like a week of good judgment.
         """
+        payload = self._addrop_payload(decision, matchup_period)
+        payload["declined"] = "unreachable" if unreachable else "blocked"
         try:
             self.store.propose(
-                run_id, "ADD_DROP",
-                self._addrop_payload(decision, matchup_period),
+                run_id, "ADD_DROP", payload,
                 rationale="%s\n\n%s" % (why, decision.rationale),
                 value_delta=decision.gain,
                 declined=True,
@@ -1320,8 +1338,9 @@ class Autopilot:
             injuries=injuries, matchup=matchup,
         )
         notes.extend(addrop_notes)
-        for turned_down, why in declined:
-            self._record_declined(run_id, turned_down, why, matchup_period)
+        for turned_down, why, unreachable in declined:
+            self._record_declined(run_id, turned_down, why, matchup_period,
+                                  unreachable=unreachable)
         # Best first, each its own approval. Offered in the order they were
         # priced, because that is the order their estimates assume: the second
         # was computed as if the first went through. Nothing here waits for an

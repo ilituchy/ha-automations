@@ -398,21 +398,28 @@ week being played, because ESPN's schedule carries every future fixture as a
 real row with 0.0–0.0 on it and there is nothing to see there. A finished week
 says `FINAL` and *Won by* or *Lost by* rather than *Ahead* or *Behind*.
 
-Under each league's approval column is **what it considered** — a dropdown
-listing add/drop swaps that were weighed and did not happen, with both players,
-what became of each one and the reasoning behind a *Show details* control.
-Three things land there:
+Under each league's approval column is a dropdown of **the swaps it did not
+put to you** — add/drop moves the app found, weighed and withheld, with both
+players, why, and the reviewer's own words behind a *Show details* control.
+Two things land there:
 
-* *Not put to you* — the reviewer blocked the swap, or could not be reached
-  and it was withheld rather than shown. These never became a question, so
-  without this they were only a line of prose in a run's notes;
-* *You rejected it* — you tapped Reject, on the page or on the notification;
-* *Expired unanswered* — nobody answered within six hours.
+* *Reviewer said no* — the review gate judged the swap and blocked it;
+* *Review unavailable* — the reviewer could not be reached, so the swap was
+  withheld rather than shown. A degraded run rather than a verdict, and
+  coloured differently for that reason.
 
-It is closed by default and is not rendered at all for a league that weighed
+Swaps **you** rejected and ones that expired unanswered are not here. They
+were your decisions, and the run log has them.
+
+It is closed by default and is not rendered at all for a league that withheld
 nothing, so a quiet week costs you nothing. That is the point of it: "Nothing
 waiting" on its own cannot tell a quiet week from one where the reviewer
 turned down six swaps a day, and those call for opposite responses.
+
+Runs from before 2026-10-26 did not record withheld swaps as rows — the only
+account of them is the line the run wrote in its own notes — so those lines
+are read back and listed too. A recovered entry has the two names and the
+verdict but no headshots and no links, because that is all the note kept.
 
 **Team** is your roster, and the one place in this app where *you* move
 players rather than the optimizer. Drag a player by the handle on the left
