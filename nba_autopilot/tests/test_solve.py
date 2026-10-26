@@ -30,7 +30,13 @@ from solve.assign import (  # noqa: E402
     max_weight_assignment,
 )
 from espn import ids  # noqa: E402
-from models import LeagueSettings, Projection, StatLimit  # noqa: E402
+from models import (  # noqa: E402
+    LeagueSettings,
+    Projection,
+    RosterEntry,
+    StatLimit,
+)
+from solve import projections  # noqa: E402
 from solve.budget import (  # noqa: E402
     GamesBudget,
     PooledCapUnsupported,
@@ -623,3 +629,215 @@ class TestWeights(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestStatsEspnScoresButDoesNotProject(unittest.TestCase):
+    """The hole that was pricing every rebound in both live leagues at zero.
+
+    ESPN's season projection (split ``10``) publishes total ``REB``. Both live
+    leagues score ``OREB`` and ``DREB`` and put no coefficient on the total, so
+    ``mean.get(stat, 0.0)`` found nothing for either component and a
+    ten-rebound centre was valued as if he collected none. These tests pin the
+    derivation that fills the gap, and -- more importantly -- the two places it
+    is required *not* to act.
+    """
+
+    def _splits(self, projected, actual=None):
+        out = {ids.SPLIT_SEASON_PROJECTED: dict(projected)}
+        if actual is not None:
+            out[ids.SPLIT_SEASON_TOTAL] = dict(actual)
+        return out
+
+    # -- rebounds --------------------------------------------------------
+
+    def test_total_rebounds_are_split_into_the_components_scored(self):
+        derived = projections.derive_scored_stats(
+            {ids.REB: 10.0},
+            self._splits({}, {ids.OREB: 3.0, ids.DREB: 7.0, ids.GP_STAT: 10.0}),
+        )
+        self.assertAlmostEqual(derived[ids.OREB], 3.0)
+        self.assertAlmostEqual(derived[ids.DREB], 7.0)
+
+    def test_the_split_uses_his_own_share_not_a_league_average(self):
+        """A centre and a guard must not come out of here the same shape."""
+        big = projections.offensive_rebound_share(
+            self._splits({}, {ids.OREB: 3.5, ids.DREB: 6.5})
+        )
+        guard = projections.offensive_rebound_share(
+            self._splits({}, {ids.OREB: 0.4, ids.DREB: 3.1})
+        )
+        self.assertGreater(big, guard)
+        self.assertAlmostEqual(big, 3.5 / 10.0)
+
+    def test_no_history_falls_back_to_the_league_share(self):
+        self.assertAlmostEqual(
+            projections.offensive_rebound_share(self._splits({}, {})),
+            projections.OREB_SHARE_DEFAULT,
+        )
+        self.assertAlmostEqual(
+            projections.offensive_rebound_share(self._splits({})),
+            projections.OREB_SHARE_DEFAULT,
+        )
+
+    def test_the_components_always_add_back_to_the_total(self):
+        """Whatever the share, no rebound may be invented or lost."""
+        for share in (0.0, 0.12, 0.25, 0.4, 1.0):
+            actual = {ids.OREB: share, ids.DREB: 1.0 - share}
+            derived = projections.derive_scored_stats(
+                {ids.REB: 9.0}, self._splits({}, actual)
+            )
+            self.assertAlmostEqual(
+                derived[ids.OREB] + derived[ids.DREB], 9.0, places=9
+            )
+
+    def test_espns_own_components_are_never_overwritten(self):
+        """If the projection ever starts carrying them, it wins."""
+        derived = projections.derive_scored_stats(
+            {ids.REB: 10.0, ids.OREB: 1.0, ids.DREB: 9.0},
+            self._splits({}, {ids.OREB: 5.0, ids.DREB: 5.0}),
+        )
+        self.assertNotIn(ids.OREB, derived)
+        self.assertNotIn(ids.DREB, derived)
+
+    def test_a_player_with_no_rebounds_gets_no_components(self):
+        derived = projections.derive_scored_stats({ids.PTS: 8.0}, self._splits({}))
+        self.assertNotIn(ids.OREB, derived)
+        self.assertNotIn(ids.DREB, derived)
+
+    # -- double-doubles --------------------------------------------------
+
+    def test_a_double_double_candidate_is_priced_above_a_guard(self):
+        big = projections.modelled_bonus_rates(
+            {ids.PTS: 11.0, ids.REB: 12.0, ids.AST: 1.5, ids.STL: 0.5,
+             ids.BLK: 2.5}
+        )
+        guard = projections.modelled_bonus_rates(
+            {ids.PTS: 17.0, ids.REB: 2.8, ids.AST: 3.0, ids.STL: 0.7,
+             ids.BLK: 0.1}
+        )
+        self.assertGreater(big[ids.DD], 0.2)
+        self.assertLess(guard[ids.DD], 0.05)
+
+    def test_the_rates_are_probabilities_and_ordered(self):
+        rates = projections.modelled_bonus_rates(
+            {ids.PTS: 28.0, ids.REB: 11.0, ids.AST: 9.0, ids.STL: 1.4,
+             ids.BLK: 0.6}
+        )
+        for stat in (ids.DD, ids.TD, ids.QD):
+            self.assertGreaterEqual(rates[stat], 0.0)
+            self.assertLessEqual(rates[stat], 1.0)
+        # Clearing three thresholds cannot be likelier than clearing two.
+        self.assertGreaterEqual(rates[ids.DD], rates[ids.TD])
+        self.assertGreaterEqual(rates[ids.TD], rates[ids.QD])
+
+    def test_nobody_gets_a_bonus_from_an_empty_line(self):
+        rates = projections.modelled_bonus_rates({})
+        self.assertAlmostEqual(rates[ids.DD], 0.0)
+        self.assertAlmostEqual(rates[ids.TD], 0.0)
+
+    def test_observed_rates_are_read_per_game_not_as_totals(self):
+        """Split ``00`` reports DD the same way it reports points.
+
+        Probed 2026-10-26: Luka Doncic came back ``DD 0.33, GP 3.0`` -- one
+        double-double in three games, already divided. Dividing again here
+        would have quietly priced every bonus at a third of its worth.
+        """
+        rates, games = projections.observed_bonus_rates(
+            self._splits({}, {ids.DD: 0.33, ids.TD: 0.0, ids.GP_STAT: 3.0})
+        )
+        self.assertAlmostEqual(rates[ids.DD], 0.33)
+        self.assertAlmostEqual(games, 3.0)
+
+    def test_three_games_of_history_cannot_overrule_the_model(self):
+        """A short zero is ordinary and must not erase a big man's bonus."""
+        line = {ids.PTS: 11.0, ids.REB: 12.0, ids.AST: 1.5, ids.STL: 0.5,
+                ids.BLK: 2.5}
+        modelled = projections.modelled_bonus_rates(line)[ids.DD]
+        derived = projections.derive_scored_stats(
+            line,
+            self._splits({}, {ids.DD: 0.0, ids.GP_STAT: 3.0,
+                              ids.OREB: 3.0, ids.DREB: 9.0}),
+        )
+        self.assertGreater(derived[ids.DD], 0.5 * modelled)
+        self.assertLess(derived[ids.DD], modelled)
+
+    def test_a_long_history_does_overrule_the_model(self):
+        line = {ids.PTS: 11.0, ids.REB: 12.0, ids.AST: 1.5, ids.STL: 0.5,
+                ids.BLK: 2.5}
+        modelled = projections.modelled_bonus_rates(line)[ids.DD]
+        derived = projections.derive_scored_stats(
+            line,
+            self._splits({}, {ids.DD: 0.0, ids.GP_STAT: 70.0,
+                              ids.OREB: 3.0, ids.DREB: 9.0}),
+        )
+        self.assertLess(derived[ids.DD], 0.25 * modelled)
+
+    def test_shrinkage_is_monotone_in_games_played(self):
+        """More history always moves the estimate toward what was observed."""
+        line = {ids.PTS: 11.0, ids.REB: 12.0, ids.AST: 1.5, ids.STL: 0.5,
+                ids.BLK: 2.5}
+        seen = []
+        for games in (1.0, 5.0, 20.0, 60.0):
+            derived = projections.derive_scored_stats(
+                line,
+                self._splits({}, {ids.DD: 0.0, ids.GP_STAT: games,
+                                  ids.OREB: 3.0, ids.DREB: 9.0}),
+            )
+            seen.append(derived[ids.DD])
+        self.assertEqual(seen, sorted(seen, reverse=True))
+
+    # -- what must not happen --------------------------------------------
+
+    def test_a_rate_gets_bernoulli_variance_not_poisson(self):
+        """``PHI * mu`` on a probability exceeds the variance it can have."""
+        var = projections.variance_from_mean({ids.DD: 0.3, ids.PTS: 20.0})
+        self.assertAlmostEqual(var[ids.DD], 0.3 * 0.7)
+        self.assertAlmostEqual(var[ids.PTS], projections.PHI * 20.0)
+        self.assertLessEqual(var[ids.DD], 0.25)
+
+    def test_a_league_scoring_rebounds_both_ways_is_refused(self):
+        """Double-counting is a wrong ranking that looks like a right one."""
+        with self.assertRaises(UnsupportedScoring) as caught:
+            build_value_model(settings(scoring_items={
+                ids.PTS: 1.0, ids.REB: 1.0, ids.OREB: 0.5,
+            }))
+        self.assertIn("twice", str(caught.exception))
+
+    def test_a_league_scoring_only_the_total_still_works(self):
+        model = build_value_model(settings(scoring_items={
+            ids.PTS: 1.0, ids.REB: 1.2,
+        }))
+        self.assertIsInstance(model, PointsValue)
+
+    def test_the_derivation_reaches_the_value_the_optimizer_uses(self):
+        """The end-to-end claim: a rebounder is no longer priced at zero.
+
+        Deliberately asserted through ``build_projections`` and
+        ``conditional_value`` rather than against ``derive_scored_stats``
+        directly, because the bug was never in the arithmetic -- it was that
+        nothing connected the two.
+        """
+        entry = RosterEntry(
+            player_id=7,
+            name="Rebounding Centre",
+            current_slot=ids.BENCH_SLOT,
+            eligible_slots=frozenset({0, 11}),
+            pro_team_id=26,
+            injury_status="ACTIVE",
+        )
+        splits = {7: self._splits(
+            {ids.PTS: 10.0, ids.REB: 11.0, ids.BLK: 2.0, ids.GP_STAT: 75.0},
+            {ids.OREB: 3.0, ids.DREB: 8.0, ids.GP_STAT: 4.0},
+        )}
+        built, _notes, skipped = projections.build_projections(
+            [entry], splits,
+            as_of=datetime.datetime(2026, 10, 26, tzinfo=datetime.timezone.utc),
+        )
+        self.assertEqual(skipped, [])
+        model = build_value_model(settings(scoring_items={
+            ids.PTS: 1.0, ids.OREB: 1.5, ids.DREB: 1.0, ids.DD: 4.0,
+        }))
+        value = model.conditional_value(built[7])
+        # 10 pts + 3 oreb @1.5 + 8 dreb @1.0 = 22.5 before any bonus, where the
+        # old behaviour scored him at 10.0 flat.
+        self.assertGreater(value, 22.0)

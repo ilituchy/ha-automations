@@ -32,6 +32,7 @@ sys.path.insert(
 
 import main as main_mod  # noqa: E402
 import pipeline  # noqa: E402
+from solve import projections as projections_mod  # noqa: E402
 from espn import ids  # noqa: E402
 from ha import bridge as bridge_mod  # noqa: E402
 from models import (  # noqa: E402
@@ -68,11 +69,23 @@ class _Store:
             self.completed = None
             self.error = None
 
-    def __init__(self, *, claimable: bool = True):
+    def __init__(self, *, claimable: bool = True, forecasts_raise=None):
         self.rows = []
         self.claimable = claimable
         self.claims = []
         self.queued = []
+        self.forecasts = []
+        self.forecasts_raise = forecasts_raise
+
+    def record_forecasts(self, run_id, *, league_id, scoring_period, rows):
+        if self.forecasts_raise is not None:
+            raise self.forecasts_raise
+        rows = list(rows)
+        self.forecasts.append({
+            "run_id": run_id, "league_id": league_id,
+            "scoring_period": scoring_period, "rows": rows,
+        })
+        return len(rows)
 
     def propose(self, run_id, kind, payload, *, rationale="", value_delta=0.0,
                 auto_approve=False, declined=False):
@@ -660,6 +673,15 @@ class TestScoreIsReadNotIgnored(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # the lineup follows the roster
 # ---------------------------------------------------------------------------
+
+
+def _notes(*pids, p_play=0.9, status="ACTIVE", source="espn"):
+    """``player_id -> AvailabilityNote``, as ``build_projections`` returns."""
+    return {
+        pid: projections_mod.AvailabilityNote(
+            player_id=pid, status=status, status_source=source, p_play=p_play)
+        for pid in pids
+    }
 
 
 def lineup_work(plan, **kw):
@@ -1305,3 +1327,93 @@ class TestGamesStartingToday(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheRunRecordsWhatItBelieved(unittest.TestCase):
+    """The forecast write, which nothing downstream reads today.
+
+    It is wired in anyway because the numbers are perishable: ESPN overwrites
+    its season projection as the season moves, so the only chance to record
+    what a lineup was set on is the morning it is set. That makes this the one
+    write whose *absence* is invisible until someone wants to score a decision
+    weeks later and finds nothing -- which is exactly why it is tested here, at
+    the wiring, and not only at the store.
+    """
+
+    def _record(self, **kw):
+        h = _Harness(**kw)
+        plan = h.plan({1: START, 2: START, 3: BENCH})
+        work = lineup_work(plan, projections=h.projections,
+                           availability=_notes(1, 2, 3))
+        h.app._record_forecasts("RUN1", h.lg, h.settings, work, h.roster)
+        return h
+
+    def test_one_row_per_priced_player(self):
+        h = self._record()
+        self.assertEqual(len(h.store.forecasts), 1)
+        wrote = h.store.forecasts[0]
+        self.assertEqual(wrote["run_id"], "RUN1")
+        self.assertEqual(
+            sorted(r["player_id"] for r in wrote["rows"]), [1, 2, 3])
+
+    def test_started_follows_the_slot_and_not_the_value(self):
+        """A player can be priced highly and still sit. That gap is the
+        decision the regret metric exists to catch, so the row must record
+        where he actually went."""
+        h = self._record()
+        rows = {r["player_id"]: r for r in h.store.forecasts[0]["rows"]}
+        self.assertEqual(rows[1]["started"], 1)
+        self.assertEqual(rows[3]["started"], 0)
+        # ...and the benched man is the second-best player on the roster.
+        self.assertGreater(rows[3]["projected"], rows[2]["projected"])
+        self.assertEqual(rows[2]["started"], 1)
+
+    def test_the_projection_stored_is_the_one_the_optimizer_used(self):
+        h = self._record()
+        rows = {r["player_id"]: r for r in h.store.forecasts[0]["rows"]}
+        for pid, value in h.values.items():
+            self.assertAlmostEqual(rows[pid]["projected"], value)
+
+    def test_names_are_denormalized_off_the_roster(self):
+        """So a player since dropped is still readable a month later."""
+        h = self._record()
+        rows = {r["player_id"]: r for r in h.store.forecasts[0]["rows"]}
+        self.assertEqual(rows[2]["name"], "Weak")
+
+    def test_availability_is_stored_beside_the_projection_not_inside_it(self):
+        """``projected`` is conditional on playing, the same conditioning the
+        actual it will be compared against has. ``p_play`` is a separate
+        question with a separate answer."""
+        h = self._record()
+        rows = {r["player_id"]: r for r in h.store.forecasts[0]["rows"]}
+        self.assertAlmostEqual(rows[1]["p_play"], 0.9)
+        self.assertEqual(rows[1]["status"], "ACTIVE")
+        self.assertEqual(rows[1]["status_source"], "espn")
+        # Not pre-multiplied: 60.0 is the conditional value, not 54.0.
+        self.assertAlmostEqual(rows[1]["projected"], 60.0)
+
+    def test_a_run_that_planned_nothing_writes_nothing(self):
+        """No plan is a refusal, not a lineup of zeros."""
+        h = _Harness()
+        h.app._record_forecasts("RUN1", h.lg, h.settings,
+                                lineup_work(None), h.roster)
+        self.assertEqual(h.store.forecasts, [])
+
+    def test_a_failing_write_never_costs_the_run_the_lineup(self):
+        """Bookkeeping runs before the ESPN write. It may not raise."""
+        h = _Harness(store=_Store(forecasts_raise=RuntimeError("disk full")))
+        plan = h.plan({1: START, 2: START, 3: BENCH})
+        work = lineup_work(plan, projections=h.projections,
+                           availability=_notes(1, 2, 3))
+        h.app._record_forecasts("RUN1", h.lg, h.settings, work, h.roster)
+        self.assertEqual(h.store.forecasts, [])
+
+    def test_a_player_with_no_availability_note_still_gets_a_row(self):
+        h = _Harness()
+        plan = h.plan({1: START, 2: START, 3: BENCH})
+        work = lineup_work(plan, projections=h.projections, availability={})
+        h.app._record_forecasts("RUN1", h.lg, h.settings, work, h.roster)
+        rows = h.store.forecasts[0]["rows"]
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(r["p_play"] is None for r in rows))
+        self.assertTrue(all(r["status"] == "" for r in rows))

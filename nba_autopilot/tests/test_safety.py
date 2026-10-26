@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -1038,3 +1039,116 @@ class TestADeclinedSwapIsARecordAndNotAQuestion(unittest.TestCase):
         self.assertEqual(p.state, state.PROPOSED)
         self.assertEqual([q.action_id for q in self.store.pending()],
                          [p.action_id])
+
+
+class TestTheForecastJournal(unittest.TestCase):
+    """What the model believed, kept because it cannot be recovered later.
+
+    The asymmetry this table exists for: ESPN will replay any past day's
+    lineups and box scores on request, but it *overwrites* its season
+    projection as the season moves. So "what happened" keeps forever and "what
+    did we think would happen" is gone by tomorrow morning. These tests pin the
+    properties the reconciliation depends on, because a silently wrong row here
+    does not fail -- it just scores a decision against a lineup nobody played.
+    """
+
+    def setUp(self):
+        self.store = Store(":memory:")
+        self.store.start_run("RUN1", 4, False, league_id=7)
+
+    def tearDown(self):
+        self.store.close()
+
+    def _rows(self, *specs):
+        return [
+            {"player_id": pid, "name": name, "slot": slot,
+             "started": 1 if slot not in (12, 13) else 0,
+             "projected": proj, "p_play": 0.95, "status": "ACTIVE",
+             "status_source": "espn"}
+            for pid, name, slot, proj in specs
+        ]
+
+    def test_a_day_is_stored_and_read_back_whole(self):
+        n = self.store.record_forecasts(
+            "RUN1", league_id=7, scoring_period=4,
+            rows=self._rows((1, "Starter", 0, 31.5), (2, "Bench", 12, 12.0)),
+        )
+        self.assertEqual(n, 2)
+        back = self.store.forecasts_for(7, 4)
+        self.assertEqual([r["player_id"] for r in back], [1, 2])
+        self.assertEqual([r["started"] for r in back], [1, 0])
+        self.assertAlmostEqual(back[0]["projected"], 31.5)
+        self.assertEqual(back[0]["name"], "Starter")
+
+    def test_a_typo_in_a_column_name_is_refused(self):
+        """Silently ignoring it would read as a metric that never moves."""
+        with self.assertRaises(ValueError):
+            self.store.record_forecasts(
+                "RUN1", league_id=7, scoring_period=4,
+                rows=[{"player_id": 1, "projceted": 10.0}],
+            )
+
+    def test_a_refused_batch_writes_nothing(self):
+        with self.assertRaises(ValueError):
+            self.store.record_forecasts(
+                "RUN1", league_id=7, scoring_period=4,
+                rows=self._rows((1, "Fine", 0, 10.0)) + [{"nope": 1}],
+            )
+        self.assertEqual(self.store.forecasts_for(7, 4), [])
+
+    def test_a_second_run_in_a_day_supersedes_the_first(self):
+        """Two runs are two beliefs; averaging them scores a phantom lineup."""
+        self.store.record_forecasts(
+            "RUN1", league_id=7, scoring_period=4,
+            rows=self._rows((1, "Starter", 0, 31.5)),
+        )
+        self.store.start_run("RUN2", 4, False, league_id=7)
+        self.store.record_forecasts(
+            "RUN2", league_id=7, scoring_period=4,
+            rows=self._rows((1, "Starter", 12, 28.0)),
+        )
+        back = self.store.forecasts_for(7, 4)
+        self.assertEqual(len(back), 1)
+        self.assertEqual(back[0]["run_id"], "RUN2")
+        self.assertEqual(back[0]["started"], 0)
+
+    def test_each_league_keeps_its_own_day(self):
+        self.store.start_run("RUN9", 4, False, league_id=9)
+        self.store.record_forecasts(
+            "RUN1", league_id=7, scoring_period=4,
+            rows=self._rows((1, "Seven", 0, 10.0)))
+        self.store.record_forecasts(
+            "RUN9", league_id=9, scoring_period=4,
+            rows=self._rows((2, "Nine", 0, 20.0)))
+        self.assertEqual(
+            [r["name"] for r in self.store.forecasts_for(7, 4)], ["Seven"])
+        self.assertEqual(
+            [r["name"] for r in self.store.forecasts_for(9, 4)], ["Nine"])
+        self.assertEqual(self.store.forecast_days(7), [4])
+
+    def test_days_come_back_in_order(self):
+        for period, run in ((6, "R6"), (4, "R4"), (5, "R5")):
+            self.store.start_run(run, period, False, league_id=7)
+            self.store.record_forecasts(
+                run, league_id=7, scoring_period=period,
+                rows=self._rows((1, "Someone", 0, 10.0)))
+        self.assertEqual(self.store.forecast_days(7), [4, 5, 6])
+
+    def test_a_day_never_recorded_reads_as_empty_not_as_zero(self):
+        self.assertEqual(self.store.forecasts_for(7, 99), [])
+        self.assertEqual(self.store.forecast_days(404), [])
+
+    def test_an_empty_roster_writes_nothing_and_does_not_raise(self):
+        self.assertEqual(
+            self.store.record_forecasts(
+                "RUN1", league_id=7, scoring_period=4, rows=[]),
+            0,
+        )
+
+    def test_a_forecast_cannot_be_orphaned_from_its_run(self):
+        """The duals live on ``runs``; a row without one cannot be read back."""
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.record_forecasts(
+                "NO-SUCH-RUN", league_id=7, scoring_period=4,
+                rows=self._rows((1, "Ghost", 0, 10.0)),
+            )

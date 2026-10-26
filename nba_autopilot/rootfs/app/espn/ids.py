@@ -148,6 +148,14 @@ NON_ADDITIVE_STATS: FrozenSet[StatId] = frozenset(
 )
 
 PTS, BLK, STL, AST, REB = 0, 1, 2, 3, 6
+#: Offensive and defensive rebounds, scored separately by both live leagues --
+#: neither puts a coefficient on plain ``REB``. ESPN's season *projection*
+#: publishes only ``REB``, so ``solve/projections.derive_scored_stats`` splits
+#: it into these two before the value model ever sees it.
+OREB, DREB = 4, 5
+#: Double, triple and quadruple-double counters. Scored at 4.0/8.0/15.0 by both
+#: live leagues and absent from the projection split entirely.
+DD, TD, QD = 37, 38, 39
 TO, FGM, FGA, FTM, FTA, TPM = 11, 13, 14, 15, 16, 17
 FG_PCT, FT_PCT, TP_PCT = 19, 20, 21
 MINUTES, GAMES_STARTED, GAMES_PLAYED = 40, 41, 42

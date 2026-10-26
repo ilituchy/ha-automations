@@ -478,6 +478,46 @@ Results are written to the status UI and to SQLite at `/data/autopilot.db`,
 which is private to the app and included in backups. Every run row and journal
 row records which league it belonged to.
 
+## How it scores a player
+
+Projections come from ESPN's own season projection, unblended until there is
+enough real history to blend (10 games), and are then dotted against your
+league's `scoringItems`. Two things your leagues pay for are **not** in what
+ESPN projects, and the app fills them in itself:
+
+- **Offensive and defensive rebounds.** Both of your leagues score `OREB` at
+  1.5 and `DREB` at 1.0 and put no value on total rebounds. ESPN projects only
+  the total. The app splits it, using each player's own offensive-rebound share
+  from his actual stats where he has any and a league-average 25% otherwise.
+- **Double-doubles.** Worth 4.0, 8.0 and 15.0 in your leagues, and ESPN
+  projects none of them. The app estimates the rate from the player's projected
+  line, then shifts toward his own observed rate as games accumulate — a third
+  of the way after three games, two thirds after twenty.
+
+Before this was found, both gaps silently resolved to zero, so every rebound in
+both leagues was worth nothing and rebounders were priced at a fraction of what
+they returned. Replaying the first week of the season against the real box
+scores, the fix is worth roughly **30–55 fantasy points a week per league**.
+
+If a league scores *both* total rebounds and the offensive/defensive split, the
+app refuses to value it rather than paying twice for the same rebound.
+
+## What it believed, and what happened
+
+Every run writes one row per player to a `forecasts` table: the projection it
+used, the availability it assumed, and whether it started him.
+
+Nothing reads this yet. It is recorded because the numbers cannot be recovered
+later — ESPN overwrites its season projection as the season moves, so the only
+chance to capture what a lineup was set on is the morning it is set. The
+actuals keep indefinitely: ESPN will replay any past day's lineups and box
+scores on request. So "what happened" can be reconstructed whenever you like,
+and "what did we think would happen" cannot.
+
+This is what makes the model checkable against results rather than against
+itself. The rebound bug above was found exactly this way, by hand, before the
+table existed.
+
 ## Troubleshooting
 
 **App won't start, log says a required option is not set.** One of the required

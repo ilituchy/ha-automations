@@ -8,6 +8,109 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **Every rebound in both leagues was worth exactly zero.** The projection and
+  the scoring were in different stat spaces and nothing bridged them.
+
+  ESPN's season projection (split `10`) publishes total `REB` (stat 6). Both
+  live leagues score `OREB` (4) at 1.5 and `DREB` (5) at 1.0 and put **no
+  coefficient on the total at all**. `PointsValue.conditional_value` sums
+  `coeff * mean.get(stat, 0.0)` over the scored stats, so both components found
+  nothing and contributed nothing, for every player, on every run since the app
+  was built. The same hole swallowed double-doubles, which both leagues price
+  at 4.0/8.0/15.0 and ESPN projects for nobody.
+
+  The bug was never in the value model, which was correctly summing what it was
+  handed. It was that the mean had holes in it exactly where the league's money
+  was. `solve/projections.derive_scored_stats` is the bridge: it splits
+  projected rebounds by the player's own offensive share (his actuals where he
+  has any, a league-average 25% otherwise) and estimates the double-double rate
+  from his projected line, shrinking toward his observed rate as games
+  accumulate.
+
+  Found by replaying week 1 of the 2026-27 season against the actual box
+  scores, which is worth recording because nothing about the symptom pointed
+  here. What showed up first was that the best legal lineup each day would have
+  scored **9% more** than what was started, and that the same three names kept
+  appearing on the bench behind guards who outscored nobody: Walker Kessler
+  (benched for 51.5, then 60.5), Donovan Clingan, Zach Edey. Kessler was priced
+  at 19.94 fantasy points a game against 10.8 projected rebounds, and returned
+  41.3.
+
+  The residuals say why a near-zero *average* error hid it. Actual minus
+  projected over week 1 came to +3.0 and -2.6 fantasy points a game across the
+  two rosters — unremarkable — and split by rebounding into **+10.4 for players
+  above seven rebounds a game against -1.7 for everyone else** in the worse
+  league. A uniform bias cancels out of a ranking. A bias that tracks position
+  is the one kind a lineup optimizer cannot absorb, because ranking is its
+  entire job.
+
+  Replaying the same six days through the fixed code, holding projections,
+  eligibility and the games-played cap constant so that pricing rebounds is the
+  only change:
+
+  | | actually started | before | after | hindsight oracle |
+  |---|---|---|---|---|
+  | Chairman's Fantasy | 1135.5 | 1212.5 | **1243.5** | 1252.0 |
+  | Dynassty | 1392.0 | 1414.5 | **1470.0** | 1527.0 |
+
+  **+31.0 and +55.5 fantasy points a week**, closing 93% and 41% of the gap to
+  a lineup that knew the scores in advance.
+
+  One consequence worth stating plainly: the add/drop layer had proposed
+  **dropping Walker Kessler**, and the AI reviewer blocked it. The gate was
+  doing its job, and it was covering for an arithmetic hole — which is the
+  wrong division of labour. A language model's sense of who a player is should
+  not be the thing standing between a missing term in a dot product and an
+  irreversible transaction.
+
+  A rate is not a count, so `variance_from_mean` now gives the bonus stats
+  Bernoulli variance `p(1-p)` rather than `PHI * mu`, which on a 0.3
+  double-double rate would have claimed 0.48 — more than the 0.25 a Bernoulli
+  can reach at all. Inert today, since the risk term needs a matchup state
+  nothing supplies, and wrong in the direction that would have penalized
+  rebounders again when it goes live.
+
+  A league scoring both total rebounds *and* the split is now refused by
+  `build_value_model` rather than paid twice for the same rebound. Neither live
+  league does this; the check is the difference between a loud failure and a
+  plausible-looking wrong ranking if a third league is configured differently.
+
+### Added
+
+- **A `forecasts` table: what the model believed, one row per player per run.**
+  The projection it used, the availability it assumed, and whether it started
+  him.
+
+  Nothing reads it yet, and it is written unconditionally anyway, because of an
+  asymmetry that decides the whole design: **actuals are permanent and
+  forecasts are perishable.** ESPN will replay any past day's lineups and box
+  scores on request — `scoringPeriodId` rewinds both — so "what happened" can
+  be reconstructed at any time, for any day. But the projection is split `10`,
+  which ESPN *overwrites* as the season moves. Nothing anywhere recorded what
+  the number was on the morning a lineup was set, and once the day passes that
+  reading cannot be recovered from any endpoint. Every run that does not write
+  here is a day of evidence gone for good.
+
+  `projected` is `conditional_value` — fantasy points *given that he suits up*,
+  before the cap shadow price. Deliberately the same conditioning as the actual
+  it will be compared against, since a player with a box score played.
+  Multiplying by `p_play` here would compare an expectation against a
+  realization and read forever after as a negative bias. `p_play` is stored
+  beside it, because how well the availability model does is a different
+  question with a different answer.
+
+  Keyed on the run rather than the day, so a second run in a day inserts rather
+  than overwrites; reconciliation takes the newest run per period, since an
+  earlier lineup was superseded and is not what the day was played with.
+  Wrapped whole and swallowing everything, like the scoreboard write and for
+  the same reason: it runs before the ESPN write, and bookkeeping may not cost
+  a run the part that matters.
+
+  The rebound bug above was found by doing this reconciliation by hand, before
+  the table existed. That is the argument for the table.
+
+### Fixed
+
 - **Every write was addressed to yesterday for the first half of the morning.**
   The run of 2026-10-23 lost both leagues' entire lineup to this:
 

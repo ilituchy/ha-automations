@@ -1287,6 +1287,7 @@ class Autopilot:
         # open the page and see where he stands.
         matchup = self._read_matchup(lg, matchup_period, notes)
         self._record_scoreboard(run_id, lg, settings, work, roster, matchup)
+        self._record_forecasts(run_id, lg, settings, work, roster)
 
         if work.plan is None:
             notes.append("aborting: no usable projections for any player")
@@ -1369,6 +1370,68 @@ class Autopilot:
             log.error("could not read the matchup score: %s", exc)
             notes.append("matchup score unavailable (%s)" % exc)
             return None
+
+    def _record_forecasts(
+        self,
+        run_id: str,
+        lg: "League",
+        settings: Any,
+        work: LineupWork,
+        roster: Sequence[Any],
+    ) -> None:
+        """Store what this run believed, for tomorrow's reckoning. Never raises.
+
+        The one write in the run that nothing downstream reads today. It is
+        here because the numbers it stores cannot be recovered later: ESPN
+        overwrites its season projection as the season moves, so a day that
+        goes unrecorded can never be scored against what actually happened.
+        The actuals, by contrast, keep -- see the ``forecasts`` table comment.
+
+        Wrapped whole and swallowing everything, for the same reason
+        :meth:`_record_scoreboard` is: this runs before the lineup write, and
+        an exception escaping a bookkeeping step must not cost the run the part
+        that matters.
+        """
+        plan = work.plan
+        if plan is None:
+            return
+        try:
+            # Denormalized on purpose: the reconciliation must be readable
+            # without a live ESPN call, and a player who has since been
+            # dropped is both the row that matters most and the name that is
+            # hardest to recover later.
+            names = {e.player_id: e.name for e in roster}
+            rows = []
+            for pid, value in plan.values.items():
+                slot = plan.target.get(pid)
+                note = (work.availability or {}).get(pid)
+                rows.append({
+                    "player_id": int(pid),
+                    "name": str(names.get(pid, "")),
+                    "slot": None if slot is None else int(slot),
+                    # The slot decides this, not the value: a player can be
+                    # priced highly and still sit, which is exactly the
+                    # decision the regret metric is built to catch.
+                    "started": int(
+                        slot is not None and ids.is_starting_slot(int(slot))
+                    ),
+                    "projected": float(value),
+                    "p_play": None if note is None else float(note.p_play),
+                    "status": "" if note is None else str(note.status),
+                    "status_source": (
+                        "" if note is None else str(note.status_source)
+                    ),
+                })
+            n = self.store.record_forecasts(
+                run_id,
+                league_id=lg.ref.league_id,
+                scoring_period=int(settings.current_scoring_period),
+                rows=rows,
+            )
+            log.info("recorded %d forecast(s) for scoring period %d", n,
+                     settings.current_scoring_period)
+        except Exception:  # noqa: BLE001
+            log.exception("could not record forecasts; the run continues")
 
     def _record_scoreboard(
         self,

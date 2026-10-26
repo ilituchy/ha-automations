@@ -165,6 +165,54 @@ CREATE TABLE IF NOT EXISTS scoreboards (
     my_games_today  INTEGER,
     games_cap       INTEGER
 );
+
+-- What the model believed, one row per player per run.
+--
+-- This table exists because of an asymmetry: **actuals are permanent and
+-- forecasts are perishable.** ESPN will hand back any past day's lineups and
+-- scores on request -- ``scoringPeriodId`` rewinds both -- so the question
+-- "what happened" can be answered at any time, for any day, forever. But the
+-- projection is split ``10``, which ESPN *overwrites* as the season moves.
+-- Nothing anywhere records what the number was on the morning a lineup was
+-- set, and once the day is gone that reading cannot be recovered from any
+-- endpoint. Every run that does not write here is a day of evidence lost for
+-- good, which is why this is a write the run does unconditionally rather than
+-- a feature of a reporting page.
+--
+-- ``projected`` is ``value.conditional_value`` -- projected fantasy points
+-- *given that he suits up*, before the cap shadow price is applied. That is
+-- deliberately the same conditioning as the actual it will be compared
+-- against: a player with a score played, so his actual is conditional too.
+-- Multiplying by ``p_play`` here would compare an expectation against a
+-- realization and read as a permanent negative bias. ``p_play`` is stored
+-- beside it so the availability model can be scored separately, which is a
+-- different question with a different answer.
+--
+-- ``lam`` is on ``runs`` and not repeated here: it is one number per run.
+--
+-- Keyed on the run and not on the day, so a second run in one day inserts
+-- rather than overwrites. Reconciliation takes the newest run per period --
+-- an earlier run's lineup was superseded and is not what the day was played
+-- with, but it is still the honest record of what was believed at that hour.
+CREATE TABLE IF NOT EXISTS forecasts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          TEXT    NOT NULL REFERENCES runs(run_id),
+    league_id       INTEGER NOT NULL,
+    scoring_period  INTEGER NOT NULL,
+    player_id       INTEGER NOT NULL,
+    name            TEXT    NOT NULL DEFAULT '',
+    slot            INTEGER,
+    started         INTEGER NOT NULL DEFAULT 0,
+    projected       REAL,
+    p_play          REAL,
+    status          TEXT    NOT NULL DEFAULT '',
+    status_source   TEXT    NOT NULL DEFAULT '',
+    taken_at        TEXT    NOT NULL,
+    UNIQUE (run_id, player_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_forecasts_day
+    ON forecasts(league_id, scoring_period);
 """
 
 
@@ -372,6 +420,87 @@ class Store:
     def scoreboards(self) -> List[Dict[str, Any]]:
         with self._lock:
             rows = self.db.execute("SELECT * FROM scoreboards").fetchall()
+        return [dict(r) for r in rows]
+
+    # -- forecasts ---------------------------------------------------------
+
+    #: Columns :meth:`record_forecasts` accepts per row. Named rather than
+    #: inferred from the first row so that a caller who omits a field on some
+    #: players still produces uniform rows, and so a typo is a refusal.
+    FORECAST_FIELDS = (
+        "player_id", "name", "slot", "started", "projected", "p_play",
+        "status", "status_source",
+    )
+
+    def record_forecasts(
+        self,
+        run_id: str,
+        *,
+        league_id: int,
+        scoring_period: int,
+        rows: Iterable[Mapping[str, Any]],
+    ) -> int:
+        """Store what this run projected, one row per player. Returns the count.
+
+        One transaction for the whole roster: a half-written day is worse than
+        an unwritten one, because the reconciliation would read it as a
+        complete lineup with players missing and score the decision against a
+        roster that never existed.
+        """
+        batch = []
+        for row in rows:
+            bad = set(row) - set(self.FORECAST_FIELDS)
+            if bad:
+                raise ValueError(
+                    "not forecast columns: %s" % ", ".join(sorted(bad))
+                )
+            batch.append([row.get(f) for f in self.FORECAST_FIELDS])
+        if not batch:
+            return 0
+        cols = ("run_id", "league_id", "scoring_period", "taken_at") \
+            + self.FORECAST_FIELDS
+        head = [run_id, int(league_id), int(scoring_period), _now()]
+        with self._lock, self.db:
+            self.db.executemany(
+                "INSERT OR REPLACE INTO forecasts (%s) VALUES (%s)" % (
+                    ", ".join(cols), ", ".join("?" * len(cols)),
+                ),
+                [head + b for b in batch],
+            )
+        return len(batch)
+
+    def forecast_days(self, league_id: int) -> List[int]:
+        """Scoring periods this league has a forecast for, oldest first."""
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT DISTINCT scoring_period FROM forecasts "
+                "WHERE league_id=? ORDER BY scoring_period",
+                (int(league_id),),
+            ).fetchall()
+        return [int(r["scoring_period"]) for r in rows]
+
+    def forecasts_for(
+        self, league_id: int, scoring_period: int
+    ) -> List[Dict[str, Any]]:
+        """The **newest** run's forecast for one day.
+
+        Newest rather than all of them: two runs in a day are two different
+        beliefs, and averaging them would score a lineup nobody played. The
+        last one is the one the day was played with.
+        """
+        with self._lock:
+            latest = self.db.execute(
+                "SELECT run_id FROM forecasts WHERE league_id=? AND "
+                "scoring_period=? ORDER BY id DESC LIMIT 1",
+                (int(league_id), int(scoring_period)),
+            ).fetchone()
+            if latest is None:
+                return []
+            rows = self.db.execute(
+                "SELECT * FROM forecasts WHERE run_id=? AND league_id=? "
+                "AND scoring_period=? ORDER BY started DESC, projected DESC",
+                (latest["run_id"], int(league_id), int(scoring_period)),
+            ).fetchall()
         return [dict(r) for r in rows]
 
     # -- proposals ---------------------------------------------------------

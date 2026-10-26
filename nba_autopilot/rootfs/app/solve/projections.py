@@ -28,6 +28,35 @@ see :data:`MIN_GAMES_FOR_FORM`.
 sample, and guessing at an identifier we have never seen documented is how you
 end up averaging a stat into itself.
 
+Stats ESPN scores and does not project
+--------------------------------------
+The split above is not in the same stat space as the league's scoring, and the
+mismatch cost real points before it was found. Both live leagues score
+
+* ``OREB`` (4) at 1.5 and ``DREB`` (5) at 1.0, with **no coefficient on total
+  ``REB``** -- and split ``10`` publishes only the total;
+* ``DD``/``TD``/``QD`` (37/38/39) at 4.0/8.0/15.0 -- and split ``10`` publishes
+  none of the three for any player on either roster.
+
+``PointsValue.conditional_value`` sums ``coeff * mean.get(stat, 0.0)`` over the
+scored stats, so both gaps resolved to zero silently. Every rebound in both
+leagues was worth nothing. Replaying week 1 of 2026-27 against the actual box
+scores: Walker Kessler, 10.8 projected rebounds a game, was priced at 19.94
+fantasy points and scored 41.3; the best legal lineup each day would have
+scored 9% more than what was started, and the same three names -- Kessler,
+Donovan Clingan, Zach Edey -- kept turning up on the bench behind guards.
+
+The bug was never in the value model, which was correctly summing what it was
+given. It was that nothing bridged the two stat spaces. :func:`derive_scored_stats`
+is that bridge, and it lives here because this is the module whose whole job is
+turning "what the sources said" into "what the optimizer consumes".
+
+Mean residual against week 1 was near zero overall in both leagues and strongly
+positive for rebounders -- +10.4 fantasy points a game for players above seven
+rebounds against -1.7 for the rest, in the league where it was worst. A bias
+that is uniform cancels out of a ranking; a bias that tracks position is the
+one kind a lineup optimizer cannot absorb.
+
 Per-game, except where it is not
 --------------------------------
 Split ``10`` is per-game averages -- ``PTS`` equals ``PPG``, ``MIN`` equals
@@ -58,11 +87,13 @@ against observed game logs rather than left at a guess.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from espn import ids
+from solve import weights
 from models import P_PLAY_PRIOR, Projection, RosterEntry
 
 PlayerId = int
@@ -75,6 +106,15 @@ __all__ = [
     "MIN_GAMES_FOR_FORM",
     "NBA_SEASON_GAMES",
     "AvailabilityNote",
+    "OREB_SHARE_DEFAULT",
+    "BONUS_PRIOR_GAMES",
+    "DOUBLE_DIGIT_STATS",
+    "DOUBLE_DIGIT",
+    "BONUS_STATS",
+    "offensive_rebound_share",
+    "modelled_bonus_rates",
+    "observed_bonus_rates",
+    "derive_scored_stats",
     "per_game_mean",
     "recent_form",
     "form_weight",
@@ -114,6 +154,56 @@ NBA_SEASON_GAMES: int = 82
 #: exactly the case the injuries page says nothing about.
 DURABILITY_WEIGHT: float = 0.5
 
+#: Share of a player's rebounds that are offensive, when he has no history to
+#: read it off. Roughly the league-wide split.
+#:
+#: The fallback is low-stakes in a way worth stating, because it looks like a
+#: guess that matters and is not one. With both observed leagues pricing OREB
+#: at 1.5 and DREB at 1.0, a rebound is worth 1.125 at a 25% share and 1.175 at
+#: 35% -- so even a share that is wrong by a third of its own value moves a
+#: ten-rebound big man by half a point. What *does* matter is that the rebound
+#: is priced at all; see :func:`derive_scored_stats`.
+OREB_SHARE_DEFAULT: float = 0.25
+
+#: Pseudo-games of the modelled bonus rate that an observed rate must outweigh.
+#:
+#: Shrinkage weight is ``games / (games + BONUS_PRIOR_GAMES)``, so three games
+#: of history counts for 23% and twenty games for 67%. Deliberately a gentler
+#: curve than :data:`MIN_GAMES_FOR_FORM`, which gates form out entirely below
+#: ten games: a double-double count is a *direct* observation of the quantity
+#: being estimated rather than a noisy proxy for it, so it should start
+#: contributing immediately. It still must not take over early, because a
+#: three-game zero is perfectly ordinary for a player who will average 0.4.
+BONUS_PRIOR_GAMES: float = 10.0
+
+#: The five stats a double-double is counted over.
+DOUBLE_DIGIT_STATS: Tuple[StatId, ...] = (
+    ids.PTS, ids.REB, ids.AST, ids.STL, ids.BLK,
+)
+
+#: What counts as "double" in double-double.
+DOUBLE_DIGIT: float = 10.0
+
+#: ``how many categories in double digits -> the stat ESPN credits``.
+#:
+#: Treated as **mutually exclusive**: a triple-double is credited as a TD and
+#: not also as a DD. ESPN's convention here is not documented and could not be
+#: read off either live league in October -- no rostered player had recorded a
+#: triple-double yet, so ``DD`` and ``TD`` were both zero and the two
+#: conventions are indistinguishable from that.
+#:
+#: Exclusive is the assumption that errs small: if ESPN in fact credits both,
+#: this under-prices a near-triple-double player by the 4.0 DD coefficient on
+#: the fraction of games he gets there, which for the handful of players with a
+#: non-trivial TD rate is well under a point a game. The reverse assumption
+#: would over-price him, and an over-priced player gets *started*, which is the
+#: error that costs a lineup slot rather than merely failing to gain one.
+#:
+#: Checkable as soon as there is history: a player with ``TD > 0`` whose ``DD``
+#: is at least as large settles it. The ``forecasts`` table exists so that
+#: this kind of question stops needing a guess.
+BONUS_STATS: Mapping[int, StatId] = {2: ids.DD, 3: ids.TD, 4: ids.QD}
+
 #: Stats to exclude from the production mean. The non-additive set plus the two
 #: that are not per-game quantities at all.
 _EXCLUDED: frozenset = ids.NON_ADDITIVE_STATS | {ids.GP_STAT, ids.GAMES_STARTED}
@@ -140,6 +230,155 @@ class AvailabilityNote:
             bits.append("ESPN projects %.0f/%d games"
                         % (self.projected_season_games, NBA_SEASON_GAMES))
         return "p_play %.2f: %s" % (self.p_play, ", ".join(bits))
+
+
+def offensive_rebound_share(
+    splits: Mapping[str, Mapping[StatId, float]],
+) -> float:
+    """What fraction of this player's rebounds are offensive.
+
+    Read off his own actuals when he has any, because the spread across
+    positions is wide -- a rim-running centre is near 35% and a point guard
+    near 12% -- and that spread is the whole reason not to apply one number to
+    everybody. Falls back to :data:`OREB_SHARE_DEFAULT`.
+    """
+    actual = splits.get(ids.SPLIT_SEASON_TOTAL) or {}
+    off = float(actual.get(ids.OREB, 0.0) or 0.0)
+    deff = float(actual.get(ids.DREB, 0.0) or 0.0)
+    if off + deff <= 0.0:
+        return OREB_SHARE_DEFAULT
+    return max(min(off / (off + deff), 1.0), 0.0)
+
+
+def _p_double_digits(mu: float) -> float:
+    """``P(X >= 10)`` for a counting stat with mean ``mu``.
+
+    Normal approximation with a continuity correction, variance ``PHI * mu`` --
+    the same overdispersion the rest of the module assumes, so there is one
+    variance model here and not two that can disagree.
+
+    The approximation is poor in the tails of a small-mean count, and that is
+    tolerable because of *where* it is consulted. A stat whose mean is far from
+    ten contributes a probability near zero or near one, and the approximation
+    gets both of those right for the same reason it gets the middle roughly
+    right. The only players whose answer this materially decides are the ones
+    averaging close to ten, where a normal is a reasonable shape.
+    """
+    if mu <= 0.0:
+        return 0.0
+    sd = math.sqrt(PHI * mu)
+    if sd <= 0.0:
+        return 1.0 if mu >= DOUBLE_DIGIT else 0.0
+    return 1.0 - weights.normal_cdf(((DOUBLE_DIGIT - 0.5) - mu) / sd)
+
+
+def modelled_bonus_rates(mean: Mapping[StatId, float]) -> Dict[StatId, float]:
+    """Double/triple/quadruple-double rates implied by a projected line.
+
+    ESPN prices these -- 4.0, 8.0 and 15.0 in both observed leagues -- and does
+    not project them: split ``10`` carries no stat 37, 38 or 39 for any player
+    on either roster. So the rate has to be modelled, and this is the model:
+    treat the five counting stats as independent, get each one's chance of
+    reaching double digits, and read off the distribution of how many clear it.
+
+    Independence is wrong, and wrong in a known direction: points and rebounds
+    are positively correlated through minutes, so the true chance of *both*
+    clearing ten is higher than the product. This therefore under-states the
+    bonus for exactly the players who earn it most. It is used anyway because
+    the alternative on the table was leaving the term at zero, which
+    under-states them by the whole coefficient, and because the observed rate
+    takes over as history accumulates -- see :func:`derive_scored_stats`.
+    """
+    ps = [_p_double_digits(float(mean.get(s, 0.0) or 0.0))
+          for s in DOUBLE_DIGIT_STATS]
+    # Distribution of the number of categories in double digits, by convolution
+    # over the five independent indicators. Exact given independence, and five
+    # terms is small enough that there is no reason to approximate it.
+    dist = [1.0]
+    for p in ps:
+        nxt = [0.0] * (len(dist) + 1)
+        for k, mass in enumerate(dist):
+            nxt[k] += mass * (1.0 - p)
+            nxt[k + 1] += mass * p
+        dist = nxt
+    return {
+        stat: dist[count] if count < len(dist) else 0.0
+        for count, stat in BONUS_STATS.items()
+    }
+
+
+def observed_bonus_rates(
+    splits: Mapping[str, Mapping[StatId, float]],
+) -> Tuple[Dict[StatId, float], float]:
+    """``(his own per-game bonus rates, games behind them)``.
+
+    Split ``00`` reports these the same way it reports every other counting
+    stat -- as a per-game average, with ``GP`` alongside as the only total in
+    the dictionary. So a player with one double-double in three games arrives
+    here as ``0.33`` and needs no division. Probed on 2026-10-26: Luka Doncic
+    came back ``DD 0.33, TD 0.0, GP 3.0``.
+    """
+    actual = splits.get(ids.SPLIT_SEASON_TOTAL) or {}
+    games = float(actual.get(ids.GP_STAT, 0.0) or 0.0)
+    rates = {
+        stat: float(actual.get(stat, 0.0) or 0.0)
+        for stat in BONUS_STATS.values()
+        if stat in actual
+    }
+    return rates, games
+
+
+def derive_scored_stats(
+    mean: Mapping[StatId, float],
+    splits: Mapping[str, Mapping[StatId, float]],
+) -> Dict[StatId, float]:
+    """Stats the league scores that ESPN's projection does not publish.
+
+    Two gaps, both found by replaying week 1 of the 2026-27 season against what
+    the leagues actually paid out, and both of which had been quietly pricing
+    rebounders at a fraction of their worth:
+
+    * **Rebounds.** Split ``10`` publishes total ``REB`` (6). Both live leagues
+      score ``OREB`` (4) at 1.5 and ``DREB`` (5) at 1.0 and have **no
+      coefficient on plain ``REB`` at all**. ``PointsValue.conditional_value``
+      does ``mean.get(stat, 0.0)`` per scored stat, so every rebound in both
+      leagues was worth exactly nothing. Walker Kessler, 10.8 projected
+      rebounds a game, was priced at 19.94 fantasy points and scored 41.3.
+    * **Double-doubles.** Priced at 4.0/8.0/15.0 and never projected. See
+      :func:`modelled_bonus_rates`.
+
+    Neither is a tweak to the value model: the value model was right and was
+    being handed a mean with holes in it where the league's money was. Which is
+    why this lives here, in the layer whose job is "what the sources said"
+    turning into "what the optimizer consumes", and returns *additions* to the
+    mean rather than editing it in place -- the provenance of a derived number
+    should be legible, and a reader comparing this against split ``10`` should
+    be able to see which stats ESPN never sent.
+
+    The split of ``REB`` into its components **keeps** ``REB`` as well. A league
+    that scored both would then double-count, which is why ``value.py`` refuses
+    one rather than this module trying to guess which the league meant.
+    """
+    out: Dict[StatId, float] = {}
+
+    rebounds = float(mean.get(ids.REB, 0.0) or 0.0)
+    if rebounds > 0.0 and ids.OREB not in mean and ids.DREB not in mean:
+        share = offensive_rebound_share(splits)
+        out[ids.OREB] = rebounds * share
+        out[ids.DREB] = rebounds * (1.0 - share)
+
+    modelled = modelled_bonus_rates(mean)
+    observed, games = observed_bonus_rates(splits)
+    w = games / (games + BONUS_PRIOR_GAMES) if games > 0 else 0.0
+    for stat, rate in modelled.items():
+        if stat in mean:
+            # ESPN started publishing it. Its own number beats our model.
+            continue
+        seen = observed.get(stat)
+        out[stat] = (w * float(seen) + (1.0 - w) * rate) if seen is not None \
+            else rate
+
+    return out
 
 
 def form_weight(games: float, has_recent: bool) -> float:
@@ -219,8 +458,24 @@ def variance_from_mean(mean: Mapping[StatId, float]) -> Dict[StatId, float]:
     Applied to the magnitude, so a stat that arrives negative (none do today;
     ESPN sends misses as positive ``FGMI``) still gets a non-negative variance.
     A negative variance would silently invert the sign of the risk term.
+
+    The bonus stats are the exception, because they are not counts. A
+    double-double happens or it does not, so its per-game mean *is* a
+    probability and its variance is ``p(1-p)``. Running them through
+    ``PHI * mu`` would hand a 0.27 double-double rate a variance of 0.43 --
+    larger than the 0.25 a Bernoulli can reach at all, and nearly twice its
+    true 0.20 -- which inflates the risk term for precisely the rebounders
+    this release exists to stop under-pricing.
     """
-    return {stat: PHI * abs(float(mu)) for stat, mu in mean.items()}
+    out: Dict[StatId, float] = {}
+    for stat, mu in mean.items():
+        m = abs(float(mu))
+        if stat in BONUS_STATS.values():
+            p = min(m, 1.0)
+            out[stat] = p * (1.0 - p)
+        else:
+            out[stat] = PHI * m
+    return out
 
 
 def p_play_for(
@@ -302,6 +557,10 @@ def build_projections(
         if mean is None:
             skipped.append(entry)
             continue
+        # After the form blend, not before: the rebound split has to divide the
+        # mean the optimizer will actually see, and the bonus model has to read
+        # the same line.
+        mean.update(derive_scored_stats(mean, by_split))
 
         projected_games = (
             by_split.get(ids.SPLIT_SEASON_PROJECTED) or {}

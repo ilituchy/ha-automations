@@ -220,6 +220,17 @@ def _checked_coefficients(settings: LeagueSettings) -> Dict[StatId, float]:
             % (settings.league_id,
                ", ".join("%d (%s)" % (s, ids.stat_name(s)) for s in bad))
         )
+    scored = {int(k) for k in settings.scoring_items}
+    if ids.REB in scored and scored & {ids.OREB, ids.DREB}:
+        raise UnsupportedScoring(
+            "league %d scores both total rebounds and the offensive/defensive "
+            "split. ESPN projects only the total, so "
+            "solve.projections.derive_scored_stats fills in the components -- "
+            "and a league pricing the total as well would be paid twice for "
+            "the same rebound. Refused rather than guessed: which of the two "
+            "the league means is not something this module can know."
+            % settings.league_id
+        )
     coeffs = {int(k): float(v) for k, v in settings.scoring_items.items()}
     if not coeffs:
         raise UnsupportedScoring(
