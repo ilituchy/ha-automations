@@ -363,3 +363,95 @@ class TestTheCachedTable(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheRunJoinsItToTheRoster(unittest.TestCase):
+    """``Autopilot._matchup_multipliers``: schedule x roster x fitted table.
+
+    The join is where this feature fails *silently* if it fails at all -- a
+    wrong scoring-period key or a renamed attribute returns an empty mapping,
+    every multiplier becomes 1.0, and the projections look exactly as they
+    did before. Nothing downstream can tell that apart from "no fitted table
+    yet", so it is checked here rather than trusted.
+    """
+
+    def setUp(self):
+        import main as main_mod
+        from models import ProGame, RosterEntry
+
+        self.app = object.__new__(main_mod.Autopilot)
+        self.app._defense = {}
+        self.table = defense.TeamDefense(
+            team={20: 0.90, 30: 1.10}, centre={20: -0.05, 30: 0.04},
+            seasons=(2027,), games=50000)
+        self.settings = type("S", (), {
+            "current_scoring_period": 7, "season_id": 2027,
+            "scoring_items": {ids.PTS: 1.0}, "league_id": 1})()
+        # Team 1 plays team 20 today; team 2 plays team 30; team 3 is idle.
+        self.app._pro_games = {7: {
+            1: ProGame(scoring_period=7, pro_team_id=1, opponent_id=20,
+                       home=True),
+            2: ProGame(scoring_period=7, pro_team_id=2, opponent_id=30,
+                       home=False),
+        }}
+        self.app._defense[self.app._defense_scope(self.settings)] = self.table
+
+        def entry(pid, team, centre):
+            return RosterEntry(
+                player_id=pid, name="p%d" % pid, current_slot=ids.BENCH_SLOT,
+                eligible_slots=frozenset(
+                    {ids.CENTER_SLOT, 11} if centre else {0, 11}),
+                pro_team_id=team, injury_status="ACTIVE")
+
+        self.roster = [entry(1, 1, False), entry(2, 1, True),
+                       entry(3, 2, False), entry(4, 3, False)]
+
+    def test_each_player_gets_his_own_opponent(self):
+        out = self.app._matchup_multipliers(None, self.settings, self.roster)
+        self.assertAlmostEqual(out[1], 0.90)
+        self.assertAlmostEqual(out[3], 1.10)
+
+    def test_a_centre_gets_the_centre_term_and_a_guard_does_not(self):
+        out = self.app._matchup_multipliers(None, self.settings, self.roster)
+        self.assertAlmostEqual(out[1], 0.90)
+        self.assertAlmostEqual(out[2], 0.90 * 0.95)
+
+    def test_a_player_with_no_game_today_is_absent(self):
+        """Absent, not 1.0-valued. He is benched by the eligibility pass
+        regardless, and inventing a multiplier for a game nobody is playing
+        would be a number with nothing behind it."""
+        out = self.app._matchup_multipliers(None, self.settings, self.roster)
+        self.assertNotIn(4, out)
+
+    def test_the_scoring_period_is_the_one_being_planned(self):
+        """Keyed on ``current_scoring_period``. Reading yesterday's slate would
+        price every player against the wrong team, which is worse than no
+        adjustment and just as quiet."""
+        self.settings.current_scoring_period = 8
+        self.assertEqual(
+            self.app._matchup_multipliers(None, self.settings, self.roster), {})
+
+    def test_an_empty_table_adjusts_nobody(self):
+        self.app._defense = {
+            self.app._defense_scope(self.settings): defense.TeamDefense()}
+        self.assertEqual(
+            self.app._matchup_multipliers(None, self.settings, self.roster), {})
+
+    def test_an_instance_without_a_cache_never_fetches(self):
+        """Every test in tests/ builds ``Autopilot`` without ``__init__``. The
+        correct reading of "no cache configured" is *do not fetch 25 MB from a
+        unit test*, so such an instance gets no adjustment by design."""
+        bare = object.__new__(type(self.app))
+        table = bare.team_defense(None, self.settings)
+        self.assertTrue(table.empty)
+        self.assertEqual(
+            bare._matchup_multipliers(None, self.settings, self.roster), {})
+
+    def test_leagues_scoring_alike_share_one_scope(self):
+        """The fit is a function of the coefficients and nothing else, so two
+        leagues that score the same way must not fetch twice."""
+        a = type("S", (), {"scoring_items": {ids.PTS: 1.0, ids.DD: 4.0}})()
+        b = type("S", (), {"scoring_items": {ids.DD: 4.0, ids.PTS: 1.0}})()
+        c = type("S", (), {"scoring_items": {ids.PTS: 1.0, ids.DD: 5.0}})()
+        self.assertEqual(self.app._defense_scope(a), self.app._defense_scope(b))
+        self.assertNotEqual(self.app._defense_scope(a), self.app._defense_scope(c))
