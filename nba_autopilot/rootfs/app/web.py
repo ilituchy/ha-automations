@@ -957,6 +957,7 @@ CSS = """
   --warn: #a96508;
   --warn-bg: rgba(169,101,8,.10);
   --chip: rgba(16,18,27,.055);
+  --shade: rgba(16,18,27,.26);
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -975,6 +976,7 @@ CSS = """
     --warn: #e8a33d;
     --warn-bg: rgba(232,163,61,.13);
     --chip: rgba(255,255,255,.07);
+    --shade: rgba(0,0,0,.62);
   }
 }
 * { box-sizing: border-box; }
@@ -1673,7 +1675,13 @@ footer {
 /* -- the player card -- */
 /* Shared by the dialog and the standalone page, so one set of rules styles
    both and the two cannot drift apart. */
+/* ``position``/``inset``/``margin`` are the UA's own defaults for an open
+   modal in a current browser, and are spelled out because they are not in an
+   older WebView: there a modal is ``position: absolute``, which anchors it to
+   the top of the *document* rather than the viewport, so opening a card from
+   halfway down the matchup page puts it off the top of the screen. */
 #pcard {
+  position: fixed; inset: 0; margin: auto;
   border: 0; padding: 0; width: min(560px, calc(100vw - 24px));
   max-height: min(86vh, 860px); border-radius: 16px;
   background: var(--card-background-color, var(--card));
@@ -1681,24 +1689,46 @@ footer {
   box-shadow: var(--lift); overflow: hidden;
 }
 #pcard::backdrop { background: rgba(8, 9, 12, .55); }
-#pcard .pbody { max-height: inherit; overflow-y: auto; padding: 0 0 4px; }
+#pcard .pbody {
+  max-height: inherit; overflow-y: auto; padding: 0 0 6px;
+  /* Scroll shadows. The two ``local`` layers scroll with the content and so
+     sit over the fixed shadow beneath them while an end is in view; once you
+     scroll away from that end they travel off and uncover it. Which makes a
+     shadow that appears only on the side there is more to see -- the dialog
+     cuts a sentence in half at its bottom edge otherwise, and a hard cut
+     reads as broken rather than as scrollable. */
+  background:
+    linear-gradient(var(--pbg) 42%, transparent) 50% 0 / 100% 26px no-repeat local,
+    linear-gradient(to top, var(--pbg) 42%, transparent) 50% 100% / 100% 26px no-repeat local,
+    linear-gradient(var(--shade), transparent) 50% 0 / 100% 14px no-repeat,
+    linear-gradient(to top, var(--shade), transparent) 50% 100% / 100% 14px no-repeat;
+}
 .pclose { position: sticky; top: 0; z-index: 2; height: 0; text-align: right; }
 .pclose button {
-  position: relative; top: 8px; right: 8px;
-  width: 30px; height: 30px; border: 0; border-radius: 999px; cursor: pointer;
-  font-size: 19px; line-height: 1;
-  background: var(--chip); color: var(--secondary-text-color, var(--dim));
+  position: relative; top: 10px; right: 10px;
+  width: 32px; height: 32px; padding: 0; border: 0; border-radius: 999px;
+  cursor: pointer; font-size: 19px; line-height: 1;
+  background: var(--card-background-color, var(--card));
+  color: var(--secondary-text-color, var(--dim));
+  box-shadow: inset 0 0 0 1px var(--line);
 }
 .pclose button:hover { color: var(--primary-text-color, var(--fg)); }
 
-.pcard { padding: 4px 0 0; }
+/* What a scroll shadow fades out into. The card is transparent, so this is
+   whatever is behind it: the page on the standalone route, the dialog's own
+   surface inside the dialog. */
+.pcard { --pbg: var(--primary-background-color, var(--bg)); padding: 4px 0 0; }
+#pcard, #pcard .pcard { --pbg: var(--card-background-color, var(--card)); }
 /* Headshot and name on the first row, the facts across the second. Side by
    side they fight: "Brandon Boston Jr." wraps to three lines to leave room
    for four right-aligned labels, and in the dialog the close button lands on
    top of the first of them. */
 .phero { display: grid; grid-template-columns: auto 1fr; align-items: center;
          gap: 0 12px; padding: 16px; }
-#pcard .phero { padding-right: 46px; }
+/* Only the name row keeps clear of the close button. Reserving that width
+   down the whole hero costs the facts a column -- which is what puts a
+   manager's surname on a line of its own. */
+#pcard .pwho { padding-right: 44px; }
 .face.big { flex: 0 0 56px; height: 56px; width: 56px; }
 .pwho { min-width: 0; }
 /* The page-wide ``h2`` is a small uppercase section heading. This one is a
@@ -1710,16 +1740,20 @@ footer {
 }
 .psub { font-size: 13px; color: var(--secondary-text-color, var(--dim)); }
 .pfacts {
-  grid-column: 1 / -1; margin: 14px 0 0; display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(76px, 1fr)); gap: 10px;
+  /* A strip, not a table. An even grid sizes every column to the widest
+     label and then wraps "Brendan Bridges" onto a line of its own inside a
+     column with room to spare either side of it; letting each fact take the
+     width it needs costs nothing and wraps the strip instead. */
+  grid-column: 1 / -1; margin: 14px 0 0;
+  display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: start;
 }
-.pfacts div { display: block; min-width: 0; }
+.pfacts div { display: block; flex: 0 1 auto; min-width: 72px; }
 .pfacts dt {
   font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase;
   white-space: nowrap; color: var(--secondary-text-color, var(--faint));
 }
 .pfacts dd { margin: 1px 0 0; font-size: 14.5px; font-weight: 650;
-             font-variant-numeric: tabular-nums; }
+             line-height: 1.25; font-variant-numeric: tabular-nums; }
 .pfacts dd.out { color: var(--bad); }
 .pfacts dd.dtd { color: var(--warn); }
 
@@ -1729,8 +1763,18 @@ footer {
   text-transform: uppercase; color: var(--secondary-text-color, var(--faint));
 }
 /* The eight stat columns do not fit a phone, and shrinking them to fit is
-   how a table becomes unreadable. It scrolls sideways instead. */
-.pscroll { overflow-x: auto; margin: 0 -16px; padding: 0 16px; }
+   how a table becomes unreadable. It scrolls sideways instead -- with the
+   same scroll shadows as the dialog body, because a column sliced down the
+   middle at the edge of the card is the other place this looks broken when
+   it is only cut off. */
+.pscroll {
+  overflow-x: auto; margin: 0 -16px; padding: 0 16px;
+  background:
+    linear-gradient(to right, var(--pbg) 42%, transparent) 0 50% / 26px 100% no-repeat local,
+    linear-gradient(to left, var(--pbg) 42%, transparent) 100% 50% / 26px 100% no-repeat local,
+    linear-gradient(to right, var(--shade), transparent) 0 50% / 14px 100% no-repeat,
+    linear-gradient(to left, var(--shade), transparent) 100% 50% / 14px 100% no-repeat;
+}
 .ptab { border-collapse: collapse; width: 100%; font-size: 13px;
         font-variant-numeric: tabular-nums; }
 .ptab th, .ptab td { padding: 5px 0 5px 10px; text-align: right;

@@ -427,3 +427,46 @@ class TestTheFactsEspnShowsBesideTheName(unittest.TestCase):
         which the game log says in words just below it."""
         card = _card([_block(0, avg={}, stats={"42": 0.0}, total=0.0)])
         self.assertEqual(card.splits, ())
+
+
+class TestTheCardLooksLikeACardOnASmallScreen(unittest.TestCase):
+    """The modal's layout, in the three places it went wrong on a phone.
+
+    None of this is testable by rendering, because it is all stylesheet -- but
+    each one is a line somebody could delete as redundant without the page
+    looking any different on the machine they deleted it on.
+    """
+
+    def test_the_dialog_is_pinned_to_the_viewport_not_the_document(self):
+        """A current browser's UA sheet already says this; an older WebView
+        says ``absolute``, which anchors the card to the top of the document.
+        Open one from halfway down the matchup page there and it is above the
+        screen."""
+        self.assertIn("position: fixed; inset: 0; margin: auto;", web.CSS)
+
+    def test_the_shadow_colour_exists_in_both_themes(self):
+        """A scroll shadow at 26% black is invisible on a dark surface, so
+        the cue that a table has more to the right would be there in daylight
+        and gone at night."""
+        light, dark = web.CSS.split("@media (prefers-color-scheme: dark)", 1)
+        self.assertIn("--shade:", light)
+        self.assertIn("--shade:", dark)
+        self.assertIn("--pbg: var(--card-background-color", web.CSS)
+
+    def test_the_shadow_hides_itself_at_the_end_of_the_scroll(self):
+        """The trick is two pairs of layers: the ones that cover sit on the
+        content (``local``) and travel away as you scroll, uncovering the
+        fixed shadow beneath. Both cover layers must come first in the
+        shorthand, or they are painted under what they are there to hide."""
+        for block in ("#pcard .pbody {", ".pscroll {"):
+            rule = web.CSS.split(block, 1)[1].split("}", 1)[0]
+            bg = rule.split("background:", 1)[1]
+            self.assertEqual(2, bg.count("no-repeat local"), block)
+            self.assertLess(bg.rfind("no-repeat local"),
+                            bg.find("var(--shade)"), block)
+
+    def test_only_the_name_keeps_clear_of_the_close_button(self):
+        """Reserving that width down the whole hero costs the facts strip a
+        column, which is what put a manager's surname on a line by itself."""
+        self.assertIn("#pcard .pwho { padding-right:", web.CSS)
+        self.assertNotIn("#pcard .phero { padding-right:", web.CSS)

@@ -43,6 +43,29 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **The player card's edges.** Three things on a phone, all of them the card
+  looking broken where it was only being cut off.
+
+  The facts beside the headshot were an even grid, so every column was as wide
+  as the widest label and a manager called "Brendan Bridges" wrapped onto a
+  line of its own inside a column with room to spare either side of it. They
+  are a wrapping strip now, each fact as wide as it needs to be. The close
+  button's width was reserved down the whole hero rather than only beside the
+  name, which was costing that strip a column.
+
+  Both stat tables and the dialog body cut their content off flush at an edge
+  with nothing to say it scrolls — a sentence sliced in half at the bottom of
+  the dialog, a column sliced down the middle at the right of the table. Both
+  now carry scroll shadows, drawn the CSS-only way: a pair of cover layers
+  attached to the content (`local`) sit over a pair of fixed shadows and
+  travel off them as you scroll, so the shadow appears only on the side that
+  has more to show.
+
+  And the dialog now says `position: fixed` itself. It is what a current
+  browser's UA stylesheet already gives an open modal, but an older WebView
+  says `absolute`, which anchors the card to the top of the *document*: open
+  one from halfway down the matchup page there and it is above the screen.
+
 - **Every player name linked to the same page.** A name opened the league's
   player *list* narrowed to his NBA team, which was the closest thing found
   the first time this was looked at. Two things were wrong with it. The page
