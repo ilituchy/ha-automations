@@ -401,3 +401,29 @@ class TestTheCardCacheIsBounded(unittest.TestCase):
         for i in range(web.StatusPage.CARD_MAX * 2):
             page._remember_card((9, i), {"pid": i})
         self.assertIn((9, web.StatusPage.CARD_MAX * 2 - 1), page._card_cache)
+
+
+class TestTheFactsEspnShowsBesideTheName(unittest.TestCase):
+    def test_his_primary_position_comes_first(self):
+        """ESPN shows "SG, PG" for a shooting guard who can run the point,
+        and the card is meant to read the same way beside it."""
+        card = _card([], player_over={"eligibleSlots": [0, 1, 11],
+                                      "defaultPositionId": 2})
+        self.assertEqual(card.positions, ("SG", "PG"))
+
+    def test_without_a_default_the_order_is_espns_own(self):
+        card = _card([], player_over={"eligibleSlots": [0, 1, 11]})
+        self.assertEqual(card.positions, ("PG", "SG"))
+
+    def test_an_unranked_player_has_no_rank_rather_than_rank_zero(self):
+        """ESPN reports 0 for a player it has not ranked, and "#0" on a card
+        reads as a rank of nought."""
+        card = _card([], entry_over={"ratings": {"0": {"positionalRanking": 0}}})
+        self.assertIsNone(card.position_rank)
+        self.assertNotIn("Position rank", web.player_card_html(_view(rank=None)))
+
+    def test_a_window_with_no_games_is_not_a_row_of_zeroes(self):
+        """It reads as "he scores nothing" rather than "he has not played",
+        which the game log says in words just below it."""
+        card = _card([_block(0, avg={}, stats={"42": 0.0}, total=0.0)])
+        self.assertEqual(card.splits, ())

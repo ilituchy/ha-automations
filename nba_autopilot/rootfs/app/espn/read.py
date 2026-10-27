@@ -1205,6 +1205,11 @@ def _parse_card(
             continue
         played = int(float((block.get("stats") or {}).get(
             str(ids.GAMES_PLAYED)) or 0.0))
+        # A window with no games in it has nothing to average, and a row of
+        # zeroes reads as "he scores nothing" rather than as "he has not
+        # played". The game log says the second one in words.
+        if played <= 0:
+            continue
         splits.append(StatSplit(
             key=key, label=label, games=played,
             fantasy_total=float(block.get("appliedTotal") or 0.0),
@@ -1234,15 +1239,24 @@ def _parse_card(
     log_rows.sort(key=lambda r: r.scoring_period, reverse=True)
 
     eligible = set(int(s) for s in (player.get("eligibleSlots") or []))
+    # ESPN lists his primary position first -- "SG, PG" for a shooting guard
+    # who can also run the point -- and ``defaultPositionId`` is which one
+    # that is. It is the slot id plus one: a centre is slot 4 and default 5.
+    primary = _opt_int(player.get("defaultPositionId"))
+    primary = None if primary is None else primary - 1
     ownership = player.get("ownership") or {}
     ratings = (entry.get("ratings") or {}).get("0") or {}
     return PlayerCard(
         player_id=int(player.get("id")),
         name=str(player.get("fullName") or ""),
         pro_team_id=int(player.get("proTeamId") or 0),
-        positions=tuple(name for slot, name in CARD_POSITIONS if slot in eligible),
+        positions=tuple(
+            name for slot, name in sorted(
+                CARD_POSITIONS, key=lambda sn: sn[0] != primary)
+            if slot in eligible),
         injury_status=str(player.get("injuryStatus") or "ACTIVE"),
-        position_rank=_opt_int(ratings.get("positionalRanking")),
+        # ESPN reports 0 for a player it has not ranked, which is not a rank.
+        position_rank=(_opt_int(ratings.get("positionalRanking")) or None),
         percent_owned=_opt_float(ownership.get("percentOwned")),
         acquisition_status=str(entry.get("status") or ""),
         on_team_id=int(entry.get("onTeamId") or 0),

@@ -1692,9 +1692,15 @@ footer {
 .pclose button:hover { color: var(--primary-text-color, var(--fg)); }
 
 .pcard { padding: 4px 0 0; }
-.phero { display: flex; align-items: center; gap: 12px; padding: 16px 16px 12px; }
-.face.big { flex: 0 0 56px; height: 56px; }
-.pwho { min-width: 0; flex: 1; }
+/* Headshot and name on the first row, the facts across the second. Side by
+   side they fight: "Brandon Boston Jr." wraps to three lines to leave room
+   for four right-aligned labels, and in the dialog the close button lands on
+   top of the first of them. */
+.phero { display: grid; grid-template-columns: auto 1fr; align-items: center;
+         gap: 0 12px; padding: 16px; }
+#pcard .phero { padding-right: 46px; }
+.face.big { flex: 0 0 56px; height: 56px; width: 56px; }
+.pwho { min-width: 0; }
 /* The page-wide ``h2`` is a small uppercase section heading. This one is a
    man's name, so every one of those declarations has to be undone. */
 .pwho h2 {
@@ -1704,12 +1710,16 @@ footer {
 }
 .psub { font-size: 13px; color: var(--secondary-text-color, var(--dim)); }
 .pfacts {
-  display: grid; grid-template-columns: repeat(2, auto); gap: 2px 14px;
-  margin: 0; text-align: right; font-size: 12.5px;
+  grid-column: 1 / -1; margin: 14px 0 0; display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(76px, 1fr)); gap: 10px;
 }
-.pfacts div { display: contents; }
-.pfacts dt { color: var(--secondary-text-color, var(--faint)); }
-.pfacts dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.pfacts div { display: block; min-width: 0; }
+.pfacts dt {
+  font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase;
+  white-space: nowrap; color: var(--secondary-text-color, var(--faint));
+}
+.pfacts dd { margin: 1px 0 0; font-size: 14.5px; font-weight: 650;
+             font-variant-numeric: tabular-nums; }
 .pfacts dd.out { color: var(--bad); }
 .pfacts dd.dtd { color: var(--warn); }
 
@@ -3014,7 +3024,7 @@ def _card_head(view: Mapping[str, Any]) -> str:
     facts = [
         ("Avg points", "" if not season.get("games")
          else _n1(season.get("avg"))),
-        ("Position rank", "" if rank is None else "#%d" % int(rank)),
+        ("Position rank", "" if not rank else "#%d" % int(rank)),
         ("Rostered", "" if owned is None else "%s%%" % _n1(owned)),
         ("Manager", view.get("manager") or ""),
     ]
