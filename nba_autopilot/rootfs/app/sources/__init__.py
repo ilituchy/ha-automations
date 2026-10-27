@@ -42,6 +42,14 @@ from .base import (
     http_client,
     utcnow,
 )
+from .defense import (
+    Defense,
+    PlayerGame,
+    TeamDefense,
+    fit_defense,
+    parse_player_games,
+    parse_schedule,
+)
 from .crosswalk import Crosswalk, CrosswalkResult, PlayerLink, normalize_name
 from .darko import Darko, DarkoPlayer, decode_sveltekit_data, decode_sveltekit_payload
 from .espn_injuries import EspnInjuries, InjuryNote, classify_comment
@@ -67,6 +75,12 @@ __all__ = [
     "NbaSchedule",
     "GameRef",
     "detect_back_to_backs",
+    "Defense",
+    "TeamDefense",
+    "PlayerGame",
+    "fit_defense",
+    "parse_schedule",
+    "parse_player_games",
     "Darko",
     "DarkoPlayer",
     "decode_sveltekit_data",

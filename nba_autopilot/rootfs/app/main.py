@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import hashlib
 import json
 import logging
 import signal
@@ -41,6 +42,7 @@ from espn.read import EspnAuthError, EspnError, EspnRead, make_client
 from espn.write import EspnWrite
 import ha.bridge as bridge_mod
 from ha.bridge import Action, ActionEvent, HaBridge
+from sources.defense import Defense, TeamDefense
 from sources.espn_injuries import EspnInjuries
 from solve import addrop as addrop_mod
 from solve import budget as budget_mod
@@ -56,6 +58,12 @@ log = logging.getLogger("autopilot")
 #: tip is exactly the case this source exists to catch -- and long enough that
 #: every league in a single run cycle shares one request.
 INJURY_NOTE_TTL = timedelta(minutes=15)
+
+#: How long a fitted opponent-defence table is good for. Team defence moves
+#: over weeks -- the measured year-over-year correlation of the effect is about
+#: 0.55, so a week-old fit is indistinguishable from a fresh one -- and fitting
+#: costs a 25 MB public fetch. See :mod:`sources.defense`.
+DEFENSE_TTL = timedelta(days=7)
 
 #: Candidates one run will put in front of the add/drop reviewer, per league.
 #: Separate from ``addrop_max_moves``, which caps the swaps that reach the user:
@@ -335,6 +343,10 @@ class Autopilot:
         # :meth:`injury_notes`.
         self._injuries: Any = None
         self._injuries_at: Optional[datetime] = None
+        # Keyed by scoring-coefficient fingerprint, not by league: the fit is a
+        # function of the coefficients alone, so leagues that score alike share
+        # one entry. See :meth:`team_defense`.
+        self._defense: Dict[str, TeamDefense] = {}
         # ``None`` means no review gate. Built from the presence of a key
         # rather than from a separate on/off switch, so there is one fact to
         # get right instead of two that can contradict each other -- a key
@@ -551,6 +563,95 @@ class Autopilot:
         self._injuries = EspnInjuries().fetch()
         self._injuries_at = now
         return self._injuries
+
+    @staticmethod
+    def _defense_scope(settings: Any) -> str:
+        """A stable fingerprint of a league's scoring coefficients."""
+        items = sorted(
+            (int(k), round(float(v), 4))
+            for k, v in (getattr(settings, "scoring_items", {}) or {}).items()
+        )
+        return hashlib.sha256(
+            repr(items).encode("utf-8")).hexdigest()[:16]
+
+    def team_defense(self, lg: "League", settings: Any) -> TeamDefense:
+        """The fitted opponent-defence table, from cache or freshly fitted.
+
+        Three layers of fallback, all of which return an empty table rather
+        than raising: the in-process dict, the ``defense`` row in the state DB
+        (which is what makes this work at all when the add-on runs one process
+        per wake-up), and finally the fetch. An empty table means every
+        multiplier is exactly 1.0, which is the behaviour this app had before
+        the table existed -- so a defence fit that cannot be obtained costs
+        nothing but the ~0.7 points a week it was worth.
+        """
+        # ``getattr``, because an instance built without ``__init__`` -- which
+        # is how every test in tests/ builds one, to keep a unit test off the
+        # network -- has no cache dict, and the correct reading of "no cache
+        # was configured" is "do not fetch 25 MB from a test", not "fetch it
+        # now". Such an instance gets no opponent adjustment, by design.
+        cache = getattr(self, "_defense", None)
+        if cache is None:
+            return TeamDefense()
+        scope = self._defense_scope(settings)
+        hit = cache.get(scope)
+        if hit is not None:
+            return hit
+        cached = self.store.load_defense(scope, DEFENSE_TTL)
+        if cached is not None:
+            table = TeamDefense(
+                team=cached["team"], centre=cached["centre"],
+                seasons=cached["seasons"], games=cached["games"])
+            cache[scope] = table
+            return table
+        coefficients = {
+            int(k): float(v)
+            for k, v in (getattr(settings, "scoring_items", {}) or {}).items()
+        }
+        if not coefficients:
+            return TeamDefense()
+        result = Defense(int(settings.season_id), coefficients).fetch()
+        table = result.payload if result is not None else TeamDefense()
+        if not table.empty:
+            self.store.save_defense(
+                scope, team=table.team, centre=table.centre,
+                seasons=table.seasons, games=table.games)
+        else:
+            log.info("no opponent-defence table this run; "
+                     "projections carry no opponent adjustment")
+        cache[scope] = table
+        return table
+
+    def _matchup_multipliers(
+        self,
+        lg: "League",
+        settings: Any,
+        entries: Sequence[Any],
+    ) -> Dict[int, float]:
+        """``player_id -> opponent multiplier`` for the current scoring period.
+
+        A player whose team has no game today is simply absent, which the
+        projection layer reads as 1.0. He will be benched by the eligibility
+        pass regardless, and inventing a multiplier for a game that is not
+        being played would be a number with nothing behind it.
+        """
+        table = self.team_defense(lg, settings)
+        if table.empty:
+            return {}
+        period = int(settings.current_scoring_period)
+        games = (self.pro_games() or {}).get(period) or {}
+        out: Dict[int, float] = {}
+        for e in entries:
+            game = games.get(int(e.pro_team_id))
+            if game is None:
+                continue
+            m = table.multiplier(
+                game.opponent_id,
+                ids.CENTER_SLOT in (e.eligible_slots or frozenset()),
+            )
+            if m != 1.0:
+                out[int(e.player_id)] = m
+        return out
 
     def _availability_overrides(
         self, roster: Sequence[Any], injuries: Optional[Any]
@@ -793,7 +894,13 @@ class Autopilot:
                 return [], notes, []
             pool_projections, _pool_avail, unprojected = (
                 projections_mod.build_projections(
-                    pool, splits, as_of=datetime.now(timezone.utc)
+                    pool, splits, as_of=datetime.now(timezone.utc),
+                    # The pool is valued for the same day as the roster, so it
+                    # has to be priced against the same opponents. Leaving it
+                    # out would make every free agent look systematically
+                    # better or worse than the player he would replace,
+                    # depending only on who the roster happens to be facing.
+                    opponent=self._matchup_multipliers(lg, settings, pool),
                 )
             )
             for pid, proj in pool_projections.items():
@@ -1193,7 +1300,9 @@ class Autopilot:
 
         splits = lg.read.player_projections([e.player_id for e in roster])
         projections, availability, skipped = projections_mod.build_projections(
-            roster, splits, as_of=datetime.now(timezone.utc), statuses=overrides
+            roster, splits, as_of=datetime.now(timezone.utc),
+            statuses=overrides,
+            opponent=self._matchup_multipliers(lg, settings, roster),
         )
         if skipped:
             notes.append(

@@ -82,6 +82,12 @@ GAME_DATE_TZ = ZoneInfo("America/New_York")
 #: ``espn/write.py`` is there to catch.
 BENCH_SLOT: SlotId = 12
 IR_SLOT: SlotId = 13
+
+#: The dedicated centre slot. Eligibility here is the app's only run-time test
+#: for "is this a big man" -- ``defaultPositionId`` is not carried on
+#: :class:`models.RosterEntry` -- and it is what
+#: :mod:`sources.defense` fits its centre adjustment on.
+CENTER_SLOT: SlotId = 4
 NON_SCORING_SLOTS: FrozenSet[SlotId] = frozenset({BENCH_SLOT, IR_SLOT})
 
 STAT_NAMES: Dict[StatId, str] = {

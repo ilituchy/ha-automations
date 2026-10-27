@@ -213,6 +213,25 @@ CREATE TABLE IF NOT EXISTS forecasts (
 
 CREATE INDEX IF NOT EXISTS idx_forecasts_day
     ON forecasts(league_id, scoring_period);
+
+-- The fitted opponent-defence table, cached because fitting it means a 25 MB
+-- public fetch and the answer moves over weeks, not hours. Persisted rather
+-- than held in memory because the add-on's normal mode is one process per run:
+-- an in-process TTL would refetch on every single wake-up and never once get
+-- a cache hit.
+--
+-- ``scope`` is a fingerprint of the league's scoring coefficients, not a
+-- league id. The fit is a function of those coefficients and nothing else, so
+-- two leagues that score alike share one row and one fetch, and a league that
+-- changes its scoring mid-season gets a new scope instead of silently reading
+-- a table fitted against the old points.
+CREATE TABLE IF NOT EXISTS defense (
+    scope       TEXT    PRIMARY KEY,
+    seasons     TEXT    NOT NULL DEFAULT '',
+    games       INTEGER NOT NULL DEFAULT 0,
+    table_json  TEXT    NOT NULL,
+    fitted_at   TEXT    NOT NULL
+);
 """
 
 
@@ -468,6 +487,70 @@ class Store:
                 [head + b for b in batch],
             )
         return len(batch)
+
+    def save_defense(
+        self,
+        scope: str,
+        *,
+        team: Mapping[int, float],
+        centre: Mapping[int, float],
+        seasons: Sequence[int],
+        games: int,
+    ) -> None:
+        """Store a fitted opponent-defence table under *scope*.
+
+        Keys are stringified on the way in because JSON object keys are
+        strings and a silent ``{"1": ...}`` round-tripping back as the string
+        ``"1"`` would make every lookup miss and every multiplier 1.0 -- a
+        failure that looks exactly like "no fitted table yet".
+        :meth:`load_defense` casts them back.
+        """
+        blob = json.dumps({
+            "team": {str(int(k)): float(v) for k, v in team.items()},
+            "centre": {str(int(k)): float(v) for k, v in centre.items()},
+        }, sort_keys=True)
+        with self._lock:
+            self.db.execute(
+                "INSERT OR REPLACE INTO defense "
+                "(scope, seasons, games, table_json, fitted_at) "
+                "VALUES (?,?,?,?,?)",
+                (str(scope), ",".join(str(int(x)) for x in seasons),
+                 int(games), blob, _now()),
+            )
+            self.db.commit()
+
+    def load_defense(
+        self, scope: str, max_age: timedelta
+    ) -> Optional[Dict[str, Any]]:
+        """The cached table for *scope*, or ``None`` if absent or too old.
+
+        ``None`` for an unparseable row as well as a missing one. A table that
+        cannot be read is not a reason to fail a run -- the caller's fallback
+        is "no opponent adjustment", which is what the app did before this
+        existed and is always a safe answer.
+        """
+        with self._lock:
+            row = self.db.execute(
+                "SELECT seasons, games, table_json, fitted_at FROM defense "
+                "WHERE scope=?", (str(scope),),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            fitted_at = datetime.fromisoformat(row["fitted_at"])
+            blob = json.loads(row["table_json"])
+            team = {int(k): float(v) for k, v in (blob.get("team") or {}).items()}
+            centre = {int(k): float(v) for k, v in (blob.get("centre") or {}).items()}
+        except (TypeError, ValueError, KeyError):
+            log.warning("cached opponent-defence table for scope %s is "
+                        "unreadable; refitting", scope)
+            return None
+        if datetime.now(timezone.utc) - fitted_at > max_age:
+            return None
+        return {"team": team, "centre": centre, "games": int(row["games"]),
+                "seasons": tuple(int(x) for x in str(row["seasons"]).split(",")
+                                 if x.strip()),
+                "fitted_at": fitted_at}
 
     def forecast_days(self, league_id: int) -> List[int]:
         """Scoring periods this league has a forecast for, oldest first."""

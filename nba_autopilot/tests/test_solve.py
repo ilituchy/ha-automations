@@ -841,3 +841,143 @@ class TestStatsEspnScoresButDoesNotProject(unittest.TestCase):
         # 10 pts + 3 oreb @1.5 + 8 dreb @1.0 = 22.5 before any bonus, where the
         # old behaviour scored him at 10.0 flat.
         self.assertGreater(value, 22.0)
+
+
+class TestBonusCountersAreCumulative(unittest.TestCase):
+    """ESPN pays a triple-double as a double-double too.
+
+    Measured, not assumed: of 149 triple-doubles in the 2024-25 season archive,
+    **149** also carry stat 37. The model originally read ``P(exactly n)`` off
+    the convolution, which dropped the 4.0 on every triple-double and -- the
+    subtler half -- modelled a different quantity than the observed rate it
+    gets blended with, since split ``00`` counts them cumulatively as well.
+    """
+
+    @staticmethod
+    def _rates(means=None):
+        # A dict rather than ``**kwargs``: the stat ids are ints and keyword
+        # expansion requires strings.
+        line = {ids.PTS: 0.0, ids.REB: 0.0, ids.AST: 0.0, ids.STL: 0.0,
+                ids.BLK: 0.0}
+        line.update(means or {})
+        return projections.modelled_bonus_rates(line)
+
+    def test_a_certain_triple_double_is_also_a_certain_double_double(self):
+        r = self._rates({ids.PTS: 40.0, ids.REB: 40.0, ids.AST: 40.0})
+        self.assertAlmostEqual(r[ids.DD], 1.0, places=3)
+        self.assertAlmostEqual(r[ids.TD], 1.0, places=3)
+
+    def test_the_rates_are_weakly_decreasing(self):
+        """``P(>=2) >= P(>=3) >= P(>=4)`` by construction, for any line."""
+        for line in ({ids.PTS: 28.0, ids.REB: 12.0, ids.AST: 9.0},
+                     {ids.PTS: 9.0, ids.REB: 11.0, ids.AST: 2.0},
+                     {ids.PTS: 31.0, ids.REB: 9.5, ids.AST: 10.5,
+                      ids.STL: 1.8, ids.BLK: 1.1}):
+            r = self._rates(line)
+            self.assertGreaterEqual(r[ids.DD], r[ids.TD])
+            self.assertGreaterEqual(r[ids.TD], r[ids.QD])
+
+    def test_every_rate_is_a_probability(self):
+        for line in ({ids.PTS: 40.0, ids.REB: 40.0, ids.AST: 40.0},
+                     {ids.PTS: 0.1}, {}):
+            for stat, v in self._rates(line).items():
+                self.assertGreaterEqual(v, 0.0, stat)
+                self.assertLessEqual(v, 1.0, stat)
+
+    def test_a_triple_double_threat_is_paid_both_coefficients(self):
+        """The regression this guards. A player who will usually record three
+        double-digit categories must carry a double-double rate at least as
+        large as his triple-double rate -- under the old ``P(exactly n)`` the
+        double-double term went *down* as he got better."""
+        strong = self._rates({ids.PTS: 30.0, ids.REB: 13.0, ids.AST: 12.0})
+        weak = self._rates({ids.PTS: 30.0, ids.REB: 13.0, ids.AST: 3.0})
+        self.assertGreater(strong[ids.TD], weak[ids.TD])
+        self.assertGreaterEqual(strong[ids.DD], strong[ids.TD])
+        self.assertGreaterEqual(strong[ids.DD], 0.9 * weak[ids.DD])
+
+    def test_an_empty_line_earns_nothing(self):
+        r = self._rates()
+        self.assertEqual(r[ids.DD], 0.0)
+        self.assertEqual(r[ids.TD], 0.0)
+        self.assertEqual(r[ids.QD], 0.0)
+
+
+class TestTheOpponentAdjustment(unittest.TestCase):
+    """``apply_matchup`` and its one load-bearing ordering constraint."""
+
+    LINE = {ids.PTS: 20.0, ids.REB: 10.0, ids.AST: 4.0, ids.GP_STAT: 70.0,
+            ids.MINUTES: 33.0, ids.FG_PCT: 0.52}
+
+    def test_a_neutral_multiplier_changes_nothing(self):
+        """The common path -- no fitted table, or an opponent never seen --
+        must be bit-for-bit what it was before this existed."""
+        self.assertEqual(projections.apply_matchup(self.LINE, 1.0), self.LINE)
+
+    def test_counting_stats_scale(self):
+        out = projections.apply_matchup(self.LINE, 0.90)
+        self.assertAlmostEqual(out[ids.PTS], 18.0)
+        self.assertAlmostEqual(out[ids.REB], 9.0)
+        self.assertAlmostEqual(out[ids.AST], 3.6)
+
+    def test_percentages_and_counters_do_not_scale(self):
+        """A 10% tougher opponent does not make a player play 10% of a game
+        less, and scaling a field-goal percentage is not a statement about
+        anything. ``GP_STAT`` in particular is read by the games-played
+        budget, which would start spending a fractional cap."""
+        out = projections.apply_matchup(self.LINE, 0.90)
+        self.assertEqual(out[ids.GP_STAT], 70.0)
+        self.assertEqual(out[ids.MINUTES], 33.0)
+        self.assertEqual(out[ids.FG_PCT], 0.52)
+
+    def test_the_input_is_not_mutated(self):
+        before = dict(self.LINE)
+        projections.apply_matchup(self.LINE, 0.80)
+        self.assertEqual(self.LINE, before)
+
+    def test_the_opponent_reaches_the_double_double_term(self):
+        """The ordering constraint. A centre facing the best rim protection is
+        genuinely less likely to reach ten rebounds, so the suppression has to
+        reach the bonus model -- which only happens because the multiplier is
+        applied to the raw line *before* ``derive_scored_stats`` reads it.
+        """
+        line = {ids.PTS: 11.0, ids.REB: 11.0, ids.AST: 1.0}
+        full = projections.modelled_bonus_rates(line)
+        suppressed = projections.modelled_bonus_rates(
+            projections.apply_matchup(line, 0.85))
+        self.assertLess(suppressed[ids.DD], full[ids.DD])
+
+    def test_build_projections_applies_it_per_player(self):
+        entries = [
+            RosterEntry(player_id=1, name="Faces Boston",
+                        current_slot=ids.BENCH_SLOT,
+                        eligible_slots=frozenset({0, 11}), pro_team_id=5,
+                        injury_status="ACTIVE"),
+            RosterEntry(player_id=2, name="Faces Washington",
+                        current_slot=ids.BENCH_SLOT,
+                        eligible_slots=frozenset({0, 11}), pro_team_id=6,
+                        injury_status="ACTIVE"),
+        ]
+        split = {ids.SPLIT_SEASON_PROJECTED: {ids.PTS: 20.0, ids.GP_STAT: 70.0},
+                 ids.SPLIT_SEASON_TOTAL: {ids.GP_STAT: 40.0, ids.PTS: 20.0}}
+        splits = {1: split, 2: split}
+        as_of = datetime.datetime(2026, 10, 26, tzinfo=datetime.timezone.utc)
+        plain, _n, _s = projections.build_projections(entries, splits, as_of=as_of)
+        adjusted, _n, _s = projections.build_projections(
+            entries, splits, as_of=as_of, opponent={1: 0.90, 2: 1.10})
+        self.assertLess(adjusted[1].mean[ids.PTS], plain[1].mean[ids.PTS])
+        self.assertGreater(adjusted[2].mean[ids.PTS], plain[2].mean[ids.PTS])
+
+    def test_a_player_absent_from_the_map_is_untouched(self):
+        entry = RosterEntry(player_id=9, name="No game today",
+                            current_slot=ids.BENCH_SLOT,
+                            eligible_slots=frozenset({0, 11}), pro_team_id=5,
+                            injury_status="ACTIVE")
+        splits = {9: {ids.SPLIT_SEASON_PROJECTED: {ids.PTS: 20.0,
+                                                   ids.GP_STAT: 70.0},
+                      ids.SPLIT_SEASON_TOTAL: {ids.GP_STAT: 40.0,
+                                                ids.PTS: 20.0}}}
+        as_of = datetime.datetime(2026, 10, 26, tzinfo=datetime.timezone.utc)
+        plain, _n, _s = projections.build_projections([entry], splits, as_of=as_of)
+        with_map, _n, _s = projections.build_projections(
+            [entry], splits, as_of=as_of, opponent={1234: 0.5})
+        self.assertAlmostEqual(with_map[9].mean[ids.PTS], plain[9].mean[ids.PTS])

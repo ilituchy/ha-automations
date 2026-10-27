@@ -8,6 +8,72 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **A triple-double was not being paid as a double-double.** ESPN's bonus
+  counters are cumulative, not mutually exclusive: of the **149** triple-doubles
+  in the 2024-25 season archive, **149** also carry stat 37. The model read
+  `P(exactly n)` off its convolution, so a triple-double collected the 8.0 and
+  not the 4.0 that comes with it.
+
+  The subtler half of the same bug: split `00` reports the *observed* rates
+  cumulatively too, so `derive_scored_stats` was blending a modelled
+  `P(exactly 2)` against an observed `P(at least 2)` — two different
+  quantities. Now a tail sum, `P(at least n)`, on both sides.
+
+  Found by validating the model against five seasons of real box scores rather
+  than by reasoning about it. The same check confirmed the model is otherwise
+  well calibrated — predicted double-double rate 0.082 against an actual
+  0.086 over 1,774 player-seasons — and that `OREB_SHARE_DEFAULT = 0.25`,
+  which was a guess, is very nearly exact: the league-wide offensive rebound
+  share is **0.2519**.
+
+### Added
+
+- **Opponent defence in the projection.** A player's projected line is now
+  scaled by who he faces that day: one multiplier per NBA team, plus an extra
+  adjustment for centre-eligible players only.
+
+  Measured against **131,986 player-games** over five seasons, pulled from a
+  **public, unauthenticated** ESPN endpoint. Full working in
+  `docs/opponent-defence.md`. Team defence is a real and persistent property
+  — split-half reliability **0.75–0.90**, year over year **r = 0.43–0.61** —
+  but splitting it across all five positions is noise (reliability 0.25). The
+  signal collapses onto a single centre axis, where reliability is **0.56**.
+  So the fit deliberately refuses to model the other four positions.
+
+  Worth **+1.2 fantasy points a week** out of sample, nearly all of it on the
+  ~17% of days where it actually reorders a lineup. Recorded plainly because
+  the rebound fix above was worth 30–55 a week in the same units: this is
+  25–45 times smaller and is included because it is nearly free, not because
+  it matters much.
+
+  An unresolved opponent, an unseen team, or a fit that could not be obtained
+  all give exactly 1.0 — the behaviour the app had before this existed. The
+  multiplier is applied to the raw line *before* the derived stats are
+  computed, so a centre facing good rim protection also gets a lower
+  double-double chance rather than only lower rebounds. It deliberately does
+  not touch percentages, minutes, or games played: a hard opponent does not
+  change how many games a player appears in, and `GP_STAT` feeds the
+  games-played budget.
+
+- **A local archive of ESPN per-game actuals.** `tools/archive.py` pulls whole
+  seasons into SQLite through the same parser the add-on uses, and
+  `tools/measure_defence.py` re-runs every measurement behind the opponent
+  model. Neither is imported by the add-on and neither needs credentials. One
+  request returns ~1,080 players with a row per game played — including the
+  offensive/defensive rebound split and the real double-double counters, none
+  of which ESPN's *projection* carries.
+
+  Two traps are documented and handled: `seasons/<Y>/players` returns season Y
+  **and** Y−1 in one response, and `proTeamSchedules_wl` contains no season id
+  anywhere, so the season has to be supplied by the caller. Getting either
+  wrong produces a plausible-looking archive with the wrong opponent on tens
+  of thousands of games.
+
+- `defense` table in the state database, caching the fitted table for a week.
+  Persisted rather than held in memory because the add-on's normal mode is one
+  process per run, where an in-process cache would refetch 25 MB on every
+  wake-up and never once hit.
+
 - **Every rebound in both leagues was worth exactly zero.** The projection and
   the scoring were in different stat spaces and nothing bridged them.
 

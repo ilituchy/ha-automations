@@ -502,6 +502,46 @@ scores, the fix is worth roughly **30–55 fantasy points a week per league**.
 If a league scores *both* total rebounds and the offensive/defensive split, the
 app refuses to value it rather than paying twice for the same rebound.
 
+## Who he is playing
+
+A projection is nudged up or down by the team the player faces that day. Two
+numbers per NBA team: an overall multiplier, and an extra adjustment that
+applies only to centre-eligible players.
+
+Both were measured against **131,986 player-games** across five seasons of
+ESPN's own per-game actuals. The write-up is in
+[`docs/opponent-defence.md`](docs/opponent-defence.md); the short version:
+
+- **Team defence is real.** Split a season's games into odd and even days, fit
+  each half separately, and the two halves agree at a reliability of
+  **0.75–0.90**. Last season predicts this season at **r ≈ 0.43–0.61**, which
+  is what makes the number usable in October before the current season has any
+  games in it.
+- **Splitting it by all five positions is mostly noise** — reliability 0.25.
+  The signal lives on one axis: *centres*. Rim protection is a structural team
+  property. "Soft against shooting guards specifically" is not.
+- **It is small.** The spread is about ±3.5%, up to ±9% on a centre at the
+  extremes. Out of sample it is worth roughly **+1.2 fantasy points a week**,
+  nearly all of it on the ~17% of days where it actually reorders the lineup.
+  The rebound fix above was worth 30–55 a week; this is 25–45 times smaller.
+
+So it is wired in because it is almost free once the archive exists, not
+because it will decide a matchup. A player whose opponent cannot be resolved,
+or whose team is not in the fitted table, gets exactly 1.0 — no adjustment in
+either direction.
+
+The fit is cached in the database for a week and refreshed from a **public**
+ESPN endpoint that needs no cookie, so a dead `espn_s2` cannot take this with
+it. If the fit cannot be obtained at all the run proceeds without any opponent
+adjustment, which is what the app did before this existed.
+
+What it deliberately does **not** do is notice that a player had a big game
+against this opponent a fortnight ago. One game against one team is a single
+observation against a per-game error of about 10 fantasy points, and the
+apparent effect is almost always "this team is bad at guarding his position"
+rather than anything about him. The first is measurable over hundreds of games
+and is what the table above holds. The second is folklore.
+
 ## What it believed, and what happened
 
 Every run writes one row per player to a `forecasts` table: the projection it

@@ -90,7 +90,15 @@ import logging
 import math
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Dict,
+    FrozenSet,
+    Iterable,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from espn import ids
 from solve import weights
@@ -121,6 +129,8 @@ __all__ = [
     "variance_from_mean",
     "p_play_for",
     "build_projections",
+    "apply_matchup",
+    "UNSCALED_BY_MATCHUP",
 ]
 
 #: Overdispersion factor in ``Var = PHI * mu``. See the module docstring --
@@ -281,6 +291,10 @@ def modelled_bonus_rates(mean: Mapping[StatId, float]) -> Dict[StatId, float]:
     treat the five counting stats as independent, get each one's chance of
     reaching double digits, and read off the distribution of how many clear it.
 
+    The counters are **cumulative**: a triple-double is also a double-double
+    and ESPN pays both, so the rate for each is the chance of clearing *at
+    least* that many categories, not exactly that many.
+
     Independence is wrong, and wrong in a known direction: points and rebounds
     are positively correlated through minutes, so the true chance of *both*
     clearing ten is higher than the product. This therefore under-states the
@@ -301,8 +315,17 @@ def modelled_bonus_rates(mean: Mapping[StatId, float]) -> Dict[StatId, float]:
             nxt[k] += mass * (1.0 - p)
             nxt[k + 1] += mass * p
         dist = nxt
+    # **Cumulative, not exclusive.** Every one of the 149 triple-doubles in the
+    # 2024-25 archive carries stat 37 = 1.0 as well -- 149 of 149, no
+    # exceptions -- so ESPN counts a triple-double as a double-double too and
+    # pays both coefficients. Each bonus is therefore ``P(at least count)``, a
+    # tail sum. ``dist[count]`` is ``P(exactly count)``, which dropped the 4.0
+    # on every triple-double and, worse, modelled a different quantity than the
+    # observed rate it gets blended with in :func:`derive_scored_stats`: split
+    # ``00`` counts them cumulatively too, so the two halves of that blend
+    # disagreed about what they were measuring.
     return {
-        stat: dist[count] if count < len(dist) else 0.0
+        stat: math.fsum(dist[count:]) if count < len(dist) else 0.0
         for count, stat in BONUS_STATS.items()
     }
 
@@ -326,6 +349,44 @@ def observed_bonus_rates(
         if stat in actual
     }
     return rates, games
+
+
+#: Stats a matchup multiplier must not touch. The non-additive ones because
+#: scaling a percentage by 3% is not a statement about anything, and the three
+#: counters because a hard opponent does not change how many games a player
+#: plays -- that is the availability model's question, and ``GP_STAT`` in
+#: particular is read by the games-played budget, which would quietly start
+#: spending a fractional cap.
+UNSCALED_BY_MATCHUP: FrozenSet[StatId] = frozenset(
+    ids.NON_ADDITIVE_STATS | {ids.MINUTES, ids.GAMES_STARTED, ids.GAMES_PLAYED}
+)
+
+
+def apply_matchup(
+    mean: Mapping[StatId, float],
+    multiplier: float,
+) -> Dict[StatId, float]:
+    """Scale a projected line by one opponent multiplier.
+
+    Applied to the raw line *before* :func:`derive_scored_stats`, which is the
+    whole reason the two are ordered this way: a centre facing the league's
+    best rim protection is genuinely less likely to reach ten rebounds, so the
+    suppression has to reach the double-double term too. Scaling the line and
+    then deriving gets that for free; deriving first and then scaling would
+    apply the opponent twice to the bonus and once to everything else.
+
+    A multiplier of exactly 1.0 returns a copy unchanged rather than a
+    rebuilt dict of products, so the common path -- no fitted table, or an
+    opponent the table has never seen -- is bit-for-bit what it was before
+    this module existed.
+    """
+    out = dict(mean)
+    if multiplier == 1.0:
+        return out
+    for stat, value in mean.items():
+        if stat not in UNSCALED_BY_MATCHUP:
+            out[stat] = float(value) * multiplier
+    return out
 
 
 def derive_scored_stats(
@@ -533,6 +594,7 @@ def build_projections(
     *,
     as_of: datetime,
     statuses: Optional[Mapping[PlayerId, "tuple"]] = None,
+    opponent: Optional[Mapping[PlayerId, float]] = None,
     source_name: str = "espn-projection",
 ) -> "tuple":
     """Build the per-player projections. Returns ``(projections, notes, skipped)``.
@@ -542,6 +604,10 @@ def build_projections(
         splits: from :meth:`espn.read.EspnRead.player_projections`.
         statuses: ``player_id -> (status, source_label)`` overrides from
             Sleeper or the injury report. Absent means ESPN's status stands.
+        opponent: ``player_id -> opponent multiplier`` from
+            :meth:`sources.defense.TeamDefense.multiplier`. Absent, or missing
+            a player, means 1.0 -- no opponent adjustment, which is also what
+            an unresolved opponent must mean.
 
     ``skipped`` lists players with no usable projection. They are reported
     rather than defaulted, because a player who vanishes from the value map
@@ -557,6 +623,11 @@ def build_projections(
         if mean is None:
             skipped.append(entry)
             continue
+        # Opponent first, then the derived stats -- see :func:`apply_matchup`
+        # for why that order is load-bearing rather than arbitrary.
+        if opponent is not None:
+            mean = apply_matchup(
+                mean, float(opponent.get(entry.player_id, 1.0)))
         # After the form blend, not before: the rebound split has to divide the
         # mean the optimizer will actually see, and the bonus model has to read
         # the same line.
