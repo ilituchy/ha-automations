@@ -1680,54 +1680,45 @@ def _face(player_id: Any, extra: str = "", badge: str = "") -> str:
 #: URL-safe. The fallback, for a row that does not know its league.
 PLAYER_URL = "https://www.espn.com/nba/player/_/id/%d"
 
-#: The fantasy player list, scoped to a league.
+#: The fantasy player page, scoped to a league and to one man.
 #:
-#: **ESPN fantasy basketball has no per-player URL.** Checked three ways on
-#: 2026-10-26, because "it loads their stats which isnt as helpful" deserved
-#: a real answer rather than a guess:
+#: **The player card itself has no URL.** It is client state: the name in
+#: ESPN's own tables is an ``<a>`` carrying no ``href``, opening the card
+#: through an onClick, and the address bar does not move when it opens.
+#: Re-checked on 2026-10-27 by opening it and watching ``location.href``.
+#: ``playercard``, ``player/card`` and ``player`` all render ESPN's "Page not
+#: found", and the legacy ``games.espn.com/fba/playercard?playerId=`` drops
+#: the id on its way to a generic landing page.
 #:
-#: * the app is a Next.js app, so its routes are its page bundles, and the
-#:   only ones under ``/basketball`` are ``league``, ``league/settings``,
-#:   ``team``, ``boxscore``, ``recentactivity``, ``playernews`` and
-#:   ``players/add``. ``playercard`` and ``player`` fall through to the ESPN
-#:   homepage, in football as well as basketball;
-#: * ``players/add`` reads exactly these from the query string -- ``leagueId``,
-#:   ``seasonId``, ``status``, ``proTeamId``, ``lineupSlot``, ``playing``,
-#:   ``view``, ``replayDate``, ``previousSeasonId``. A ``playerId`` on it is
-#:   silently ignored;
-#: * the legacy ``games.espn.com/fba/playercard?playerId=`` redirects to a
-#:   generic landing page and drops the id on the way.
+#: ``playernews`` does read ``playerId``, which the first pass at this missed
+#: -- the route was listed as existing and never tried with an id on it.
+#: Verified three ways on 2026-10-27: ``playerId=1966`` renders exactly one
+#: headshot and it is LeBron's, ``playerId=3133628`` renders exactly Myles
+#: Turner's, and dropping the parameter gives the whole league's news feed
+#: instead. So this is a real per-player page, not a list he happens to be on.
 #:
-#: So the closest thing that exists is this league's player list narrowed to
-#: the man's own NBA team, which is about fifteen rows with him among them --
-#: carrying the fantasy points, the ownership and the projections that the NBA
-#: page does not have, and one tap from his card.
-FANTASY_URL = "https://fantasy.espn.com/basketball/players/add"
-
-#: ``ALL`` rather than the default ``AVAILABLE``. The filter ids come out of
-#: the same bundle: ``ALL``, ``AVAILABLE``, ``TODAY``, ``FREEAGENT``,
-#: ``WAIVERS``, ``ONTEAM``. Most names on this page are players we already
-#: roster, and the default availability filter hides exactly those.
-FANTASY_STATUS = "ALL"
+#: It carries his injury status and ESPN's "Spin" on each note, which is the
+#: half of a start/sit this app does not already compute for itself. It does
+#: not carry his stat line -- ESPN's own card links out to
+#: ``espn.com/nba/player/stats`` for that, which is the page the owner already
+#: rejected as "not as helpful", so the trade is the right way round.
+FANTASY_URL = "https://fantasy.espn.com/basketball/playernews"
 
 
-def _player_href(player_id: Any, league: Any = None,
-                 pro_team: Any = None) -> Optional[str]:
+def _player_href(player_id: Any, league: Any = None) -> Optional[str]:
     """Where a player's name points, or ``None`` if nowhere useful.
 
-    Fantasy when the league is known, which is everywhere a name is rendered
-    beside a roster; the NBA page otherwise, which is where a row written
-    before the league was carried still lands.
+    His fantasy page when the league is known, which is everywhere a name is
+    rendered beside a roster; the NBA page otherwise, which is where a row
+    written before the league was carried still lands.
 
     Numbers only, built with ``%d`` rather than escaped with ``_e``: the only
-    safe thing to interpolate into a URL is an integer, and every component
-    here is one. ``&amp;`` because the result goes straight into an attribute.
+    safe thing to interpolate into a URL is an integer, and both components
+    here are ones.
     """
-    # The id is checked first and used last. The fantasy URL does not carry
-    # it -- ESPN has nowhere to put it -- but a name we cannot resolve to a
-    # player is a name we should not be linking at all: without the id there
-    # is no pro team either, so the list would not be narrowed to him, and
-    # "this player" would resolve to "some players".
+    # Both ids or neither: the fantasy page needs the league to scope itself
+    # and the player to be about anybody, and a name we cannot resolve to a
+    # player is a name we should not be linking at all.
     try:
         pid = int(player_id)
     except (TypeError, ValueError):
@@ -1737,32 +1728,26 @@ def _player_href(player_id: Any, league: Any = None,
     except (TypeError, ValueError):
         lid = None
     if lid is not None:
-        query = ["leagueId=%d" % lid, "status=%s" % FANTASY_STATUS]
-        try:
-            # 0 is ESPN's "no pro team" and would filter to an empty list.
-            team = int(pro_team or 0)
-        except (TypeError, ValueError):
-            team = 0
-        if team:
-            query.append("proTeamId=%d" % team)
-        return "%s?%s" % (FANTASY_URL, "&amp;".join(query))
+        # ``&amp;`` because the result goes straight into an attribute.
+        return "%s?leagueId=%d&amp;playerId=%d" % (FANTASY_URL, lid, pid)
     return PLAYER_URL % pid
 
 
 def _who(player_id: Any, name: Any, cls: str = "who", *,
-         league: Any = None, pro_team: Any = None) -> str:
+         league: Any = None) -> str:
     """A player's name, linked to where a reader would want to go next.
 
     Every name on this page names a real player somebody may want to read up
-    on mid-decision, and what they want is the fantasy view -- what he has
-    scored, who else owns him -- not his NBA averages. New tab, because the
-    page it leaves is the one with the Approve button on it.
+    on mid-decision, and what they want is the fantasy view of *him* -- is he
+    hurt, is he starting -- not his NBA averages and not a list of fifteen
+    men he is one of. New tab, because the page it leaves is the one with the
+    Approve button on it.
 
     A name we cannot build any link for renders as bare text rather than as a
     link to nowhere.
     """
     label = _e(name)
-    href = _player_href(player_id, league, pro_team)
+    href = _player_href(player_id, league)
     if href is None:
         return "<span class=%s>%s</span>" % (cls, label)
     # noopener as well as noreferrer: the new tab must not keep a handle on
@@ -2817,8 +2802,7 @@ def _mside(row: Optional[Mapping[str, Any]], side: str,
         return "<div class='mside %s'><span class=mmeta>—</span></div>" % side
     return ("<div class='mside %s'>%s<div class=mwho>%s%s</div>%s</div>" % (
         side, _face(row["pid"]),
-        _who(row["pid"], _short_name(row["name"]), league=league,
-             pro_team=row.get("pro_team")),
+        _who(row["pid"], _short_name(row["name"]), league=league),
         _meta(row, "mmeta"), _points(row["points"], "mpts"),
     ))
 
@@ -2952,8 +2936,7 @@ def _seat_row(row: Optional[Mapping[str, Any]], slot: int,
             1 if row["locked"] else 0,
             field,
             _face(row["pid"]),
-            _who(row["pid"], row["name"], league=league,
-                 pro_team=row.get("pro_team")),
+            _who(row["pid"], row["name"], league=league),
             _meta(row),
             _points(row["points"]),
             empty,

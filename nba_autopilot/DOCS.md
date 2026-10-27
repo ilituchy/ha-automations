@@ -443,18 +443,20 @@ re-read from ESPN, not the form you posted — so what you see is what ESPN has.
 Only the Home Assistant user in `ha_owner_user_id` can save a lineup or
 approve a swap, which is the same check the notification buttons use.
 
-**Player names are links.** They open ESPN's fantasy player list for that
-league, narrowed to that player's NBA team — about fifteen rows with him among
-them, showing fantasy points, how widely he is rostered and his projections,
-and one tap from his card.
+**Player names are links.** They open ESPN's fantasy page for *that player*
+in that league — his injury status and ESPN's note and "Spin" on each piece of
+news about him, which is the half of a start/sit this app does not work out
+for itself.
 
-They do not open his own fantasy page, because ESPN does not have one to open:
-fantasy basketball has no per-player URL. Its only `/basketball` routes are
-`league`, `league/settings`, `team`, `boxscore`, `recentactivity`, `playernews`
-and `players/add`; `players/add` ignores a `playerId`; and the old
-`games.espn.com/fba/playercard` redirect drops the id on the way. A name whose
-league is not recorded — a run journaled before that column existed — falls
-back to his page on espn.com instead.
+They do not open the card you get by clicking a name inside ESPN's own tables,
+the one with his position rank and percent rostered, because **that card has no
+URL**. It is client state: in ESPN's own pages the name is an `<a>` with no
+`href`, and the address bar does not move when the card opens. `playercard`,
+`player/card` and `player` all render "Page not found", and the old
+`games.espn.com/fba/playercard` redirect drops the id on the way. For his stat
+line, ESPN's own card links out to espn.com — which is also where a name whose
+league is not recorded falls back to, since a run journaled before that column
+existed has no league to scope the fantasy page with.
 
 Lineups you set by hand are written through the same path the scheduled runs
 use, so they are journalled the same way. The next scheduled run will

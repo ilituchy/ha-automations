@@ -8,6 +8,30 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **Every player name linked to the same page.** A name opened the league's
+  player *list* narrowed to his NBA team, which was the closest thing found
+  the first time this was looked at. Two things were wrong with it. The page
+  is a list, not a player — he was one of about fifteen rows on it. And three
+  of the four places a name is rendered never passed the NBA team the filter
+  needed, so those names fell back to the unfiltered list of every player in
+  the league: the add/drop queue, the history, and both legs of every swap all
+  pointed at one identical URL.
+
+  A name now opens `playernews?leagueId=&playerId=`, which is a page about
+  that one man — his injury status and ESPN's note and "Spin" on each piece of
+  news about him. That route was listed as existing in the previous note and
+  never tried with an id on it; it does read one. Verified by loading
+  `playerId=1966` and `playerId=3133628` and confirming each renders exactly
+  one headshot and that it is the right man's, and that dropping the parameter
+  gives the whole league's news feed instead.
+
+  The card with position rank and percent rostered still has no URL, and this
+  time that was established by opening it rather than by inference: in ESPN's
+  own tables a player's name is an `<a>` carrying no `href`, and `location.href`
+  does not change when the card opens. `playercard`, `player/card` and `player`
+  all render ESPN's "Page not found". ESPN's own card links out to
+  `espn.com/nba/player/stats` for the stat line.
+
 - **A triple-double was not being paid as a double-double.** ESPN's bonus
   counters are cumulative, not mutually exclusive: of the **149** triple-doubles
   in the 2024-25 season archive, **149** also carry stat 37. The model read
