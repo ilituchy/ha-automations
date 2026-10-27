@@ -46,6 +46,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import parse_qs, quote
 
@@ -82,6 +83,57 @@ def _loads(raw: Any, default: Any) -> Any:
         return default
 
 
+def _news_for(player_id: int) -> List[Any]:
+    """Recent notes about a player, or none.
+
+    Imported here rather than at the top of the module for the reason stated
+    there: everything this module imports at load time is constants, and
+    ``espn.news`` pulls in ``httpx``. It is also the only call on the page
+    that reaches a host outside the league API, so keeping it visible at its
+    one call site is worth a line.
+    """
+    from espn import news
+
+    return news.fetch(int(player_id))
+
+
+#: ESPN's ``status`` when nobody rosters him. ``ONTEAM`` is deliberately absent:
+#: it is answered by the team's name, and falling back to the word "On a team"
+#: would hide a team lookup that failed.
+ACQUISITION_WORDS = {
+    "FREEAGENT": "Free agent",
+    "WAIVERS": "On waivers",
+}
+
+
+def _split_row(split: Any) -> Dict[str, Any]:
+    """One row of the Stats table."""
+    return {
+        "label": split.label, "games": split.games,
+        "min": split.minutes, "pts": split.points, "reb": split.rebounds,
+        "ast": split.assists, "stl": split.steals, "blk": split.blocks,
+        "to": split.turnovers,
+        "fpts": split.fantasy_total, "avg": split.fantasy_average,
+    }
+
+
+def _news_row(item: Any, tz: Any) -> Dict[str, Any]:
+    """One Rotowire note, with its timestamp in the reader's own zone."""
+    when = item.published
+    if when is not None and tz is not None:
+        try:
+            when = when.astimezone(tz)
+        except Exception:  # noqa: BLE001
+            pass
+    return {
+        "when": "" if when is None else "%s %d, %s" % (
+            when.strftime("%b"), when.day, _clock(when)),
+        "source": item.source,
+        "headline": item.headline,
+        "spin": item.spin,
+    }
+
+
 class StatusPage:
     """Builds the view model. Separated from routing so it is testable without HTTP."""
 
@@ -106,6 +158,11 @@ class StatusPage:
         #: because ``create_app`` builds one page and both handlers close over
         #: it, so this outlives a request the way a cache has to.
         self._live: Dict[Any, Tuple[float, Optional[Dict[str, Any]]]] = {}
+        #: ``(league, player) -> (deadline, view)``. Same reasoning as
+        #: ``_live``: one page object outlives every request, and a card
+        #: costs two ESPN reads that nothing on the page can fall back on.
+        self._card_cache: Dict[Tuple[Any, int],
+                               Tuple[float, Dict[str, Any]]] = {}
 
     def league_label(self, league_id: Optional[int]) -> str:
         for lg in getattr(self.bot, "leagues", []):
@@ -541,6 +598,23 @@ class StatusPage:
         except Exception:  # noqa: BLE001
             return "d%d" % int(period)
 
+    def _log_day(self, period: int) -> str:
+        """``10/26``, which is how ESPN's own game log dates a row.
+
+        Shorter than :meth:`_day_label` on purpose: the game log is eight
+        numeric columns wide before the date column is counted, and "Mon, Oct
+        26" spends a fifth of a phone saying which weekday it was.
+        """
+        cal = self._calendar()
+        if cal is not None and getattr(cal, "trustworthy", False):
+            try:
+                day = cal.date_of(int(period))
+            except Exception:  # noqa: BLE001
+                pass
+            else:
+                return "%d/%d" % (day.month, day.day)
+        return "day %d" % int(period)
+
     def _day_label(self, period: int) -> str:
         """``Sat, Oct 24`` for a scoring period, or ``day 5`` without a calendar.
 
@@ -711,6 +785,136 @@ class StatusPage:
             "roster": [_row(d, games, tz)
                        for d in (rosters.get(team_id) or [])],
         }
+
+    # -- the player card ---------------------------------------------------
+
+    #: How long one player's card is reused. Longer than a live score, because
+    #: none of it changes within a game: the game log gains a row when a game
+    #: finishes and the news gains one when Rotowire files. Short enough that
+    #: a note filed during the morning is on the card by the time the lineup
+    #: is being set.
+    CARD_TTL = 180.0
+
+    #: How many cards are held at once. Comfortably more than two rosters, so
+    #: the page a reader is actually working on never evicts itself.
+    CARD_MAX = 120
+
+    async def player_view(self, league_id: Any, player_id: Any) -> Dict[str, Any]:
+        lg = self.league_by_id(league_id)
+        if lg is None:
+            return {"error": "That league is not configured."}
+        try:
+            pid = int(player_id)
+        except (TypeError, ValueError):
+            return {"error": "That is not a player id."}
+        try:
+            return await asyncio.to_thread(self._player_view, lg, pid)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not build the card for player %s in %s: %s",
+                        pid, league_id, exc)
+            return {"league_id": lg.ref.league_id,
+                    "error": "Could not read this player from ESPN."}
+
+    def _player_view(self, lg: Any, pid: int) -> Dict[str, Any]:
+        """The card, flattened to strings. See ``_row`` on why it stops here.
+
+        Two network reads, and the news one cannot fail the page: it is the
+        half that is nice to have, while the stats and the game log are the
+        half somebody opened this to see.
+        """
+        cached = self._card_cache.get((lg.ref.league_id, pid))
+        if cached is not None and cached[0] > time.monotonic():
+            return cached[1]
+
+        settings = self._settings(lg)
+        period = int(settings.current_scoring_period)
+        card = lg.read.player_card(pid, period)
+        if card is None:
+            return {"league_id": lg.ref.league_id,
+                    "error": "ESPN has no player with that id."}
+
+        manager = ""
+        if card.on_team_id:
+            try:
+                manager = lg.read.team_names().get(card.on_team_id, "")
+            except Exception as exc:  # noqa: BLE001
+                log.debug("could not name team %s: %s", card.on_team_id, exc)
+        if not manager:
+            manager = ACQUISITION_WORDS.get(card.acquisition_status, "")
+
+        status_cls, status_word = STATUS_WORDS.get(card.injury_status, ("", ""))
+        view = {
+            "league": self.league_label(lg.ref.league_id),
+            "league_id": lg.ref.league_id,
+            "pid": card.player_id,
+            "name": card.name,
+            "team": ids.pro_team(card.pro_team_id),
+            "positions": ", ".join(card.positions),
+            "status": status_cls,
+            "status_word": status_word or "Healthy",
+            "rank": card.position_rank,
+            "owned": card.percent_owned,
+            "manager": manager,
+            "outlook": card.outlook,
+            "splits": [_split_row(s) for s in card.splits],
+            "log": self._game_log(card, period),
+            "news": [_news_row(n, self.tz()) for n in _news_for(card.player_id)],
+        }
+        self._remember_card((lg.ref.league_id, pid), view)
+        return view
+
+    def _remember_card(self, key: Tuple[Any, int], view: Dict[str, Any]) -> None:
+        """Cache one card, dropping the entries that have expired.
+
+        Bounded because this process runs for months and the key space is
+        every player in the league, not just the ones on a roster: browsing
+        the free agent pool would otherwise leave a card in memory for each
+        name looked at, for the rest of the season. The sweep is only paid
+        for once the cache is bigger than a roster or two.
+        """
+        now = time.monotonic()
+        if len(self._card_cache) >= self.CARD_MAX:
+            for stale in [k for k, (until, _) in self._card_cache.items()
+                          if until <= now]:
+                del self._card_cache[stale]
+            # Every entry still live and the cache still full: the oldest
+            # deadline is the one closest to being useless anyway.
+            if len(self._card_cache) >= self.CARD_MAX:
+                del self._card_cache[min(
+                    self._card_cache, key=lambda k: self._card_cache[k][0])]
+        self._card_cache[key] = (now + self.CARD_TTL, view)
+
+    def _game_log(self, card: Any, period: int) -> List[Dict[str, Any]]:
+        """His games, newest first, each with the fixture it was played in.
+
+        The opponent is looked up against the team on the row rather than
+        against his team today, so a traded player's October fixtures stay
+        his October team's. ``pro_games`` is keyed by scoring period, which is
+        what the row carries.
+        """
+        try:
+            schedule = (self.bot.pro_games() or {}) if hasattr(
+                self.bot, "pro_games") else {}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not read the pro schedule for a card: %s", exc)
+            schedule = {}
+        out = []
+        for row in card.game_log:
+            game = (schedule.get(row.scoring_period) or {}).get(row.pro_team)
+            opp = ""
+            if game is not None:
+                opp = "%s%s" % ("" if game.home else "@",
+                                ids.pro_team(game.opponent_id))
+            out.append({
+                "sp": row.scoring_period,
+                "day": self._log_day(row.scoring_period),
+                "opp": opp,
+                "today": row.scoring_period == int(period),
+                "min": row.minutes, "pts": row.points, "reb": row.rebounds,
+                "ast": row.assists, "stl": row.steals, "blk": row.blocks,
+                "to": row.turnovers, "fpts": row.fantasy_points,
+            })
+        return out
 
     def stuck(self) -> List[Mapping[str, Any]]:
         return self.bot.store.stuck_writes()
@@ -1465,6 +1669,86 @@ footer {
   margin-top: 28px; text-align: center;
   font-size: 12px; color: var(--secondary-text-color, var(--faint));
 }
+
+/* -- the player card -- */
+/* Shared by the dialog and the standalone page, so one set of rules styles
+   both and the two cannot drift apart. */
+#pcard {
+  border: 0; padding: 0; width: min(560px, calc(100vw - 24px));
+  max-height: min(86vh, 860px); border-radius: 16px;
+  background: var(--card-background-color, var(--card));
+  color: var(--primary-text-color, var(--fg));
+  box-shadow: var(--lift); overflow: hidden;
+}
+#pcard::backdrop { background: rgba(8, 9, 12, .55); }
+#pcard .pbody { max-height: inherit; overflow-y: auto; padding: 0 0 4px; }
+.pclose { position: sticky; top: 0; z-index: 2; height: 0; text-align: right; }
+.pclose button {
+  position: relative; top: 8px; right: 8px;
+  width: 30px; height: 30px; border: 0; border-radius: 999px; cursor: pointer;
+  font-size: 19px; line-height: 1;
+  background: var(--chip); color: var(--secondary-text-color, var(--dim));
+}
+.pclose button:hover { color: var(--primary-text-color, var(--fg)); }
+
+.pcard { padding: 4px 0 0; }
+.phero { display: flex; align-items: center; gap: 12px; padding: 16px 16px 12px; }
+.face.big { flex: 0 0 56px; height: 56px; }
+.pwho { min-width: 0; flex: 1; }
+/* The page-wide ``h2`` is a small uppercase section heading. This one is a
+   man's name, so every one of those declarations has to be undone. */
+.pwho h2 {
+  display: block; margin: 0; font-size: 19px; line-height: 1.2;
+  font-weight: 650; text-transform: none; letter-spacing: -.01em;
+  color: var(--primary-text-color, var(--fg));
+}
+.psub { font-size: 13px; color: var(--secondary-text-color, var(--dim)); }
+.pfacts {
+  display: grid; grid-template-columns: repeat(2, auto); gap: 2px 14px;
+  margin: 0; text-align: right; font-size: 12.5px;
+}
+.pfacts div { display: contents; }
+.pfacts dt { color: var(--secondary-text-color, var(--faint)); }
+.pfacts dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.pfacts dd.out { color: var(--bad); }
+.pfacts dd.dtd { color: var(--warn); }
+
+.pblock { border-top: 1px solid var(--line); padding: 12px 16px 14px; }
+.pblock h3 {
+  margin: 0 0 8px; font-size: 12px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--secondary-text-color, var(--faint));
+}
+/* The eight stat columns do not fit a phone, and shrinking them to fit is
+   how a table becomes unreadable. It scrolls sideways instead. */
+.pscroll { overflow-x: auto; margin: 0 -16px; padding: 0 16px; }
+.ptab { border-collapse: collapse; width: 100%; font-size: 13px;
+        font-variant-numeric: tabular-nums; }
+.ptab th, .ptab td { padding: 5px 0 5px 10px; text-align: right;
+                     white-space: nowrap; }
+.ptab thead th {
+  font-size: 11px; font-weight: 600; color: var(--secondary-text-color, var(--faint));
+  border-bottom: 1px solid var(--line);
+}
+.ptab tbody tr + tr th, .ptab tbody tr + tr td { border-top: 1px solid var(--line); }
+.ptab .plab { text-align: left; padding-left: 0; font-weight: 500; }
+.ptab .popp { text-align: left; color: var(--secondary-text-color, var(--dim)); }
+.ptab .gp { color: var(--secondary-text-color, var(--faint)); }
+/* The fantasy number leads, and is the only one with weight: the rest of the
+   row is the evidence for it. */
+.ptab .fpts { font-weight: 700; padding-right: 4px;
+              box-shadow: inset -1px 0 0 var(--line); }
+.ptab thead .fpts { box-shadow: none; }
+.ptab tr.today { background: var(--good-bg); }
+
+.pnews + .pnews { margin-top: 12px; padding-top: 12px;
+                  border-top: 1px solid var(--line); }
+.pwhen { font-size: 11px; letter-spacing: .03em; text-transform: uppercase;
+         color: var(--secondary-text-color, var(--faint)); }
+.phead2 { margin: 3px 0 0; font-size: 13.5px; font-weight: 600; }
+.pspin { margin: 5px 0 0; font-size: 13px; line-height: 1.5;
+         color: var(--secondary-text-color, var(--dim)); }
+.pspin b { color: var(--primary-text-color, var(--fg)); margin-right: 3px; }
+.pnone { margin: 0; font-size: 13px; color: var(--secondary-text-color, var(--dim)); }
 """
 
 #: The one script this app ships, and the only page that loads it.
@@ -1483,6 +1767,74 @@ footer {
 #:
 #: Inline rather than a file for the same reason the stylesheet is: serving a
 #: second file needs the static mount this module deliberately does not have.
+#: Opens a player's card over whatever page you were on.
+#:
+#: A progressive enhancement, deliberately: the name is a real link to a real
+#: page, and everything here is an optimisation on top of that. If the script
+#: does not run, if ``<dialog>`` is unsupported, or if the fetch fails, the
+#: click is left alone and the browser navigates -- which lands on the same
+#: markup, rendered as a page.
+#:
+#: Why it is worth having at all: the page a name sits on is usually the one
+#: with the Approve button, and "read about him, then decide" should not cost
+#: a navigation away from the decision and back.
+#:
+#: Modified clicks are left alone too, so middle-click and cmd-click still
+#: open a tab -- the behaviour anybody who wants two players side by side
+#: will reach for.
+CARD_JS = """<script>
+(function () {
+  var dlg = document.getElementById('pcard');
+  if (!dlg || typeof dlg.showModal !== 'function' || !window.fetch) return;
+  var body = dlg.querySelector('.pbody');
+  var token = 0;
+
+  function plain(e) {
+    return !e.defaultPrevented && e.button === 0 && !e.metaKey &&
+           !e.ctrlKey && !e.shiftKey && !e.altKey;
+  }
+
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest ? e.target.closest('a[data-card]') : null;
+    if (!a || !plain(e)) return;
+    e.preventDefault();
+    var mine = ++token;
+    body.innerHTML = '<p class=pnone>Reading ESPN\u2026</p>';
+    dlg.showModal();
+    fetch(a.getAttribute('href') + '&frag=1', { credentials: 'same-origin' })
+      .then(function (r) {
+        if (!r.ok) throw new Error(r.status);
+        return r.text();
+      })
+      .then(function (html) {
+        // A second click while the first is in flight must not have its card
+        // overwritten by the slower one arriving late.
+        if (mine === token) body.innerHTML = html;
+      })
+      .catch(function () {
+        // The link still works; send them there rather than explaining.
+        if (mine === token) window.location = a.getAttribute('href');
+      });
+  });
+
+  // Clicking the backdrop closes it. The dialog fills its own box, so a click
+  // landing on the element itself landed outside the card.
+  dlg.addEventListener('click', function (e) {
+    if (e.target === dlg) dlg.close();
+  });
+  dlg.addEventListener('close', function () { body.innerHTML = ''; });
+})();
+</script>"""
+
+#: The empty shell the script fills. Rendered on every page that shows a name,
+#: and inert until something opens it.
+CARD_SHELL = (
+    "<dialog id=pcard><form method=dialog class=pclose>"
+    "<button aria-label=Close>&times;</button></form>"
+    "<div class=pbody></div></dialog>"
+)
+
+
 DRAG_JS = """<script>
 (function () {
   var form = document.getElementById('lineup');
@@ -1708,15 +2060,21 @@ FANTASY_URL = "https://fantasy.espn.com/basketball/playernews"
 def _player_href(player_id: Any, league: Any = None) -> Optional[str]:
     """Where a player's name points, or ``None`` if nowhere useful.
 
-    His fantasy page when the league is known, which is everywhere a name is
-    rendered beside a roster; the NBA page otherwise, which is where a row
-    written before the league was carried still lands.
+    **This app's own card** when the league is known, which is everywhere a
+    name is rendered beside a roster. It is a relative href like every other
+    URL this module emits, so it resolves inside the ingress prefix; and it is
+    a real page, not only what the dialog fetches, so a middle click and a
+    reader without JavaScript both land somewhere that works.
+
+    ESPN's own page otherwise -- a row journaled before the league column
+    existed has no league to scope a card with, and a card is league-scoped
+    because *"who has him"* is most of the question.
 
     Numbers only, built with ``%d`` rather than escaped with ``_e``: the only
     safe thing to interpolate into a URL is an integer, and both components
     here are ones.
     """
-    # Both ids or neither: the fantasy page needs the league to scope itself
+    # Both ids or neither: the card needs the league to say who rosters him
     # and the player to be about anybody, and a name we cannot resolve to a
     # player is a name we should not be linking at all.
     try:
@@ -1729,7 +2087,7 @@ def _player_href(player_id: Any, league: Any = None) -> Optional[str]:
         lid = None
     if lid is not None:
         # ``&amp;`` because the result goes straight into an attribute.
-        return "%s?leagueId=%d&amp;playerId=%d" % (FANTASY_URL, lid, pid)
+        return "player?league=%d&amp;id=%d" % (lid, pid)
     return PLAYER_URL % pid
 
 
@@ -1738,10 +2096,15 @@ def _who(player_id: Any, name: Any, cls: str = "who", *,
     """A player's name, linked to where a reader would want to go next.
 
     Every name on this page names a real player somebody may want to read up
-    on mid-decision, and what they want is the fantasy view of *him* -- is he
-    hurt, is he starting -- not his NBA averages and not a list of fifteen
-    men he is one of. New tab, because the page it leaves is the one with the
-    Approve button on it.
+    on mid-decision, and what they want is his card -- what he has scored, who
+    has him, whether he is hurt.
+
+    ``data-card`` is what :data:`CARD_JS` hooks to open that card over this
+    page instead of navigating away from it, which matters because the page it
+    would be leaving is the one with the Approve button on it. It is set only
+    on our own card links: an ESPN fallback still navigates, in a new tab, and
+    carries the ``rel`` that keeps the opened tab from holding a handle on the
+    authenticated frontend.
 
     A name we cannot build any link for renders as bare text rather than as a
     link to nowhere.
@@ -1750,8 +2113,8 @@ def _who(player_id: Any, name: Any, cls: str = "who", *,
     href = _player_href(player_id, league)
     if href is None:
         return "<span class=%s>%s</span>" % (cls, label)
-    # noopener as well as noreferrer: the new tab must not keep a handle on
-    # the authenticated frontend it was opened from.
+    if href.startswith("player?"):
+        return "<a class='%s' href='%s' data-card>%s</a>" % (cls, href, label)
     return ("<a class='%s' href='%s' target=_blank "
             "rel='noopener noreferrer'>%s</a>" % (cls, href, label))
 
@@ -2337,9 +2700,18 @@ def _open(title: str) -> str:
 
 
 def _close(user: str = "") -> str:
+    """The foot of every page, plus the empty card dialog and its script.
+
+    Here rather than on each page because every page this app serves renders
+    player names, and a name whose card did not open on one of them would be
+    a difference with no reason behind it. Both are inert until a name is
+    clicked, and the markup is a few hundred bytes.
+    """
     out = []
     if user:
         out.append("<footer>signed in as %s</footer>" % _e(user))
+    out.append(CARD_SHELL)
+    out.append(CARD_JS)
     out.append("</main></body></html>")
     return "".join(out)
 
@@ -2579,6 +2951,206 @@ def render(page: StatusPage, *, user: str = "",
 
 
 # -- the matchup sheet ------------------------------------------------------
+
+
+# -- the player card -------------------------------------------------------
+
+
+def _n1(value: Any) -> str:
+    """One decimal place, rounded **half up**, the way ESPN rounds.
+
+    ``"%.1f" % 7.25`` is ``"7.2"`` in Python and ``7.3`` on ESPN's card: the
+    C format uses the current rounding mode, which is round-half-to-even. The
+    whole point of this page is that it can be held up against ESPN's own, so
+    a column that disagrees in the last digit reads as a bug in the app even
+    when the app is right.
+    """
+    try:
+        return str(Decimal(str(float(value))).quantize(
+            Decimal("0.1"), rounding=ROUND_HALF_UP))
+    except (TypeError, ValueError, ArithmeticError):
+        return "&mdash;"
+
+
+#: The box-score columns, in ESPN's own order. One tuple so the headings and
+#: the cells cannot drift apart.
+#:
+#: The fantasy number is **not** in here. ESPN puts it last, which on a phone
+#: is a column nine of ten and therefore the one off the right edge of a table
+#: that has to scroll -- and it is the column the table is being read for. It
+#: is rendered first instead, immediately after the row's label, where
+#: scrolling cannot take it away. Pinning it there with ``position: sticky``
+#: was tried first and is worse: the pinned cell sits over whichever column
+#: happens to be under it, so the numbers it covers show through around its
+#: edges.
+CARD_COLUMNS = (
+    ("MIN", "min"), ("PTS", "pts"), ("REB", "reb"), ("AST", "ast"),
+    ("STL", "stl"), ("BLK", "blk"), ("TO", "to"),
+)
+
+
+def _stat_cells(row: Mapping[str, Any]) -> str:
+    """The seven box-score numbers."""
+    return "".join("<td>%s</td>" % _n1(row.get(key))
+                   for _, key in CARD_COLUMNS)
+
+
+def _card_head(view: Mapping[str, Any]) -> str:
+    """Headshot, name, and the five facts ESPN puts beside it."""
+    bits = [
+        "<div class=phero>",
+        _face(view.get("pid"), "big"),
+        "<div class=pwho><h2>%s</h2><div class=psub>%s</div></div>" % (
+            _e(view.get("name") or "Player"),
+            _e(" &middot; ".join(  # noqa: FLY002
+                b for b in (view.get("team"), view.get("positions")) if b)
+            ).replace("&amp;middot;", "&middot;"),
+        ),
+        "<dl class=pfacts>",
+    ]
+    rank = view.get("rank")
+    owned = view.get("owned")
+    season = (view.get("splits") or [{}])[0]
+    facts = [
+        ("Avg points", "" if not season.get("games")
+         else _n1(season.get("avg"))),
+        ("Position rank", "" if rank is None else "#%d" % int(rank)),
+        ("Rostered", "" if owned is None else "%s%%" % _n1(owned)),
+        ("Manager", view.get("manager") or ""),
+    ]
+    for label, value in facts:
+        if not value:
+            continue
+        bits.append("<div><dt>%s</dt><dd>%s</dd></div>" % (
+            _e(label), _e(value)))
+    bits.append("<div><dt>Status</dt><dd class='%s'>%s</dd></div>" % (
+        _e(view.get("status") or ""), _e(view.get("status_word") or "")))
+    bits.append("</dl></div>")
+    return "".join(bits)
+
+
+def _distinct_windows(splits: Any) -> List[Mapping[str, Any]]:
+    """Drop a trailing window that contains the same games as the one above it.
+
+    The windows nest, so two of them covering the same number of games cover
+    the same games -- and in the first fortnight of a season all four do. Four
+    identical rows read as a bug rather than as "he has only played four
+    times", which is what they actually mean, and the Season row already says
+    it.
+    """
+    out: List[Mapping[str, Any]] = []
+    for row in splits:
+        if out and int(row.get("games") or 0) == int(out[-1].get("games") or 0):
+            continue
+        out.append(row)
+    return out
+
+
+def _card_stats(view: Mapping[str, Any]) -> str:
+    """The Stats table: one row per window.
+
+    ``avg`` as well as the total, because the total alone is unreadable across
+    windows of different lengths -- 85.5 over a season and 85.5 over seven
+    days are the same number about very different players.
+    """
+    rows = _distinct_windows(view.get("splits") or [])
+    if not rows:
+        return ""
+    # Fantasy points **per game**, not the window total: 85.5 over a season
+    # and 85.5 over seven days are the same number about very different
+    # players, and comparing the windows is the only reason to show more than
+    # one of them.
+    out = ["<section class=pblock><h3>Stats</h3>",
+           "<div class=pscroll><table class=ptab><thead><tr><th>Split</th>"
+           "<th class=gp>GP</th><th class=fpts>FP/G</th>"]
+    out.extend("<th>%s</th>" % _e(h) for h, _ in CARD_COLUMNS)
+    out.append("</tr></thead><tbody>")
+    for row in rows:
+        out.append(
+            "<tr><th class=plab>%s</th><td class=gp>%s</td>"
+            "<td class=fpts>%s</td>%s</tr>" % (
+                _e(row.get("label") or ""), _e(str(row.get("games") or 0)),
+                _n1(row.get("avg")), _stat_cells(row)))
+    out.append("</tbody></table></div></section>")
+    return "".join(out)
+
+
+def _card_log(view: Mapping[str, Any]) -> str:
+    """The game log, newest first. Games he played, not games scheduled."""
+    rows = view.get("log") or []
+    if not rows:
+        return ("<section class=pblock><h3>Game log</h3>"
+                "<p class=pnone>No games played yet this season.</p></section>")
+    out = ["<section class=pblock><h3>Game log</h3>",
+           "<div class=pscroll><table class=ptab><thead><tr><th>Date</th>"
+           "<th class=popp>Opp</th><th class=fpts>FPTS</th>"]
+    out.extend("<th>%s</th>" % _e(h) for h, _ in CARD_COLUMNS)
+    out.append("</tr></thead><tbody>")
+    for row in rows:
+        out.append("<tr%s><th class=plab>%s</th><td class=popp>%s</td>"
+                   "<td class=fpts>%s</td>%s</tr>"
+                   % (" class=today" if row.get("today") else "",
+                      _e(row.get("day") or ""), _e(row.get("opp") or "&mdash;"),
+                      _n1(row.get("fpts")), _stat_cells(row)))
+    out.append("</tbody></table></div></section>")
+    return "".join(out)
+
+
+def _card_news(view: Mapping[str, Any]) -> str:
+    """Recent notes. The Spin is the half worth reading; it is not truncated.
+
+    Every string here is ESPN's, so every string here is escaped. This is the
+    one block on the page whose content is prose written by somebody else.
+    """
+    rows = view.get("news") or []
+    if not rows:
+        return ("<section class=pblock><h3>Recent news</h3>"
+                "<p class=pnone>Nothing filed in the last 30 days.</p>"
+                "</section>")
+    out = ["<section class=pblock><h3>Recent news</h3>"]
+    for row in rows:
+        out.append("<article class=pnews><div class=pwhen>%s</div>"
+                   "<p class=phead2>%s</p>" % (
+                       _e(row.get("when") or ""),
+                       _e(row.get("headline") or "")))
+        if row.get("spin"):
+            out.append("<p class=pspin><b>Spin</b> %s</p>"
+                       % _e(row["spin"]))
+        out.append("</article>")
+    out.append("</section>")
+    return "".join(out)
+
+
+def player_card_html(view: Mapping[str, Any]) -> str:
+    """The card itself, with no page around it.
+
+    Served on its own so the dialog can drop it straight into the page that
+    opened it, and reused by :func:`render_player` so the standalone page and
+    the dialog cannot show different things.
+    """
+    if view.get("error"):
+        return "<div class='card empty solo'><b>%s</b>%s</div>" % (
+            _e(view["error"]),
+            "Nothing has been changed.")
+    return "<div class=pcard>%s%s%s%s</div>" % (
+        _card_head(view), _card_stats(view), _card_log(view), _card_news(view))
+
+
+def render_player(page: StatusPage, view: Mapping[str, Any],
+                  *, user: str = "") -> str:
+    """One player, as a page of his own.
+
+    This is what the link actually points at. The dialog is an enhancement
+    layered over it, so with no JavaScript -- or in a new tab, which is where
+    a middle click still sends it -- the same markup is a page that works.
+    """
+    name = view.get("name") or "Player"
+    return "".join([
+        _open("%s" % name),
+        "<a class=back href='.'>&larr; Overview</a>",
+        player_card_html(view),
+        _close(user),
+    ])
 
 
 def render_matchup(page: StatusPage, view: Mapping[str, Any],
@@ -3268,6 +3840,23 @@ def build_app(bot: Any):
             note=request.query_params.get("note") or "",
             bad=request.query_params.get("bad") == "1",
         ))
+
+    @app.get("/player", response_class=HTMLResponse)
+    async def player(request: Request):
+        """One player's card. ``frag=1`` returns it without the page around it.
+
+        The fragment is what the dialog fetches; the full page is what the
+        link resolves to on its own. Same view model either way, so the two
+        cannot disagree.
+        """
+        _, name = identify(request)
+        order = page.league_order()
+        wanted = request.query_params.get("league") or (
+            order[0] if order else "")
+        view = await page.player_view(wanted, request.query_params.get("id"))
+        if request.query_params.get("frag") == "1":
+            return HTMLResponse(player_card_html(view))
+        return HTMLResponse(render_player(page, view, user=name))
 
     @app.post("/lineup")
     async def lineup(request: Request):

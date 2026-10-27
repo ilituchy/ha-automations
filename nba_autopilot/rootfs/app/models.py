@@ -515,3 +515,111 @@ class RunRecord:
     moves: tuple
     shadow_mode: bool
     notes: tuple = field(default_factory=tuple)
+
+
+# ---------------------------------------------------------------------------
+# the player card
+# ---------------------------------------------------------------------------
+#
+# What ESPN shows when you click a name in its own tables, rebuilt here because
+# that card is client state with no URL of its own -- in ESPN's markup the name
+# is an ``<a>`` carrying no ``href``, and the address bar does not move when it
+# opens. See ``web.FANTASY_URL``.
+#
+# These four types are *display* types. Nothing in ``solve/`` reads them, and
+# they deliberately carry ESPN's own applied fantasy points rather than a
+# number recomputed here: the card exists to be checked against ESPN's, so a
+# rounding difference between the two would read as a bug in the app even when
+# the app was right.
+
+
+@dataclass(frozen=True)
+class StatSplit:
+    """One row of the Stats table: a window, averaged, plus its fantasy total.
+
+    ``fantasy_total`` is the sum over the window and ``fantasy_average`` the
+    per-game figure, because ESPN's card shows the first in the table and the
+    second in the header, and showing either one in both places makes the two
+    disagree with each other.
+    """
+
+    key: str
+    label: str
+    games: int
+    minutes: float = 0.0
+    points: float = 0.0
+    rebounds: float = 0.0
+    assists: float = 0.0
+    steals: float = 0.0
+    blocks: float = 0.0
+    turnovers: float = 0.0
+    fantasy_total: float = 0.0
+    fantasy_average: float = 0.0
+
+
+@dataclass(frozen=True)
+class GameLogRow:
+    """One game he actually played.
+
+    A scheduled game he did not play carries an empty stat dict from ESPN and
+    is dropped rather than rendered as a line of zeroes -- "did not play" and
+    "played and scored nothing" are different facts, and only the second one
+    belongs in an average.
+
+    ``pro_team`` is the team he played this game *for*, which is why the
+    opponent is not resolved here: a traded player's fixtures are only right
+    if each one is looked up against the team on its own row, and that lookup
+    needs the pro schedule, which this module does not have. The view layer
+    joins the two.
+    """
+
+    scoring_period: int
+    pro_team: ProTeamId = 0
+    minutes: float = 0.0
+    points: float = 0.0
+    rebounds: float = 0.0
+    assists: float = 0.0
+    steals: float = 0.0
+    blocks: float = 0.0
+    turnovers: float = 0.0
+    fantasy_points: float = 0.0
+
+
+@dataclass(frozen=True)
+class NewsItem:
+    """One Rotowire note: what happened, and what ESPN makes of it.
+
+    ``spin`` is the analysis paragraph. It is the half worth reading -- the
+    headline is usually the box score line, which the game log above it
+    already shows.
+    """
+
+    published: Optional[datetime] = None
+    source: str = ""
+    headline: str = ""
+    spin: str = ""
+
+
+@dataclass(frozen=True)
+class PlayerCard:
+    """Everything the card shows about one player in one league.
+
+    ``manager`` is the fantasy team that rosters him, or an empty string when
+    nobody does -- the field answers "can I have him", which is the question a
+    name on this app's pages is usually being clicked to settle.
+    """
+
+    player_id: PlayerId
+    name: str
+    pro_team_id: ProTeamId = 0
+    positions: tuple = ()
+    injury_status: str = "ACTIVE"
+    position_rank: Optional[int] = None
+    percent_owned: Optional[float] = None
+    acquisition_status: str = ""
+    on_team_id: int = 0
+    manager: str = ""
+    outlook: str = ""
+    splits: tuple = ()
+    game_log: tuple = ()
+    news: tuple = ()

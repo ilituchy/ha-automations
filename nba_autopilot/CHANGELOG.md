@@ -6,6 +6,41 @@ All notable changes to this app are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The player card.** Clicking a name now opens his card over the page you
+  were on, instead of sending you to ESPN: season and trailing 7/15/30-day
+  averages, a game log of every game he has played with the fixture and what
+  he scored, and Rotowire's recent notes with ESPN's "Spin" on each.
+
+  The numbers are ESPN's own `appliedTotal` and `appliedAverage` under the
+  league's scoring, not recomputed here, so the card can be held up against
+  ESPN's own and agree with it — including the rounding, which is half-up
+  rather than Python's half-to-even (`"%.1f" % 7.25` is `7.2` here and `7.3`
+  there).
+
+  Fantasy points lead both tables rather than closing them as they do on
+  ESPN. Eight numeric columns do not fit a phone, so the table scrolls, and
+  ESPN's order puts the one column it is read for off the right edge. Pinning
+  it there with `position: sticky` was tried first and is worse: the pinned
+  cell sits over whichever column is beneath it and the numbers show through
+  around its edges.
+
+  Built on two endpoints. `view=kona_playercard` on the league returns the
+  aggregate splits **and no per-game rows at all** — 7 stat blocks instead of
+  88 — unless the `X-Fantasy-Filter` carries
+  `filterStatsForTopScoringPeriodIds`; neither `filterIds` alone nor the
+  `scoringPeriodId` query parameter is enough, and the failure is a 200 with a
+  silently empty game log. The filter was read off ESPN's own request by
+  hooking `XMLHttpRequest` and opening the card, not guessed. News comes from
+  the public, cookie-free
+  `site.api.espn.com/apis/fantasy/v3/games/fba/news/players`, whose `v3` shape
+  nests the feed one level deeper than `v2` did.
+
+  The dialog is a progressive enhancement over a real page at
+  `player?league=…&id=…`: no JavaScript, an unsupported `<dialog>`, a failed
+  fetch or a modified click all fall through to navigating there.
+
 ### Fixed
 
 - **Every player name linked to the same page.** A name opened the league's

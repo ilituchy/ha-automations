@@ -23,14 +23,17 @@ import httpx
 from espn import ids
 from models import (
     DayEntry,
+    GameLogRow,
     GameRef,
     LeagueSettings,
     MatchupScore,
     MatchupWindow,
+    PlayerCard,
     ProGame,
     ProTeamId,
     RosterEntry,
     StatLimit,
+    StatSplit,
 )
 
 log = logging.getLogger(__name__)
@@ -901,6 +904,80 @@ class EspnRead:
         return out
 
 
+    #: The Stats table: which splits, in which order, under which headings.
+    #: ``00`` is the season, ``01``/``02``/``03`` the trailing 7, 15 and 30
+    #: days. ESPN's own card shows the first two; the other two are free once
+    #: the request is being made and are the ones that separate "cold" from
+    #: "finished" on a player the optimizer is about to bench.
+    CARD_SPLITS: Tuple[Tuple[str, str], ...] = (
+        ("00", "Season"),
+        ("01", "Last 7 days"),
+        ("02", "Last 15 days"),
+        ("03", "Last 30 days"),
+    )
+
+    def team_names(self) -> Dict[int, str]:
+        """``teamId -> display name``, for saying who rosters a player.
+
+        Off the cached ``mTeam`` read the page has already paid for, so this
+        costs nothing on a page that has looked at a roster.
+        """
+        out: Dict[int, str] = {}
+        for t in (self.league("mTeam").get("teams") or []):
+            tid = t.get("id")
+            if tid is None:
+                continue
+            name = str(t.get("name") or t.get("abbrev") or "").strip()
+            if name:
+                out[int(tid)] = name
+        return out
+
+    def player_card(
+        self, player_id: PlayerId, scoring_period: Optional[int] = None
+    ) -> Optional[PlayerCard]:
+        """Everything ESPN's own player card shows, for one player.
+
+        The filter is the load-bearing part and was copied from ESPN's own
+        request rather than guessed, by hooking ``XMLHttpRequest`` on the page
+        and opening the card. Without
+        ``filterStatsForTopScoringPeriodIds`` the response carries the
+        aggregate splits **and no per-game rows at all** -- 7 stat blocks
+        instead of 88 -- which is a silent, well-formed, completely empty game
+        log. ``filterIds`` alone is not enough, and neither is the
+        ``scoringPeriodId`` query parameter.
+
+        ``value: 82`` is a whole regular season of games; ``additionalValue``
+        names the aggregate splits to return alongside them, keyed
+        ``<statSourceId><statSplitTypeId><seasonId>``.
+
+        Returns ``None`` when ESPN has no such player, rather than an empty
+        card: a page about nobody should 404, not render a blank.
+        """
+        pid = int(player_id)
+        season = int(self.cfg.season)
+        extra = ["%s%d" % (key, season) for key, _ in self.CARD_SPLITS]
+        # The projection, and last season's totals for a man with no games yet.
+        extra.extend(["10%d" % season, "00%d" % (season - 1)])
+        flt = {
+            "players": {
+                "filterIds": {"value": [pid]},
+                "filterStatsForTopScoringPeriodIds": {
+                    "value": 82, "additionalValue": extra,
+                },
+            }
+        }
+        params = ({} if scoring_period is None
+                  else {"scoringPeriodId": int(scoring_period)})
+        raw = self._get(self._league_url, ("kona_playercard",),
+                        fantasy_filter=flt, params=params)
+        for entry in raw.get("players") or []:
+            player = entry.get("player") or {}
+            if int(player.get("id") or -1) != pid:
+                continue
+            return _parse_card(entry, player, season, self.CARD_SPLITS)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # parsing helpers
 # ---------------------------------------------------------------------------
@@ -1070,3 +1147,106 @@ def _matchup_windows(settings: Mapping[str, Any]) -> Dict[int, MatchupWindow]:
         )
         return {}
     return out
+
+
+#: ESPN's real positions, in the order its own card lists them. ``eligibleSlots``
+#: also carries the composite slots (G, F, UTIL, bench, IR), which describe where
+#: he may be *played* rather than what he *is*, so the card shows only these.
+CARD_POSITIONS: Tuple[Tuple[int, str], ...] = (
+    (0, "PG"), (1, "SG"), (2, "SF"), (3, "PF"), (4, "C"),
+)
+
+#: The seven columns of the Stats table, as ESPN's card orders them. Rebounds
+#: is the *combined* stat 6: the card is read, not summed, and ESPN publishes
+#: the total as well as the offensive and defensive halves.
+_CARD_STATS: Tuple[Tuple[str, StatId], ...] = (
+    ("minutes", ids.MINUTES),
+    ("points", ids.PTS),
+    ("rebounds", ids.REB),
+    ("assists", ids.AST),
+    ("steals", ids.STL),
+    ("blocks", ids.BLK),
+    ("turnovers", ids.TO),
+)
+
+
+def _card_stats(block: Mapping[str, Any], key: str) -> Dict[str, float]:
+    """The seven display columns out of one ESPN stat block."""
+    stats = block.get(key) or {}
+    out: Dict[str, float] = {}
+    for name, stat in _CARD_STATS:
+        value = stats.get(str(stat))
+        if value is None:
+            value = stats.get(stat)
+        out[name] = float(value or 0.0)
+    return out
+
+
+def _parse_card(
+    entry: Mapping[str, Any],
+    player: Mapping[str, Any],
+    season: int,
+    wanted: Iterable[Tuple[str, str]],
+) -> PlayerCard:
+    """One ``kona_playercard`` entry, flattened.
+
+    Splits that ESPN did not return are left out rather than rendered as a row
+    of zeroes -- in October "last 30 days" and "season" are the same window,
+    but "no games in the last 7" is a fact worth seeing and a row of zeroes
+    would read as one.
+    """
+    blocks = player.get("stats") or []
+    by_id = {str(b.get("id")): b for b in blocks}
+
+    splits: List[StatSplit] = []
+    for key, label in wanted:
+        block = by_id.get("%s%d" % (key, season))
+        if block is None:
+            continue
+        played = int(float((block.get("stats") or {}).get(
+            str(ids.GAMES_PLAYED)) or 0.0))
+        splits.append(StatSplit(
+            key=key, label=label, games=played,
+            fantasy_total=float(block.get("appliedTotal") or 0.0),
+            fantasy_average=float(block.get("appliedAverage") or 0.0),
+            **_card_stats(block, "averageStats")
+        ))
+
+    log_rows: List[GameLogRow] = []
+    for block in blocks:
+        if block.get("statSplitTypeId") != ids.SPLIT_ONE_SCORING_PERIOD:
+            continue
+        if block.get("statSourceId") != ids.STAT_SOURCE_ACTUAL:
+            continue
+        if int(block.get("seasonId") or 0) != season:
+            continue
+        # A scheduled game he did not play carries an empty stat dict. The
+        # request asks for 82 periods, so most of these are the rest of the
+        # season and have not happened yet.
+        if not (block.get("stats") or {}):
+            continue
+        log_rows.append(GameLogRow(
+            scoring_period=int(block.get("scoringPeriodId") or 0),
+            pro_team=int(block.get("proTeamId") or 0),
+            fantasy_points=float(block.get("appliedTotal") or 0.0),
+            **_card_stats(block, "stats")
+        ))
+    log_rows.sort(key=lambda r: r.scoring_period, reverse=True)
+
+    eligible = set(int(s) for s in (player.get("eligibleSlots") or []))
+    ownership = player.get("ownership") or {}
+    ratings = (entry.get("ratings") or {}).get("0") or {}
+    return PlayerCard(
+        player_id=int(player.get("id")),
+        name=str(player.get("fullName") or ""),
+        pro_team_id=int(player.get("proTeamId") or 0),
+        positions=tuple(name for slot, name in CARD_POSITIONS if slot in eligible),
+        injury_status=str(player.get("injuryStatus") or "ACTIVE"),
+        position_rank=_opt_int(ratings.get("positionalRanking")),
+        percent_owned=_opt_float(ownership.get("percentOwned")),
+        acquisition_status=str(entry.get("status") or ""),
+        on_team_id=int(entry.get("onTeamId") or 0),
+        outlook=str(player.get("seasonOutlook") or ""),
+        splits=tuple(splits),
+        game_log=tuple(log_rows),
+    )

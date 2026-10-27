@@ -443,20 +443,37 @@ re-read from ESPN, not the form you posted — so what you see is what ESPN has.
 Only the Home Assistant user in `ha_owner_user_id` can save a lineup or
 approve a swap, which is the same check the notification buttons use.
 
-**Player names are links.** They open ESPN's fantasy page for *that player*
-in that league — his injury status and ESPN's note and "Spin" on each piece of
-news about him, which is the half of a start/sit this app does not work out
-for itself.
+**Player names open his card.** Not ESPN's — this app's own, rendered over
+whatever page you were on, so reading up on a player does not cost you the
+page with the Approve button on it. It shows:
 
-They do not open the card you get by clicking a name inside ESPN's own tables,
-the one with his position rank and percent rostered, because **that card has no
-URL**. It is client state: in ESPN's own pages the name is an `<a>` with no
-`href`, and the address bar does not move when the card opens. `playercard`,
-`player/card` and `player` all render "Page not found", and the old
-`games.espn.com/fba/playercard` redirect drops the id on the way. For his stat
-line, ESPN's own card links out to espn.com — which is also where a name whose
-league is not recorded falls back to, since a run journaled before that column
-existed has no league to scope the fantasy page with.
+* his season and trailing 7/15/30-day averages, with **fantasy points per
+  game** as the first column;
+* a **game log** of every game he has played, each with the fixture and what
+  he scored in your league's scoring;
+* **recent news** — Rotowire's note on each game or injury, with ESPN's "Spin"
+  on it, which is the half of a start/sit this app does not work out for
+  itself.
+
+The numbers are ESPN's own applied totals under your league's scoring rules,
+not recomputed here, so the card can be held up against ESPN's and agree with
+it to the last decimal place.
+
+It is a real page as well as a dialog (`player?league=…&id=…`), so a
+middle-click opens it in a tab and it still works with JavaScript off. A name
+whose league is not recorded — a run journaled before that column existed —
+falls back to his page on espn.com, since a card is league-scoped and *"who
+has him"* is half of what it answers.
+
+This exists because **ESPN's own card has no URL**. It is client state: in
+ESPN's pages a player's name is an `<a>` with no `href`, and the address bar
+does not move when the card opens. `playercard`, `player/card` and `player`
+all render "Page not found", and the old `games.espn.com/fba/playercard`
+redirect drops the id on the way. The two endpoints behind it are
+`kona_playercard` on the league (which returns the aggregate splits **and an
+empty game log** unless the request carries
+`filterStatsForTopScoringPeriodIds`) and the public, cookie-free
+`site.api.espn.com/apis/fantasy/v3/games/fba/news/players`.
 
 Lineups you set by hand are written through the same path the scheduled runs
 use, so they are journalled the same way. The next scheduled run will

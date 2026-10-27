@@ -156,10 +156,14 @@ class TestRenderEscaping(unittest.TestCase):
     """
 
     def test_rationale_is_escaped(self):
+        """The page carries a ``<script>`` of its own now -- the card dialog --
+        so this asserts the *injected* one is gone rather than that no script
+        tag exists anywhere."""
         nasty = "<script>alert('x')</script>"
         bot = FakeBot(FakeStore(pending=[_proposal(rationale=nasty)]))
         out = web.render(web.StatusPage(bot))
-        self.assertNotIn("<script>", out)
+        self.assertNotIn("<script>alert", out)
+        self.assertNotIn("alert('x')", out)
         self.assertIn("&lt;script&gt;", out)
 
     def test_player_name_is_escaped(self):
@@ -409,14 +413,27 @@ class TestPlayerLinks(unittest.TestCase):
     not an error page -- it is a page about somebody else.
     """
 
-    def test_a_name_links_to_that_players_own_fantasy_page(self):
+    def test_a_name_links_to_this_apps_own_card_for_that_player(self):
         out = web._who(3136195, "Karl-Anthony Towns", league=42)
-        self.assertIn("fantasy.espn.com/basketball/playernews", out)
-        self.assertIn("playerId=3136195", out)
+        self.assertIn("href='player?league=42&amp;id=3136195'", out)
         self.assertIn("Karl-Anthony Towns", out)
 
-    def test_the_page_is_scoped_to_the_league_it_was_rendered_beside(self):
-        self.assertIn("leagueId=42", web._who(1, "A", league=42))
+    def test_the_card_is_scoped_to_the_league_it_was_rendered_beside(self):
+        """Who rosters him is half of what the card answers, and that is a
+        different answer in each league."""
+        self.assertIn("league=42", web._who(1, "A", league=42))
+
+    def test_the_link_is_relative_so_it_survives_the_ingress_prefix(self):
+        """``/player`` would leave the add-on's rotating prefix entirely."""
+        self.assertIn("href='player?", web._who(1, "A", league=42))
+        self.assertNotIn("href='/player", web._who(1, "A", league=42))
+
+    def test_the_name_is_marked_for_the_dialog_to_intercept(self):
+        self.assertIn("data-card", web._who(1, "A", league=42))
+
+    def test_the_espn_fallback_is_not_marked_for_the_dialog(self):
+        """There is nothing to fetch: it is somebody else's page."""
+        self.assertNotIn("data-card", web._who(1, "A"))
 
     def test_it_is_not_a_list_of_players(self):
         """The whole complaint: a list is not a player. ``players/add`` is
@@ -434,7 +451,7 @@ class TestPlayerLinks(unittest.TestCase):
     def test_the_query_is_escaped_for_the_attribute_it_lands_in(self):
         out = web._who(1, "A", league=42)
         self.assertIn("&amp;", out)
-        self.assertNotIn("?leagueId=42&playerId", out)
+        self.assertNotIn("?league=42&id", out)
 
     def test_without_a_league_it_falls_back_to_the_nba_page(self):
         """A row written before the league was carried still goes somewhere
@@ -477,7 +494,7 @@ class TestPlayerLinks(unittest.TestCase):
         out = web._swap({"add": 10, "add_name": "In Man",
                          "drop": 20, "drop_name": "Out Man", "waiver": False},
                         league=99)
-        self.assertEqual(out.count("leagueId=99"), 2)
+        self.assertEqual(out.count("league=99"), 2)
         self.assertNotIn("/nba/player/", out)
 
     def test_a_lineup_move_links_the_player_it_moved(self):
@@ -488,9 +505,9 @@ class TestPlayerLinks(unittest.TestCase):
         }])))
         out = web.render(web.StatusPage(bot))
         self.assertIn("3136195", out)   # the headshot, at least
-        # The run knows its league, so the name goes to his fantasy page.
-        self.assertIn("playernews?leagueId=", out)
-        self.assertIn("playerId=3136195", out)
+        # The run knows its league, so the name goes to his card.
+        self.assertIn("player?league=", out)
+        self.assertIn("id=3136195", out)
 
     def test_a_recovered_old_move_has_no_id_and_so_no_link(self):
         """Rows journaled before ``moves`` existed only parse back a name."""
@@ -2294,22 +2311,22 @@ class TestWhereTheDetailPagesSendYou(unittest.TestCase):
         out = web.render_matchup(_page(), _matchup_view(
             [dict(_pl(1, "Mine", 0), pro_team=16)],
             [dict(_pl(2, "Theirs", 0), pro_team=5)]))
-        self.assertIn("leagueId=9&amp;playerId=1", out)
-        self.assertIn("leagueId=9&amp;playerId=2", out)
+        self.assertIn("player?league=9&amp;id=1", out)
+        self.assertIn("player?league=9&amp;id=2", out)
         self.assertNotIn("/nba/player/", out)
 
     def test_the_lineup_editor_links_every_row(self):
         out = web.render_team(_page(), _team_view(
             [dict(_pl(1, "A", 0), pro_team=16),
              dict(_pl(2, "B", 12), pro_team=5)]))
-        self.assertIn("playerId=1", out)
-        self.assertIn("playerId=2", out)
+        self.assertIn("player?league=9&amp;id=1", out)
+        self.assertIn("player?league=9&amp;id=2", out)
 
     def test_a_row_whose_team_is_unknown_still_reaches_its_own_page(self):
         """The old URL needed the NBA team to narrow a list; this one does
         not need it at all, so a teamless row is no longer a degraded link."""
         out = web.render_team(_page(), _team_view([_pl(1, "A", 0)]))
-        self.assertIn("leagueId=9&amp;playerId=1", out)
+        self.assertIn("player?league=9&amp;id=1", out)
 
     def test_the_row_builder_keeps_the_team_id_as_well_as_its_abbreviation(self):
         """The abbreviation is for a reader; the id is what narrows the list."""
@@ -2445,7 +2462,8 @@ class TestWhatItDidNotPutToYou(unittest.TestCase):
         out = web.render(page)
         self.assertIn("In 10", out)
         self.assertIn("Out 20", out)
-        self.assertIn("leagueId=9", out)
+        self.assertIn("player?league=9&amp;id=10", out)
+        self.assertIn("player?league=9&amp;id=20", out)
 
     def test_the_reasoning_is_behind_the_same_control_the_live_cards_use(self):
         page, _ = _considered_page([_considered_row(
