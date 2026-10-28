@@ -209,6 +209,35 @@ def _starts_today(
     )
 
 
+def _after_lineup(roster: Sequence[Any], plan: Any) -> List[Any]:
+    """The roster with the slots the lineup write just put on it.
+
+    The add/drop layer runs second, against the roster read at the top of the
+    run, and by then those slots are a lie. Most of the lie is harmless --
+    which bench a man sits on does not change whether he can be dropped -- but
+    one part of it is not: **IR is not an active roster spot**, so a player the
+    lineup just activated has consumed one, and ``ids.active_roster_use``
+    counting his old IR slot reports room that is gone.
+
+    That is a real failure and not a hypothetical one. On 2026-10-28 the lineup
+    brought AJ Dybantsa off IR at 09:36:01; two seconds later add/drop counted
+    12 of 13 and offered Toumani Camara into the open spot; forty minutes later
+    the approval hit ``_preflight_add_drop`` and ESPN's own count said 13 of
+    13. Both leagues, same run, same cause.
+
+    A pure function returning a new list, for the reason given in
+    :func:`_apply_swap`: the roster read at the top of the run is what the rest
+    of the run believes it is holding.
+    """
+    target = getattr(plan, "target", None) or {}
+    out = []
+    for entry in roster:
+        slot = target.get(entry.player_id, target.get(int(entry.player_id)))
+        out.append(entry if slot is None
+                   else dataclasses.replace(entry, current_slot=int(slot)))
+    return out
+
+
 def _apply_swap(
     roster: Sequence[Any], pool: Sequence[Any], decision: Any
 ) -> Tuple[List[Any], List[Any]]:
@@ -815,9 +844,16 @@ class Autopilot:
         schedule: Mapping[int, Mapping[int, int]],
         injuries: Optional[Any] = None,
         matchup: Optional[Any] = None,
+        lineup_written: bool = True,
     ) -> Tuple[List["addrop_mod.AddDropPlan"], List[str],
                List[Tuple["addrop_mod.AddDropPlan", str, bool]]]:
         """Price the pool and decide up to ``addrop_max_moves`` swaps. Reads only.
+
+        ``lineup_written`` says whether ESPN took this run's lineup, and so
+        whether ``roster``'s slots are still true. It defaults to the common
+        case on purpose: a caller who forgets it gets the post-write roster,
+        which is right far more often than it is wrong, and wrong in the
+        direction of declining a legal add rather than offering an illegal one.
 
         Returns the swaps it settled on, the notes, and the ones it turned
         down with the reason each time. The third list is *returned* rather
@@ -939,6 +975,12 @@ class Autopilot:
             pid for pid, slot in plan.target.items()
             if ids.is_starting_slot(int(slot))
         ]
+        # The same correction, for the same reason, one field over: the slots
+        # themselves. Here rather than at the call site because this is where
+        # the other half of it already lives, and because a caller who forgets
+        # gets the bug back. See ``_after_lineup``.
+        if lineup_written:
+            roster = _after_lineup(roster, plan)
 
         accepted: List["addrop_mod.AddDropPlan"] = []
         # Advanced after each accepted swap, so swap two is priced against the
@@ -1433,10 +1475,11 @@ class Autopilot:
             return run_id
 
         if plan.changed:
-            self._apply_lineup(run_id, lg, plan, roster, settings)
+            written = self._apply_lineup(run_id, lg, plan, roster, settings)
         else:
             log.info("lineup already optimal; nothing to do")
             notes.append("no change needed")
+            written = True   # target and current slots already agree
 
         # Deliberately after the lineup write. The lineup is the reversible,
         # time-critical half; add/drop is the permanent half and needs several
@@ -1446,6 +1489,9 @@ class Autopilot:
             lg, settings, roster, projections, plan,
             cal=cal, matchup_period=matchup_period, schedule=schedule,
             injuries=injuries, matchup=matchup,
+            # Whether the slots on that roster are still the slots. See
+            # ``_after_lineup``.
+            lineup_written=written,
         )
         notes.extend(addrop_notes)
         for turned_down, why, unreachable in declined:
@@ -1627,8 +1673,11 @@ class Autopilot:
         plan: "pipeline.LineupPlan",
         roster: Any,
         settings: Any,
-    ) -> None:
+    ) -> bool:
         """Journal, execute, notify. Lineup and IR only -- never an acquisition.
+
+        Returns whether ESPN took the write, which is what tells the add/drop
+        layer whether the roster it was handed is still the roster.
 
         ``auto_approve=True`` is the autonomy decision, and it still writes a
         proposal row: autonomy changes who approves, never whether there is an
@@ -1671,20 +1720,21 @@ class Autopilot:
         )
         if not self.store.claim_for_execution(proposal.id):
             log.warning("lineup proposal %s already claimed", proposal.action_id)
-            return
+            return False
         try:
             result = lg.write.set_lineup(
                 {int(k): int(v) for k, v in plan.target.items()},
                 roster=roster,
                 scoring_period=settings.current_scoring_period,
             )
-            self.store.complete(proposal.id, bool(result and result.ok))
+            written = bool(result and result.ok)
+            self.store.complete(proposal.id, written)
         except Exception as exc:  # noqa: BLE001 - one league must not kill the rest
             log.exception("lineup write failed for %s", lg.name)
             self.store.complete(proposal.id, False, str(exc))
             self._notify_problem("Autopilot: lineup write failed",
                                  "%s: %s" % (lg.name, str(exc)[:400]))
-            return
+            return False
 
         title = "%s: %d move(s)%s" % (
             lg.name, len(plan.moves), " [shadow]" if self.cfg.shadow_mode else "",
@@ -1699,6 +1749,7 @@ class Autopilot:
             )
         except Exception as exc:  # noqa: BLE001 - a failed push is not a failed run
             log.error("could not deliver lineup notification: %s", exc)
+        return written
 
     def rebalance_after_swap(
         self, run_id: str, lg: "League", payload: Mapping[str, Any], result: Any

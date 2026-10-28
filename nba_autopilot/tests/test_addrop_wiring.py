@@ -391,7 +391,7 @@ class _Harness:
             values=dict(self.values), notes=(),
         )
 
-    def consider_all(self, target=None, injuries=None):
+    def consider_all(self, target=None, injuries=None, lineup_written=True):
         # The score is read by the caller rather than by ``_consider_addrops``
         # -- ``run_league`` needs it for the status-page scoreboard too, and one
         # request serves both. Read it here the same way, so a test about a
@@ -407,7 +407,7 @@ class _Harness:
             self.lg, self.settings, self.roster, self.projections,
             self.plan(target),
             cal=self.cal, matchup_period=1, schedule=self.schedule,
-            injuries=injuries, matchup=matchup,
+            injuries=injuries, matchup=matchup, lineup_written=lineup_written,
         )
         # Kept on the harness rather than returned: the swaps a run turned
         # down are what one small group of tests is about, and threading a
@@ -416,14 +416,15 @@ class _Harness:
         self.declined = list(declined)
         return decisions, read_notes + notes
 
-    def consider(self, target=None, injuries=None):
+    def consider(self, target=None, injuries=None, lineup_written=True):
         """The best swap only, or ``None``, plus every note.
 
         Most of the tests below are about one decision -- what blocks it, what
         it says, what it writes -- and reading ``[0]`` in each of them would be
         noise obscuring which tests are actually about the list.
         """
-        decisions, notes = self.consider_all(target=target, injuries=injuries)
+        decisions, notes = self.consider_all(
+            target=target, injuries=injuries, lineup_written=lineup_written)
         return (decisions[0] if decisions else None), notes
 
     def offer(self, decision):
@@ -546,6 +547,81 @@ class TestStartersComeFromThePlan(unittest.TestCase):
         decision, notes = h.consider()
         self.assertIsNone(decision)
         self.assertIn("10000.0-point churn floor", " ".join(notes))
+
+
+class TestTheRosterAddDropSeesIsThePostWriteOne(unittest.TestCase):
+    """Add/drop runs second. The slots it was handed are already stale.
+
+    Most of that staleness is harmless -- which bench a man sits on does not
+    change whether he can be dropped -- but IR is not an active roster spot,
+    so a player the lineup just activated has taken one, and counting his old
+    IR slot reports room that is gone.
+
+    Live, 2026-10-28, both leagues in the same run: the lineup brought AJ
+    Dybantsa off IR at 09:36:01, two seconds later add/drop counted 12 of 13
+    and offered Toumani Camara into the open spot, and forty minutes later the
+    approval reached the preflight and ESPN's own count said 13 of 13 --
+    "roster is full (13/13 active spots) and no drop was paired with this add".
+    """
+
+    def roster(self):
+        # Two starting slots and a bench, with the third man parked on IR: two
+        # of three active spots used, so there is room for a free pickup.
+        return [player(1), player(2, name="Weak"),
+                player(3, name="Hurt", slot=ids.IR_SLOT)]
+
+    def test_activating_a_player_off_ir_closes_the_open_spot(self):
+        before = self.roster()
+        cap = ids.active_roster_cap(settings().lineup_slot_counts)
+        self.assertLess(ids.active_roster_use(e.current_slot for e in before),
+                        cap)
+        after = main_mod._after_lineup(
+            before, main_mod.pipeline.LineupPlan(
+                target={1: START, 2: BENCH, 3: START}, moves=(), lam=0.0,
+                utilization=float("inf"), values={}, notes=()))
+        self.assertEqual(cap,
+                         ids.active_roster_use(e.current_slot for e in after))
+
+    def test_it_does_not_mutate_the_roster_the_rest_of_the_run_holds(self):
+        before = self.roster()
+        main_mod._after_lineup(before, main_mod.pipeline.LineupPlan(
+            target={1: START, 2: BENCH, 3: START}, moves=(), lam=0.0,
+            utilization=float("inf"), values={}, notes=()))
+        self.assertEqual(ids.IR_SLOT, before[2].current_slot)
+
+    def test_a_player_the_plan_says_nothing_about_keeps_his_slot(self):
+        after = main_mod._after_lineup(
+            self.roster(), main_mod.pipeline.LineupPlan(
+                target={1: START}, moves=(), lam=0.0,
+                utilization=float("inf"), values={}, notes=()))
+        self.assertEqual(ids.IR_SLOT, after[2].current_slot)
+
+    def test_the_unpaired_add_is_offered_before_the_activation_and_not_after(self):
+        """The whole bug, at the layer that decides it."""
+        h = _Harness(read=_Read(pool=[player(90, name="Better", slot=BENCH)]))
+        h.roster = self.roster()
+        h.projections = {1: projection(1, 60.0), 2: projection(2, 5.0),
+                         3: projection(3, 30.0)}
+        h.values = dict(h.projections and {1: 60.0, 2: 5.0, 3: 30.0})
+        # The write failed, so he really is still on IR and the spot is open.
+        stale, _ = h.consider(target={1: START, 2: BENCH, 3: START},
+                              lineup_written=False)
+        self.assertIsNotNone(stale)
+        self.assertIsNone(stale.drop, "an open spot means nothing goes out")
+
+        # The write landed, so it is not.
+        fresh, _ = h.consider(target={1: START, 2: BENCH, 3: START})
+        if fresh is not None:
+            self.assertIsNotNone(
+                fresh.drop,
+                "the spot is taken, so any add has to pair with a drop")
+
+    def test_the_correction_is_on_by_default_so_it_cannot_be_forgotten(self):
+        """A caller who omits the flag must not get the 2026-10-28 behaviour
+        back. Wrong in the safe direction is the point of the default."""
+        import inspect
+        sig = inspect.signature(main_mod.Autopilot._consider_addrops)
+        self.assertIs(True, sig.parameters["lineup_written"].default)
 
 
 # ---------------------------------------------------------------------------

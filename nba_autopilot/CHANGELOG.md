@@ -113,6 +113,29 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **An IR activation silently took the roster spot the next add was offered
+  into.** Add/drop runs after the lineup write, deliberately, and it was handed
+  the roster read at the *top* of the run. Most of that staleness is harmless —
+  which bench a man sits on does not change whether he can be dropped — but IR
+  is not an active roster spot, so a player the lineup has just activated has
+  consumed one, and `active_roster_use` counting his old IR slot reports room
+  that is gone.
+
+  On 2026-10-28 it did, in both leagues in the same run. The lineup brought AJ
+  Dybantsa off IR at 09:36:01; two seconds later add/drop counted 12 of 13 and
+  offered Toumani Camara as a free pickup into the open spot; forty minutes
+  later the approval reached `_preflight_add_drop` and ESPN's own count said 13
+  of 13 — *"roster is full (13/13 active spots) and no drop was paired with
+  this add"*. The preflight did its job; the offer should never have been made.
+
+  `starters` was already derived from `plan.target` for exactly this reason,
+  with a comment saying so. The slots now come from there too. The correction
+  lives inside `_consider_addrops` beside that line rather than at the call
+  site, and defaults to on, so a caller who forgets the flag errs towards
+  declining a legal add rather than offering an illegal one. `_apply_lineup`
+  returns whether ESPN took the write, so a failed lineup write leaves the
+  roster read as it was.
+
 - **The games-played cap was priced against the wrong number, and it was
   benching the best players on the roster.** Games used this matchup period is
   read two ways: `statBySlot`, the counter ESPN enforces the cap against, and
