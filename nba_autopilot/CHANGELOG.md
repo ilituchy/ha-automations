@@ -71,6 +71,46 @@ All notable changes to this app are documented here. The format follows
   `player?league=…&id=…`: no JavaScript, an unsupported `<dialog>`, a failed
   fetch or a modified click all fall through to navigating there.
 
+### Changed
+
+- **Recent form now counts from the first game instead of the tenth.** The
+  model blended ESPN's season projection with the last-fifteen-days split only
+  once a player had ten games behind him, then on a `games/82` ramp capped at
+  half. Below ten games it used the projection alone — which meant that for the
+  first three weeks of a season it could see nothing of that season at all. On
+  2026-10-28, game four, that started Cam Whitmore (7.8 points a game on 7.5
+  minutes) over Keyonte George (44.6) and kept Jakob Poeltl (12.7) in the
+  starting five over Ace Bailey (36.0), because the only evidence it would read
+  was a projection written before any of them had played.
+
+  The gate is gone. The weight is now `games / (games + 2.5)` capped at 0.75,
+  shrinkage against a 2.5-game prior, the same shape already used for the
+  double-double bonus rates.
+
+  2.5 is fitted, not chosen. Over the 2023–2026 seasons, for every player with
+  a projection and enough season left to score against, the blend of
+  (projection, first N games) that best predicts his next twenty games was
+  fitted at N = 2, 3, 4, 5, 6, 8, 10, 15 and 20 on about 1,300 players per
+  bucket. The best weight runs from 0.45 at two games to 0.90 at twenty, and
+  the implied prior strength sits between 2.2 and 2.7 games at every horizon.
+  At four games the fitted optimum is 0.60 against the 0.00 that was being
+  applied, and it cuts RMSE from 8.3 to 6.3 points a game.
+
+  The cap is deliberately short of the fit. What the fit measured is first-N
+  games against the next twenty — the early-season case, which is the one that
+  was broken. What the model actually blends is the last-fifteen-days split,
+  and by March that is a seven-game window against a projection ESPN has been
+  updating all season, which is a different comparison and an unmeasured one.
+
+  The weight also now keys off the **recent split's own** games rather than the
+  season's. They are the same number in October and they are not in March, and
+  weighting a seven-game window as if it were sixty is how a fortnight takes
+  over a season.
+
+  On the live roster this moves Poeltl 36.3 → 22.7 and Whitmore 31.6 → 20.7,
+  both out of the starting lineup, and George 32.5 → 39.5 and Bailey 30.7 →
+  33.5, both comfortably into it.
+
 ### Fixed
 
 - **The games-played cap was priced against the wrong number, and it was

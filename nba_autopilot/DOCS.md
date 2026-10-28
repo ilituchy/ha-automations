@@ -514,9 +514,20 @@ row records which league it belonged to.
 
 ## How it scores a player
 
-Projections come from ESPN's own season projection, unblended until there is
-enough real history to blend (10 games), and are then dotted against your
-league's `scoringItems`. Two things your leagues pay for are **not** in what
+Projections come from ESPN's own season projection blended with what the
+player has actually been doing, and are then dotted against your league's
+`scoringItems`. The blend is `games / (games + 2.5)`, where `games` is how
+many are in his last-fifteen-days split — so four games of real evidence
+counts for 62% of the mean and one game counts for 29%, capped at 75%.
+
+That 2.5 is measured. Over the 2023–2026 seasons, for every player with a
+projection and enough season left to score against, the blend of (projection,
+first N games) that best predicted his next twenty games was fitted at nine
+values of N on about 1,300 players each; the implied prior strength came out
+between 2.2 and 2.7 games every time. It used to be all-or-nothing at ten
+games, which meant the model could see nothing of a season until its third
+week — and on 2026-10-28, game four, that started a player averaging 7.8
+points on 7.5 minutes a night over one averaging 44.6. Two things your leagues pay for are **not** in what
 ESPN projects, and the app fills them in itself:
 
 - **Offensive and defensive rebounds.** Both of your leagues score `OREB` at

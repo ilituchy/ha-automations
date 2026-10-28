@@ -66,10 +66,9 @@ class Projection:
     #: What the player has actually done lately, and how much of it is in
     #: ``mean``. Carried for the rationale, not for the optimizer -- which
     #: reads ``mean`` and nothing else. A reader who has just watched someone
-    #: score 51 needs to see that number *and* the weight it was given,
-    #: including when the weight is zero. A ``form_weight`` of 0.0 alongside a
-    #: populated ``form_mean`` is the normal early-season state rather than a
-    #: bug; see ``solve/projections.MIN_GAMES_FOR_FORM``.
+    #: score 51 needs to see that number *and* the weight it was given.
+    #: ``form_weight`` rises with the size of the recent sample rather than
+    #: switching on at a threshold; see ``solve/projections.FORM_PRIOR_GAMES``.
     form_mean: Optional[Mapping[StatId, float]] = None
     form_games: float = 0.0
     form_weight: float = 0.0

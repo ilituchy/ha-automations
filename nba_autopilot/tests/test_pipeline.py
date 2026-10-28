@@ -718,13 +718,23 @@ class TestFormInTheRationale(unittest.TestCase):
             form_weight=weight,
         )
 
-    def test_uncounted_form_is_still_reported(self):
+    def test_one_game_of_form_counts_for_something(self):
+        """It counted for nothing until 2026-10-28. One game is 29% of the
+        mean now -- a quarter-ish, which is what a one-game sample against a
+        2.5-game prior is worth."""
         bit = pipeline._form_bit(
-            self._proj(points=19.9, form=51.5, games=1.0), self._model())
+            self._proj(points=19.9, form=51.5, games=1.0,
+                       weight=projections_mod.form_weight(1.0, True)),
+            self._model())
         self.assertIn("51.5", bit)
         self.assertIn("1 game,", bit)       # singular, and not "1 games"
-        self.assertIn("too few to count", bit)
-        self.assertIn("needs 10", bit)
+        self.assertIn("29% of the mean", bit)
+
+    def test_a_split_with_no_games_in_it_is_still_reported(self):
+        """The only way the weight is zero now. Said rather than omitted."""
+        bit = pipeline._form_bit(
+            self._proj(form=51.5, games=0.0), self._model())
+        self.assertIn("not counted", bit)
 
     def test_counted_form_reports_its_weight(self):
         bit = pipeline._form_bit(
@@ -784,28 +794,49 @@ class TestRecentFormReading(unittest.TestCase):
         out[ids.SPLIT_SEASON_TOTAL] = {ids.GP_STAT: games}
         return out
 
-    def test_form_is_read_even_when_it_will_not_be_used(self):
+    def test_form_is_read_and_now_weighted_from_the_first_game(self):
         form, games, w = projections_mod.recent_form(
             self.splits(recent=51.0, games=1.0))
         self.assertEqual(form, {ids.PTS: 51.0})
         self.assertEqual(games, 1.0)
-        self.assertEqual(w, 0.0)
+        self.assertAlmostEqual(w, 1.0 / 3.5)
 
-    def test_the_mean_is_untouched_below_the_gate(self):
-        mean = projections_mod.per_game_mean(
-            self.splits(projected=20.0, recent=51.0, games=1.0))
-        self.assertEqual(mean[ids.PTS], 20.0)
+    def test_an_empty_sample_is_still_worth_nothing(self):
+        self.assertEqual(projections_mod.form_weight(0.0, True), 0.0)
+        self.assertEqual(projections_mod.form_weight(9.0, False), 0.0)
 
-    def test_the_mean_blends_above_the_gate(self):
-        # 12 games -> w = 12/82; the blend is linear in w.
+    def test_the_curve_tracks_what_was_fitted(self):
+        """The backtest over 2023-2026 put the best weight at 0.45 after two
+        games and 0.60 after four. A 2.5-game prior lands on both."""
+        self.assertAlmostEqual(projections_mod.form_weight(2.0, True), 0.444, 3)
+        self.assertAlmostEqual(projections_mod.form_weight(4.0, True), 0.615, 3)
+
+    def test_the_mean_moves_at_four_games_which_is_the_whole_point(self):
+        """Game four of a season used to be invisible to the model. It is
+        what benched a man averaging 44.6 for one averaging 7.8."""
         mean = projections_mod.per_game_mean(
-            self.splits(projected=20.0, recent=50.0, games=12.0))
-        w = 12.0 / 82.0
+            self.splits(projected=20.0, recent=50.0, games=4.0))
+        w = 4.0 / 6.5
         self.assertAlmostEqual(mean[ids.PTS], 20.0 * (1 - w) + 50.0 * w)
+        self.assertGreater(mean[ids.PTS], 35.0)
 
-    def test_weight_is_capped_at_half(self):
-        self.assertEqual(projections_mod.form_weight(82.0, True), 0.5)
-        self.assertEqual(projections_mod.form_weight(70.0, True), 0.5)
+    def test_weight_is_capped_short_of_the_fit(self):
+        """The fit says 0.90 at twenty games. The cap holds it at 0.75,
+        because what gets blended in March is a seven-game window against a
+        projection ESPN has been updating all season -- which the fit, run on
+        first-N-games, never measured."""
+        self.assertEqual(projections_mod.form_weight(82.0, True), 0.75)
+        self.assertEqual(projections_mod.form_weight(20.0, True), 0.75)
+
+    def test_the_recent_splits_own_games_win_over_the_seasons(self):
+        """Sixty games into a season, the last fifteen days hold about seven.
+        Weighting that window as if it were sixty is how a fortnight takes
+        over a season."""
+        raw = self.splits(projected=20.0, recent=50.0, games=60.0)
+        raw[ids.SPLIT_LAST_15][ids.GP_STAT] = 7.0
+        _, games, w = projections_mod.recent_form(raw)
+        self.assertEqual(games, 7.0)
+        self.assertAlmostEqual(w, 7.0 / 9.5)
 
     def test_absent_split_is_none_not_empty(self):
         # None and {} mean different things downstream: "no data" versus "he

@@ -22,7 +22,7 @@ Of three sampled players in one league, one had played a single six-minute game
 and two had empty actuals. **In October the recent-form splits carry no signal
 at all**, and blending them in would be blending in noise with a confident face.
 So the projection is ESPN's own, unblended, until there is history to blend --
-see :data:`MIN_GAMES_FOR_FORM`.
+see :data:`FORM_PRIOR_GAMES`.
 
 ``statSplitTypeId`` 05 is left unmapped on purpose. It duplicated 00-03 in every
 sample, and guessing at an identifier we have never seen documented is how you
@@ -111,7 +111,8 @@ log = logging.getLogger(__name__)
 
 __all__ = [
     "PHI",
-    "MIN_GAMES_FOR_FORM",
+    "FORM_PRIOR_GAMES",
+    "FORM_WEIGHT_CAP",
     "NBA_SEASON_GAMES",
     "AvailabilityNote",
     "OREB_SHARE_DEFAULT",
@@ -137,10 +138,44 @@ __all__ = [
 #: this is a modelling assumption, not a measurement.
 PHI: float = 1.6
 
-#: Games of real history before the recent-form splits are worth consulting.
-#: Until then :func:`per_game_mean` uses ESPN's projection alone. Chosen so that
-#: a single blowout or a six-minute injury return cannot move a projection.
-MIN_GAMES_FOR_FORM: int = 10
+#: Pseudo-games of ESPN's projection that the recent-form split must outweigh.
+#:
+#: Shrinkage weight is ``games / (games + FORM_PRIOR_GAMES)``, the same shape
+#: as :data:`BONUS_PRIOR_GAMES` below, so form contributes from the first game
+#: rather than not at all until the tenth.
+#:
+#: This was a hard gate at ten games and a ``games/82`` ramp above it, chosen
+#: so that "a single blowout or a six-minute injury return cannot move a
+#: projection". The gate did stop that. It also meant that through the first
+#: three weeks of a season the model could see nothing of the season at all,
+#: and on 2026-10-28 -- game four -- it started a player averaging 7.8 points
+#: on 7.5 minutes a night over one averaging 44.6, because the only evidence
+#: it would read was a preseason projection written before either had played.
+#:
+#: 2.5 is measured, not chosen. Over the 2023-2026 seasons, for every player
+#: with a projection and enough of a season to score against, the blend of
+#: (projection, first N games) that best predicts his next twenty games was
+#: fitted at N = 2, 3, 4, 5, 6, 8, 10, 15 and 20 on ~1,300 players per bucket.
+#: The best weight runs 0.45 at two games to 0.90 at twenty, and the implied
+#: prior strength sits between 2.2 and 2.7 games at every one of those
+#: horizons. At four games the fitted optimum is 0.60 against the 0.00 this
+#: used to apply, and it cuts RMSE from 8.3 to 6.3 points a game.
+FORM_PRIOR_GAMES: float = 2.5
+
+#: Ceiling on that weight. The fit says 0.80 at ten games and 0.90 at twenty,
+#: so this is deliberately short of what was measured.
+#:
+#: Two reasons. The fit scores *first N games* against the next twenty, which
+#: is the early-season case and is the one that was broken; what the model
+#: actually blends is the last-15-days split, and by midseason that is a
+#: seven-game window against a projection ESPN has itself been updating all
+#: year, which is a different and un-measured comparison. And the archive the
+#: fit ran on was pulled after those seasons ended, so its "projection" had
+#: more hindsight in it than October's does -- which biases the fitted weight
+#: *down*, meaning the real optimum is if anything higher than 0.60. Capping
+#: below the fit costs little in the regime that was measured and keeps the
+#: projection in the mean in the regime that was not.
+FORM_WEIGHT_CAP: float = 0.75
 
 #: Denominator for turning ESPN's projected season games into a rate.
 NBA_SEASON_GAMES: int = 82
@@ -178,11 +213,11 @@ OREB_SHARE_DEFAULT: float = 0.25
 #: Pseudo-games of the modelled bonus rate that an observed rate must outweigh.
 #:
 #: Shrinkage weight is ``games / (games + BONUS_PRIOR_GAMES)``, so three games
-#: of history counts for 23% and twenty games for 67%. Deliberately a gentler
-#: curve than :data:`MIN_GAMES_FOR_FORM`, which gates form out entirely below
-#: ten games: a double-double count is a *direct* observation of the quantity
-#: being estimated rather than a noisy proxy for it, so it should start
-#: contributing immediately. It still must not take over early, because a
+#: of history counts for 23% and twenty games for 67%. A *stiffer* prior
+#: than :data:`FORM_PRIOR_GAMES`, deliberately: a double-double is a rare
+#: event, so three games of them is three samples of something that happens
+#: twice a week, where three games of minutes and shots is three samples of
+#: something that happens a hundred times a night. It still must not take over early, because a
 #: three-game zero is perfectly ordinary for a player who will average 0.4.
 BONUS_PRIOR_GAMES: float = 10.0
 
@@ -443,19 +478,18 @@ def derive_scored_stats(
 
 
 def form_weight(games: float, has_recent: bool) -> float:
-    """How much of the last-15 split goes into the mean. Zero means none.
+    """How much of the recent split goes into the mean. Zero means none.
 
     Split out of :func:`per_game_mean` so that the rationale can state the
-    weight without recomputing it, and so the gate has one definition. The
-    curve is unchanged: nothing below :data:`MIN_GAMES_FOR_FORM`, then
-    ``games/82`` capped at half.
+    weight without recomputing it, and so there is one definition of it.
+
+    ``games`` is the size of the *recent* sample, not the season's -- see
+    :func:`recent_form`. Shrinkage against :data:`FORM_PRIOR_GAMES`, capped at
+    :data:`FORM_WEIGHT_CAP` so the projection is never fully displaced.
     """
-    if not has_recent or games < MIN_GAMES_FOR_FORM:
+    if not has_recent or games <= 0.0:
         return 0.0
-    # Capped so form never fully displaces the projection: a hot fortnight is
-    # partly real and partly a small sample, and the projection already embeds
-    # the prior.
-    return min(games / float(NBA_SEASON_GAMES), 0.5)
+    return min(games / (games + FORM_PRIOR_GAMES), FORM_WEIGHT_CAP)
 
 
 def recent_form(
@@ -468,12 +502,18 @@ def recent_form(
     just watched a player go for 51 is owed the number and the reason it did
     not move the lineup, rather than a rationale that silently omits it.
     """
+    split = splits.get(ids.SPLIT_LAST_15) or {}
     recent = {
-        int(k): float(v)
-        for k, v in (splits.get(ids.SPLIT_LAST_15) or {}).items()
-        if int(k) not in _EXCLUDED
+        int(k): float(v) for k, v in split.items() if int(k) not in _EXCLUDED
     }
-    games = float((splits.get(ids.SPLIT_SEASON_TOTAL) or {}).get(ids.GP_STAT, 0.0))
+    # The split's *own* games, not the season's. They are the same number in
+    # October and they are not in March: a player sixty games into a season has
+    # about seven in his last fifteen days, and weighting a seven-game window
+    # as if it were sixty is how a fortnight takes over a season.
+    games = float(split.get(ids.GP_STAT, 0.0) or 0.0)
+    if games <= 0.0:
+        games = float(
+            (splits.get(ids.SPLIT_SEASON_TOTAL) or {}).get(ids.GP_STAT, 0.0))
     return (recent or None), games, form_weight(games, bool(recent))
 
 
@@ -488,8 +528,8 @@ def per_game_mean(
     he will score nothing, which is a different and much more confident claim
     than "we do not know".
 
-    Blends recent form only once there is enough of it -- see
-    :data:`MIN_GAMES_FOR_FORM`.
+    Blends recent form in proportion to how much of it there is -- see
+    :data:`FORM_PRIOR_GAMES`.
     """
     projected = splits.get(ids.SPLIT_SEASON_PROJECTED) or {}
     if not projected:

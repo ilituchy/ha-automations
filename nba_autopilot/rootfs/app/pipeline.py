@@ -60,7 +60,6 @@ from models import LeagueSettings, Move, PlayerId, Projection, RosterEntry, Slot
 from solve import assign, budget as budget_mod, value as value_mod
 from solve.calendar import SeasonCalendar, team_games_in
 from solve.projections import (
-    MIN_GAMES_FOR_FORM,
     AvailabilityNote,
     variance_from_mean,
 )
@@ -584,8 +583,8 @@ def _form_bit(proj: Projection, model: Any) -> Optional[str]:
     if proj.form_weight > 0.0:
         return "last-15 %.1f from %.0f game%s, %.0f%% of the mean" % (
             priced, games, plural, proj.form_weight * 100.0)
-    return "last-15 %.1f from %.0f game%s, too few to count (needs %d)" % (
-        priced, games, plural, MIN_GAMES_FOR_FORM)
+    # Reachable only when ESPN sent a recent split with no games in it.
+    return "last-15 %.1f from %.0f game%s, not counted" % (priced, games, plural)
 
 
 def _moves_for(
