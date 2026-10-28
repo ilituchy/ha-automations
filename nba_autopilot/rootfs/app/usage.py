@@ -23,17 +23,29 @@ ESPN offers two readings and both are now usable:
 The weekly number can therefore be *read*, and is also still reconstructed as a
 difference of two season-to-date readings -- which means remembering the one
 taken at the start of the week, hence ``gp_snapshots`` in ``state.py``. Both
-readings are computed on every run, logged, and cross-checked; when they
-disagree the larger wins, because the two errors are not symmetric: treating the
-budget as more spent than it is costs a marginal start, and treating it as less
-spent costs a legal lineup.
+readings are computed on every run, logged and cross-checked, and **when they
+disagree the direct reading wins**.
 
-Keeping the reconstruction after the direct reading started working is not
-redundancy for its own sake. The two agreed exactly on 2026-10-21 (1 and 1, 4
-and 4) -- but that was matchup period 1, where season-to-date and
-matchup-to-date are the same number by construction, so the agreement carried
-no information. The first informative comparison is the opening day of matchup
-period 2, and the cross-check is what will report it.
+That rule used to be "the larger wins", on the argument that the two errors are
+not symmetric: treating the budget as more spent than it is costs a marginal
+start, treating it as less spent costs a legal lineup. The argument was sound
+and the premise was not -- it assumed the two readings were equally plausible,
+and they are not. ``statBySlot`` is the counter ESPN enforces the cap against.
+The delta is a *reconstruction*, and it rests on two things that can be wrong
+on their own: a baseline snapshot taken at the right moment, and this app's
+**derived** matchup-period boundaries -- derived because ESPN's own
+``matchupPeriods`` map is self-referential, and demonstrably not what ESPN is
+using, since it reports a scoring period one behind the calendar's every run.
+
+The first informative comparison was the opening day of matchup period 2 --
+before that, matchup-to-date and season-to-date are the same number by
+construction, so the agreement on 2026-10-21 (1 and 1, 4 and 4) carried no
+information. That comparison happened on 2026-10-28 and the reconstruction
+lost, in both leagues at once: ``statBySlot`` said 10 and 8, the delta said 25
+and 18. Counting the lineups of every completed scoring period of the matchup
+period by hand gave 10 and 8. Under the old rule the optimizer priced a 44-game
+cap as 19 games from exhaustion when 34 were left, which put the shadow price
+at 32.8 and benched a player averaging 44.6.
 
 Nothing here decides anything. It returns a measurement plus how much to
 believe it, and ``main.py`` is what declines to act on a bad one.
@@ -219,17 +231,18 @@ def measure(
             )
         log.error(
             "games-used sources disagree for league %d team %d matchup period "
-            "%d: statBySlot says %d, season-to-date delta says %d. Taking the "
-            "larger; see the asymmetry note in usage.py.",
+            "%d: statBySlot says %d, season-to-date delta says %d. Taking "
+            "statBySlot, which is the counter the cap is enforced against; "
+            "see the note in usage.py.",
             league_id, team_id, matchup_period, direct, delta,
         )
         return GamesUsed(
-            games=float(max(direct, delta)),
-            source=SOURCE_STAT_BY_SLOT if direct > delta else SOURCE_SEASON_DELTA,
+            games=float(direct),
+            source=SOURCE_STAT_BY_SLOT,
             trustworthy=True,
             from_stat_by_slot=direct,
             from_season_delta=delta,
-            note="sources disagreed; took the larger",
+            note="sources disagreed; took statBySlot (the enforced counter)",
         )
 
     if direct is not None:

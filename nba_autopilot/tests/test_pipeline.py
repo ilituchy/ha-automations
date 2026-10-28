@@ -272,7 +272,15 @@ class TestGamesUsed(unittest.TestCase):
         self.assertEqual(got.source, usage_mod.SOURCE_UNKNOWN)
         self.assertIn("not the period's first day", got.note)
 
-    def test_disagreement_takes_the_larger(self):
+    def test_disagreement_takes_the_counter_the_cap_is_enforced_against(self):
+        """``statBySlot`` wins, whichever way the disagreement runs.
+
+        It used to be the larger of the two. On 2026-10-28, the first day the
+        two could differ, the reconstruction over-counted in both leagues --
+        10 against 25, 8 against 18 -- and the larger rule priced a 44-game
+        cap as 19 from exhaustion with 34 left, benching a player averaging
+        44.6 points a game.
+        """
         store = _FakeSnapshots()
         self.measure(_FakeReader({}, 10), store, period=1, matchup=1)
         got = self.measure(
@@ -282,6 +290,20 @@ class TestGamesUsed(unittest.TestCase):
         self.assertEqual(got.games, 9.0)
         self.assertEqual(got.from_season_delta, 4)
         self.assertEqual(got.from_stat_by_slot, 9)
+        self.assertEqual(got.source, usage_mod.SOURCE_STAT_BY_SLOT)
+
+    def test_the_reconstruction_does_not_win_by_being_bigger(self):
+        """The live failure: delta 25 against a true, enforced 10."""
+        store = _FakeSnapshots()
+        self.measure(_FakeReader({}, 29), store, period=1, matchup=1)
+        got = self.measure(
+            _FakeReader({ids.TEAM_TOTAL_LIMIT_SLOT: 10}, 54),
+            store, period=4, matchup=1,
+        )
+        self.assertEqual(got.games, 10.0)
+        self.assertEqual(got.from_season_delta, 25)
+        self.assertEqual(got.source, usage_mod.SOURCE_STAT_BY_SLOT)
+        self.assertIn("statBySlot", got.note)
 
     def test_agreement_is_reported_as_such(self):
         store = _FakeSnapshots()

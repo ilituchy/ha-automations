@@ -73,6 +73,35 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **The games-played cap was priced against the wrong number, and it was
+  benching the best players on the roster.** Games used this matchup period is
+  read two ways: `statBySlot`, the counter ESPN enforces the cap against, and
+  a reconstruction from the season-to-date total minus a baseline snapshot.
+  When they disagreed the larger won. The argument for that was asymmetry —
+  over-counting costs a marginal start, under-counting costs a legal lineup —
+  and it assumed the two readings were equally plausible. They are not. The
+  reconstruction rests on a baseline snapshot taken at the right moment *and*
+  on this app's **derived** matchup-period boundaries, derived because ESPN's
+  own `matchupPeriods` map is self-referential and demonstrably not what ESPN
+  is using.
+
+  2026-10-28 was the first day the two could differ — before that,
+  matchup-to-date and season-to-date are the same number by construction — and
+  the reconstruction lost in both leagues at once: `statBySlot` said 10 and 8,
+  the delta said 25 and 18. Counting the lineups of every completed scoring
+  period of the matchup period by hand gave 10 and 8.
+
+  The cost was not marginal. Pricing a 44-game cap as 19 games from exhaustion
+  when 34 remained put the shadow price at 32.8 points a game, which benched
+  Keyonte George (31.4 projected, **44.6 actual** over his four games), benched
+  Ace Bailey (29.6 projected, **36.0 actual**), left a UTIL slot empty and left
+  three starting slots occupied by players with no game or ruled out. With the
+  enforced counter the price falls to 25.9 and all of them start.
+
+  `statBySlot` now wins any disagreement. The reconstruction is still computed,
+  logged and reported, because a reconstruction that disagrees is how this was
+  found.
+
 - **The player card's edges.** Three things on a phone, all of them the card
   looking broken where it was only being cut off.
 
