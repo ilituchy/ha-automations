@@ -393,9 +393,12 @@ class EspnRead:
             for e in (team.get("roster") or {}).get("entries") or []:
                 if not _is_on_team(e, tid):
                     continue
+                day = _day_row(e, period)
                 rows.append(DayEntry(
                     player=_parse_entry(e),
-                    points=_day_points(e, period),
+                    points=_opt_float((day or {}).get("appliedTotal")),
+                    minutes=_opt_float(
+                        ((day or {}).get("stats") or {}).get(str(ids.MINUTES))),
                 ))
             out[tid] = rows
         return out
@@ -1025,13 +1028,19 @@ def _is_on_team(entry: Mapping[str, Any], team_id: int) -> bool:
     return True
 
 
-def _day_points(entry: Mapping[str, Any], scoring_period: int) -> Optional[float]:
-    """What this player actually scored on that day, or ``None`` if ESPN has no row.
+def _day_row(entry: Mapping[str, Any],
+             scoring_period: int) -> Optional[Mapping[str, Any]]:
+    """ESPN's scored row for that player on that day, or ``None``.
 
-    ``None`` and ``0.0`` are different answers and the page says so: one is a
-    dash, the other is a player who suited up and did nothing. Deriving the
-    dash from "is the game in the future" instead would be wrong twice over --
-    a player can be out, or ESPN can be late scoring a finished game.
+    Its **absence is the answer** on a day not yet played, which is why
+    ``DayEntry.points`` is ``Optional`` and why the page can show a dash where
+    ESPN shows one. ``None`` and ``0.0`` are different answers: one is a dash,
+    the other is a player who suited up and did nothing. Deriving the dash
+    from "is the game in the future" instead would be wrong twice over -- a
+    player can be out, or ESPN can be late scoring a finished game.
+
+    The whole row rather than one field off it, because the caller wants two:
+    the applied total, and the minutes that produced it.
     """
     player = (entry.get("playerPoolEntry") or entry).get("player") or {}
     for st in player.get("stats") or []:
@@ -1040,7 +1049,7 @@ def _day_points(entry: Mapping[str, Any], scoring_period: int) -> Optional[float
             and _opt_int(st.get("statSourceId")) == ids.STAT_SOURCE_ACTUAL
             and _opt_int(st.get("statSplitTypeId")) == ids.SPLIT_ONE_SCORING_PERIOD
         ):
-            return _opt_float(st.get("appliedTotal"))
+            return st
     return None
 
 

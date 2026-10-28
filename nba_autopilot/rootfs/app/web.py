@@ -163,6 +163,9 @@ class StatusPage:
         #: costs two ESPN reads that nothing on the page can fall back on.
         self._card_cache: Dict[Tuple[Any, int],
                                Tuple[float, Dict[str, Any]]] = {}
+        #: ``(deadline, {proTeamId: LiveGame})``. One slate serves every
+        #: league and both sides of every matchup, so it is keyed by nothing.
+        self._slate: Tuple[float, Mapping[int, Any]] = (0.0, {})
 
     def league_label(self, league_id: Optional[int]) -> str:
         for lg in getattr(self.bot, "leagues", []):
@@ -537,6 +540,31 @@ class StatusPage:
                         period, exc)
             return {}
 
+    #: How long the NBA scoreboard is reused. A game clock is the one thing
+    #: on these pages that is wrong the moment it is stale, and the endpoint
+    #: is public and small -- but a reader refreshing hard should not turn
+    #: one page load into one request per roster either.
+    SLATE_TTL = 25.0
+
+    def _live_slate(self, period: int, today: int) -> Mapping[int, Any]:
+        """``proTeamId -> LiveGame`` for games in progress, or ``{}``.
+
+        Only for today. Yesterday's clock is not a clock, and ESPN's
+        scoreboard answers for the current slate anyway -- asking it about a
+        past scoring period would return today's games under the wrong day,
+        which is worse than saying nothing.
+        """
+        if int(period) != int(today):
+            return {}
+        now = time.monotonic()
+        until, slate = self._slate
+        if now < until:
+            return slate
+        from espn import live  # late: this module imports no ESPN at load
+        slate = live.fetch()
+        self._slate = (now + self.SLATE_TTL, slate)
+        return slate
+
     def _matchup_of(self, period: int) -> Optional[int]:
         """Which matchup week a scoring period falls in, or ``None``.
 
@@ -714,8 +742,11 @@ class StatusPage:
             "today": sp == today,
         } for sp in week]
 
+        slate = self._live_slate(want, today)
+
         def rows(team_id: Any) -> List[Dict[str, Any]]:
-            return [_row(d, games, tz) for d in (rosters.get(team_id) or [])]
+            return [_row(d, games, tz, slate)
+                    for d in (rosters.get(team_id) or [])]
 
         return {
             "league": self.league_label(lg.ref.league_id),
@@ -782,7 +813,9 @@ class StatusPage:
             "period": period,
             "day": self._day_label(period),
             "slot_counts": dict(settings.lineup_slot_counts),
-            "roster": [_row(d, games, tz)
+            # The lineup editor is always today's, so the slate always
+            # applies: ``period`` is its own "today".
+            "roster": [_row(d, games, tz, self._live_slate(period, period))
                        for d in (rosters.get(team_id) or [])],
         }
 
@@ -1533,9 +1566,28 @@ details.logs[open] > summary::after { content: " \\25BE"; }
 }
 .mmeta.out { color: var(--bad); }
 .mmeta.dtd { color: var(--warn); }
+/* A game in progress is the one line on the sheet that is changing, so it
+   reads a shade stronger than the eleven rows around it that are not. */
+.mmeta.live, .plmeta.live { color: var(--secondary-text-color, var(--dim)); }
+/* Two rosters share a phone's width, and "@NYK &middot; Q2 9:19 &middot;
+   38-30" does not fit beside a name in half of it. The score goes, because
+   of the three facts on this line it is the one a fantasy reader needs
+   least -- and because the alternative is ellipsising the clock. The Team
+   page is one column wide and keeps it at every width. */
+@media (max-width: 559px) { .mmeta .lvs { display: none; } }
 .mpts { font-size: 15px; font-weight: 700; letter-spacing: -.02em;
         color: var(--secondary-text-color, var(--dim)); }
 .mpts.scored { color: var(--primary-text-color, var(--fg)); }
+/* Minutes, under the number they produced. A block so it takes its own line
+   without the row growing: the points cell is one line of 15px type in a row
+   padded to about forty, and this fits in what that padding already is. */
+.plmin {
+  display: block; margin-top: -1px;
+  font-size: 11px; font-weight: 600; letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--secondary-text-color, var(--dim));
+}
+.mside.them .plmin, .mside.me .plmin { text-align: inherit; }
 /* The day's subtotal, which is the question the sheet is open for. Reversed
    out so the eye does not have to find it among eleven rows that look alike. */
 .mrow.tot { background: var(--chip); }
@@ -2550,7 +2602,8 @@ def _board(b: Mapping[str, Any], tz: Any) -> str:
 STATUS_WORDS = {"OUT": ("out", "Out"), "DAY_TO_DAY": ("dtd", "Day-to-day")}
 
 
-def _row(entry: Any, games: Mapping[int, Any], tz: Any) -> Dict[str, Any]:
+def _row(entry: Any, games: Mapping[int, Any], tz: Any,
+         slate: Optional[Mapping[int, Any]] = None) -> Dict[str, Any]:
     """One roster entry flattened into the strings a template needs.
 
     The view model stops here. Everything below this line renders dicts of
@@ -2563,7 +2616,14 @@ def _row(entry: Any, games: Mapping[int, Any], tz: Any) -> Dict[str, Any]:
     A player whose team is not playing gets no line at all rather than a
     placeholder, because "no game" is already said by the dash in the points
     column.
+
+    ``slate`` is the live scoreboard, and where it has his game it replaces
+    the tipoff: a time that has passed is the one thing on the row that is
+    certainly no longer true.
     """
+    # Late, like ``news``: this module imports only ESPN's constants at
+    # load time, so that importing it costs no network client.
+    from espn import live
     p = entry.player
     game = games.get(p.pro_team_id)
     opp, tip = "", ""
@@ -2574,6 +2634,7 @@ def _row(entry: Any, games: Mapping[int, Any], tz: Any) -> Dict[str, Any]:
             tip = _clock(when.astimezone(tz) if tz is not None else when)
         elif game.time_tbd:
             tip = "TBD"
+    now = (slate or {}).get(p.pro_team_id)
     cls, word = STATUS_WORDS.get(p.injury_status, ("", ""))
     return {
         "pid": p.player_id,
@@ -2586,7 +2647,16 @@ def _row(entry: Any, games: Mapping[int, Any], tz: Any) -> Dict[str, Any]:
         "pro_team": int(p.pro_team_id or 0),
         "opp": opp,
         "tip": tip,
+        # Where his game is, if it has started: "Q2 1:16" or "Final", and the
+        # score from his team's side. Empty strings rather than None so the
+        # template never has to ask which kind of nothing this is.
+        "when": live.label(now),
+        "score": "" if now is None or now.score is None or now.opp_score is None
+                 else "%d-%d" % (now.score, now.opp_score),
         "points": entry.points,
+        # Minutes played today, off the same ESPN row as the points. The two
+        # are only meaningful together while a game is being played.
+        "mins": getattr(entry, "minutes", None),
         "locked": bool(p.lineup_locked),
         "status": cls,
         "status_word": word,
@@ -2615,12 +2685,32 @@ def _short_name(name: Any) -> str:
 
 
 def _meta(row: Mapping[str, Any], cls: str = "plmeta") -> str:
-    """``CHA @DAL 7:30 pm``, or the injury if there is one to report.
+    """``CHA @DAL 7:30 pm``, or ``@DAL &middot; Q2 1:16 &middot; 54-59`` once
+    it has tipped off, or the injury if there is one to report.
 
     The injury wins the line. A day-to-day player's tipoff is of no use to
     somebody deciding whether to start him, and the two together would not fit
     in a column this narrow anyway.
+
+    A live game beats the tipoff for the same reason, and more bluntly: the
+    tipoff has already happened, so a row still showing it is a row stating
+    something false. Where the game is replaces it, with the NBA score after
+    -- last because it is the least of the three for a fantasy reader, and
+    this line ellipsises from the right on a phone.
     """
+    # A live game beats the injury tag, but only once he is on the floor:
+    # minutes on the board settle for today what "Day-to-day" was guessing at,
+    # and a man who is out should keep saying so while his team plays without
+    # him.
+    if row.get("when") and (not row.get("status_word") or row.get("mins")):
+        line = "%s &middot; %s" % (
+            _e(row.get("opp") or row.get("team") or ""), _e(row["when"]))
+        if row.get("score"):
+            # In a span of its own so half a phone can drop it rather than
+            # slice the clock in half, which is the one part of this line
+            # that is useless when it is cut.
+            line += "<span class=lvs> &middot; %s</span>" % _e(row["score"])
+        return "<span class='%s live'>%s</span>" % (cls, line)
     if row.get("status_word"):
         bits = [row.get("team") or "", row["status_word"]]
     elif row.get("opp"):
@@ -2639,16 +2729,29 @@ def _meta(row: Mapping[str, Any], cls: str = "plmeta") -> str:
         " ".join(b if b == "&middot;" else _e(b) for b in bits if b))
 
 
-def _points(value: Any, cls: str = "plpts") -> str:
+def _points(value: Any, cls: str = "plpts", mins: Any = None) -> str:
     """The day's score, or a dash. ``None`` and ``0.0`` are not the same answer.
 
     A dash means ESPN has published nothing for this player today -- he has
     not tipped off, or is not playing. A zero means he played and scored
     nothing, which is the one number on the page worth being angry about.
+
+    ``mins`` goes under it rather than on the fixture line, because minutes
+    are the denominator of the number above them: 12.0 in six minutes and
+    12.0 in thirty-six are the same cell and opposite facts. Zero minutes is
+    left off -- a man who has not come on yet has a dash for points already,
+    and "0m" under it says the same thing twice.
     """
+    try:
+        played = None if mins is None else float(mins)
+    except (TypeError, ValueError):
+        played = None
+    under = ("" if not played
+             else "<small class=plmin>%sm</small>" % _e("%d" % round(played)))
     if value is None:
-        return "<span class=%s>&mdash;</span>" % cls
-    return "<span class='%s scored'>%s</span>" % (cls, _e("%.1f" % float(value)))
+        return "<span class=%s>&mdash;%s</span>" % (cls, under)
+    return "<span class='%s scored'>%s%s</span>" % (
+        cls, _e("%.1f" % float(value)), under)
 
 
 def _slot_order(slot_counts: Mapping[int, int]) -> List[int]:
@@ -3429,7 +3532,7 @@ def _mside(row: Optional[Mapping[str, Any]], side: str,
     return ("<div class='mside %s'>%s<div class=mwho>%s%s</div>%s</div>" % (
         side, _face(row["pid"]),
         _who(row["pid"], _short_name(row["name"]), league=league),
-        _meta(row, "mmeta"), _points(row["points"], "mpts"),
+        _meta(row, "mmeta"), _points(row["points"], "mpts", row.get("mins")),
     ))
 
 
@@ -3564,7 +3667,7 @@ def _seat_row(row: Optional[Mapping[str, Any]], slot: int,
             _face(row["pid"]),
             _who(row["pid"], row["name"], league=league),
             _meta(row),
-            _points(row["points"]),
+            _points(row["points"], "plpts", row.get("mins")),
             empty,
         ))
 

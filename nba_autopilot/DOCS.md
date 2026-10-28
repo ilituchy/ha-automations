@@ -390,6 +390,21 @@ subtotal for each side. A dash in the points column means ESPN has published
 nothing for that player that day — he has not tipped off, or is not playing. A
 `0.0` means he played and scored nothing.
 
+**While a game is being played**, the tip-off time is replaced by where the
+game actually is — `@NYK · Q2 1:16 · 25-20`, his team's score first — and the
+minutes he has played appear under his points, as `17m`. A number without
+minutes beside it does not say much: 12.0 in six minutes and 12.0 in
+thirty-six are the same cell and opposite facts. The same line says `Half`,
+`End Q3`, `OT 2:11` or `Final`. Both the lineup editor and the matchup sheet
+show this; on a phone, where two rosters share the width, the matchup sheet
+drops the NBA score and keeps the clock.
+
+The minutes come off the same ESPN row as the points and cost nothing extra.
+The quarter and the score come from ESPN's public NBA scoreboard, which needs
+no cookie; it is read at most once every 25 seconds however many times the
+page is refreshed, and if it cannot be read the tip-off times stay as they
+were and nothing else on the page changes.
+
 Under the score card is the week, one chip per day, each showing what both
 sides scored that day. Tap one to see that day's lineups. The arrows beside
 the week number go back through **previous matchups** — a different opponent

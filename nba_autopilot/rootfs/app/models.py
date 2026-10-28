@@ -468,10 +468,15 @@ class DayEntry:
     ``points`` is ``None`` when ESPN has no scored row for that player on that
     day: he has not played yet, or does not play at all. Zero means he played
     and scored nothing, which is a different and much worse fact.
+
+    ``minutes`` comes off the same row and costs no second request. It is what
+    turns a number into a rate: 12.0 in six minutes and 12.0 in thirty-six are
+    the same cell and opposite facts.
     """
 
     player: "RosterEntry"
     points: Optional[float] = None
+    minutes: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -623,3 +628,28 @@ class PlayerCard:
     splits: tuple = ()
     game_log: tuple = ()
     news: tuple = ()
+
+
+@dataclass(frozen=True)
+class LiveGame:
+    """One NBA game that has tipped off, from ESPN's public scoreboard.
+
+    A display type, like the player-card types above it: nothing in ``solve/``
+    reads it, because where a game is has no bearing on who should be started
+    tomorrow. It exists so that a roster row showing 12.0 can also say whether
+    that is four minutes of work or thirty-four.
+
+    ``score`` is the team this row is indexed under -- the mapping holds both
+    sides of a game, each from its own point of view -- so a player's own team
+    is always the first number without the caller working out which side he is
+    on. ``detail`` is ESPN's own phrase ("Halftime", "End of 2nd"), kept
+    because a period number cannot express either of those.
+    """
+
+    pro_team_id: ProTeamId
+    final: bool = False
+    period: int = 0
+    clock: str = ""
+    detail: str = ""
+    score: Optional[int] = None
+    opp_score: Optional[int] = None

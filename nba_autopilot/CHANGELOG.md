@@ -8,6 +8,36 @@ All notable changes to this app are documented here. The format follows
 
 ### Added
 
+- **Where the game actually is, on every roster row.** A tip-off time that has
+  passed is the one thing on a row that is certainly no longer true. Once a
+  game starts it is replaced by `@NYK · Q2 1:16 · 25-20` — his team's score
+  first — and the minutes he has played appear under his points as `17m`.
+  Also `Half`, `End Q3`, `OT 2:11` and `Final`. On the lineup editor and the
+  matchup sheet both.
+
+  12.0 in six minutes and 12.0 in thirty-six are the same cell and opposite
+  facts, which is what the minutes are there to settle. They come off the same
+  ESPN stat row the day's points already came from, so they cost no request:
+  `_day_points` became `_day_row` and the caller reads two fields instead of
+  one.
+
+  The quarter and the score come from ESPN's public NBA scoreboard at
+  `site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard` — a
+  different host from the fantasy API, no cookie, nothing private on it. The
+  two disagree about what a team is *called* (the scoreboard says `NY` and
+  `SA` where the fantasy API says `NYK` and `SAS`) and agree about its **id**,
+  so the join is the id and the abbreviation is never read. Cached for 25
+  seconds, short because a game clock is the one thing on these pages that is
+  wrong the moment it is stale; read only for today, because ESPN answers for
+  the current slate and asking it about Thursday would file tonight's clock
+  under Thursday's games. A scoreboard that cannot be read costs the clock and
+  nothing else.
+
+  A live game also beats an injury tag on the line, but only once he has
+  minutes on the board: "Day-to-day" is a guess about today that minutes have
+  answered, while a man who is out should keep saying so as his team plays
+  without him.
+
 - **The player card.** Clicking a name now opens his card over the page you
   were on, instead of sending you to ESPN: season and trailing 7/15/30-day
   averages, a game log of every game he has played with the fixture and what
