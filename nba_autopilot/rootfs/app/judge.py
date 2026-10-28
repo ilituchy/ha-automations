@@ -161,9 +161,10 @@ projections.
 
 What it cannot see is everything outside this week. A player who will not play \
 in the next few days is worth zero to it, whether he is out for the season or \
-out until Friday. It does not know who was a first-round pick, who is a \
-returning All-Star, who is 19 years old, or which injuries are three-day \
-injuries. That is the gap you are filling, and the only gap.
+out until Friday. It does not know who is a \
+returning All-Star, which injuries are three-day injuries, or anything at all \
+about a player beyond the next few days. That is the gap you are filling, and \
+the only gap.
 
 Block the swap when the player going out is worth materially more than this \
 week's number says and the player coming in is not worth giving that up for. \
@@ -178,11 +179,31 @@ Approve the swap when the case holds: the player going out is genuinely \
 replaceable, or the gain is large enough to be worth the asset, or the league \
 is a redraft league where only this season matters.
 
+In a keeper or dynasty league, one more thing, and it is the thing the \
+numbers are worst at. **A young player on a rookie contract is an asset \
+whether or not he is producing yet, and ownership share will not tell you so \
+-- it will tell you the opposite.** Most leagues are redraft leagues, so a \
+nineteen-year-old lottery pick averaging eight minutes is held in very few of \
+them, and the low number you are shown is thousands of owners answering a \
+question you are not being asked. You are given each player's age, draft year \
+and draft slot for exactly this. Treat a high pick in his first or second \
+season as a hold by default: a cold start is the ordinary beginning of a \
+career, not evidence that he is replaceable, and a roster spot is a cheap \
+price for the two or three years it takes to find out. Block a swap that \
+sends one out for a veteran who is better this week, and say so plainly. The \
+exception is a gain large enough to decide a matchup that is actually close, \
+and you are shown the score to judge that with.
+
+This cuts both ways. A journeyman in his tenth season who is hot this \
+fortnight is not a dynasty asset, and holding him over a prospect because he \
+is outscoring him this week is the same mistake pointing the other way.
+
 Two things to hold on to. First, a block costs the owner real points he was \
 shown a case for, so "this feels aggressive" is not a reason -- name the \
 specific fact the numbers missed. Second, a keeper league and a redraft league \
 are different questions, and you are told which one this is: in a redraft \
-league next season is not a consideration at all.
+league next season is not a consideration at all, and a prospect is worth \
+exactly what he scores between now and April.
 
 Call record_verdict exactly once.\
 """
@@ -258,7 +279,7 @@ def _report_for(note: Any) -> str:
     return head or body
 
 
-def _side(label: str, cand: Any, note: Any) -> List[str]:
+def _side(label: str, cand: Any, note: Any, bio: Any = None) -> List[str]:
     lines = [
         "%s: %s" % (label, cand.name),
         "  projects %.1f points per game when he plays" % cand.per_game,
@@ -269,6 +290,12 @@ def _side(label: str, cand: Any, note: Any) -> List[str]:
     ]
     if getattr(cand, "on_ir", False):
         lines.append("  currently parked in an injured-reserve slot")
+    # Only ever populated for a keeper league. In a redraft league a player's
+    # age is not a fact about his value, and putting it in front of a reader
+    # who has been told next season does not count is an invitation to weigh
+    # it anyway.
+    if bio is not None and getattr(bio, "known", lambda: False)():
+        lines.append("  who he is: %s" % bio.describe())
     report = _report_for(note)
     if report:
         lines.append("  injury news: %s" % report)
@@ -285,6 +312,7 @@ def build_prompt(
     plan: Any,
     matchup: Any = None,
     reports: Optional[Mapping[int, Any]] = None,
+    bios: Optional[Mapping[int, Any]] = None,
     acquisitions_left: Optional[int] = None,
 ) -> str:
     """The whole case, in the order a reader needs it.
@@ -299,6 +327,7 @@ def build_prompt(
     amounts of benefit of the doubt.
     """
     reports = reports or {}
+    bios = bios or {}
     lines: List[str] = []
     lines.append("League: %s" % league_name)
     lines.append(
@@ -318,7 +347,8 @@ def build_prompt(
             "Acquisitions left this week: %d" % acquisitions_left
         )
     lines.append("")
-    lines.extend(_side("COMING IN", plan.add, reports.get(plan.add.player_id)))
+    lines.extend(_side("COMING IN", plan.add, reports.get(plan.add.player_id),
+                       bios.get(plan.add.player_id)))
     lines.append("")
     if plan.drop is None:
         lines.append(
@@ -327,7 +357,8 @@ def build_prompt(
         )
     else:
         lines.extend(
-            _side("GOING OUT", plan.drop, reports.get(plan.drop.player_id))
+            _side("GOING OUT", plan.drop, reports.get(plan.drop.player_id),
+                  bios.get(plan.drop.player_id))
         )
     lines.append("")
     lines.append(
@@ -410,6 +441,7 @@ class AddDropJudge:
         plan: Any,
         matchup: Any = None,
         reports: Optional[Mapping[int, Any]] = None,
+        bios: Optional[Mapping[int, Any]] = None,
         acquisitions_left: Optional[int] = None,
     ) -> Verdict:
         """Judge one swap. Never raises -- a failure comes back as a block.
@@ -425,6 +457,7 @@ class AddDropJudge:
             plan=plan,
             matchup=matchup,
             reports=reports,
+            bios=bios,
             acquisitions_left=acquisitions_left,
         )
         log.debug("judge prompt:\n%s", prompt)

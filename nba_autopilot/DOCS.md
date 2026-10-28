@@ -176,6 +176,27 @@ including the beat reporters' words, your current matchup score, and the
 model's full reasoning. Then it is asked one question: does the statistical case
 hold up against what you know that these numbers cannot encode.
 
+**In a keeper or dynasty league it is also shown each player's age, NBA draft
+year and draft slot**, and told what to do with them. Ownership share is the
+single most useful number it gets and it answers this particular question
+backwards: most leagues are redraft leagues, so a nineteen-year-old lottery
+pick is held in very few of them *because* he is not producing yet — and to
+anything that can only see ownership, that reads as "replaceable". The
+reviewer now treats a high pick in his first or second season as a hold by
+default, on the grounds that a cold start is the ordinary beginning of a
+career and a roster spot is a cheap price for the years it takes to find out.
+It cuts both ways: a journeyman in his tenth season who is hot this fortnight
+is not a dynasty asset either, and the reviewer will give up points this week
+to take a prospect over him.
+
+Age and draft slot come from ESPN's public NBA athlete record — a different
+API from the fantasy one, no cookie, cached for a week — and only for the two
+players in a swap, in a keeper league. Your redraft league is never shown
+them: next season does not count there, so a player's age is not a fact about
+his value, and putting it in front of a reviewer who has been told that is an
+invitation to weigh it anyway. Nothing in the optimizer reads any of it; how
+old a player is has no bearing on who should start tonight.
+
 It can only **block** a swap. It never picks a player, never proposes a move and
 never ranks the pool, so a rejection is always checkable against the numbers it
 was shown and an approval adds no claim of its own. When it blocks something it

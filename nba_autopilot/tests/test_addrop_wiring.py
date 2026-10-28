@@ -361,6 +361,9 @@ class _Harness:
         self.app.store = self.store
         self.app.ha = self.ha
         self.app.judge = judge
+        # No network from a unit test. Tests that care about what the reviewer
+        # was told about a player set this to return one.
+        self.app.bio_source = lambda ids: {}
 
         self.settings = st or settings()
         # Three players for two starting slots and one bench, so the roster is

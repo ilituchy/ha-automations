@@ -73,6 +73,40 @@ All notable changes to this app are documented here. The format follows
 
 ### Changed
 
+- **The add/drop reviewer is shown who a player *is*, in keeper leagues.** Age,
+  NBA draft year and draft slot, from ESPN's public athlete record.
+
+  The reviewer's best signal was ownership share, and on this question it reads
+  backwards. Most leagues are redraft leagues, so a nineteen-year-old lottery
+  pick is held in very few of them **because** he is not producing yet, and to
+  anything that can only see ownership that is indistinguishable from
+  "replaceable". The system prompt now says so, and says what to do about it: a
+  high pick in his first or second season is a hold by default, a cold start
+  being the ordinary beginning of a career rather than evidence of anything. It
+  cuts both ways — a journeyman in his tenth season who is hot this fortnight
+  is not a dynasty asset, and the reviewer will now give up points this week to
+  take a prospect over him.
+
+  Checked against the live reviewer on three shapes. A 20-year-old fifth pick
+  going out for a 31-year-old journeyman was blocked both before and after, but
+  only the "after" blocked it for the right reason — without the bio it
+  reasoned from a fantasy ADP of 149 and called that "taken as a real asset",
+  which is a late-round flier. The case that actually needed this is a prospect
+  with *no* fantasy market at all: 1% owned, no ADP, no preseason rank. There
+  the reviewer had nothing to work with, and with the record it blocks on
+  "19-year-old, 2nd overall pick in his first NBA season". A genuinely
+  replaceable 30-year-old second-rounder for a +22 upgrade is still approved,
+  and the reverse trade — giving up 5 points this week for a 20-year-old
+  seventh pick — is now approved where it would not have been.
+
+  The record is public and cookie-free, cached for a week, and fetched only for
+  the two players in a swap and only in a keeper league. The redraft league is
+  never shown it: next season does not count there, so a player's age is not a
+  fact about his value. Nothing in `solve/` reads it, deliberately — how old a
+  player is has no bearing on who should start tonight, and letting it reach
+  the optimizer would be a way of quietly playing for next season with this
+  week's lineup.
+
 - **Recent form now counts from the first game instead of the tenth.** The
   model blended ESPN's season projection with the last-fifteen-days split only
   once a player had ten games behind him, then on a `games/82` ramp capped at

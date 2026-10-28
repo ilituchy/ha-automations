@@ -35,7 +35,8 @@ sys.path.insert(
 )
 
 import judge as judge_mod  # noqa: E402
-from models import MatchupScore  # noqa: E402
+from espn import bio as bio_mod  # noqa: E402
+from models import MatchupScore, PlayerBio  # noqa: E402
 from solve.addrop import AddDropPlan, Candidate  # noqa: E402
 
 from tests.test_addrop_wiring import (  # noqa: E402
@@ -795,3 +796,115 @@ class TestWhatItConsideredIsKept(unittest.TestCase):
             h.app._record_declined("RUN1", plan, why, 1)   # must not raise
         finally:
             h.app.store = saved
+
+
+class TestWhoHeIsNotJustWhatHeScores(unittest.TestCase):
+    """Age and draft slot, read for keeper leagues only.
+
+    *"these are long term dynasty players. if we have a young guy who isnt hot
+    yet, it doesnt mean we want to drop him especially if he was a high draft
+    pick or highly scouted talent"*.
+
+    Ownership share is the reviewer's best signal and it answers this question
+    backwards. Most leagues are redraft leagues, so a nineteen-year-old
+    lottery pick is held in very few of them **because** he is not producing
+    yet -- which reads as "replaceable" to anything that cannot see how old he
+    is or where he was taken.
+    """
+
+    RECORD = {"age": 20, "experience": {"years": 2},
+              "draft": {"year": 2025, "round": 1, "selection": 5,
+                        "displayText": "Year: 2025 Round: 1 Pick: 5"}}
+
+    def test_the_record_is_read_whole(self):
+        b = bio_mod.parse(4873138, self.RECORD)
+        self.assertEqual((20, 2, 2025, 1, 5),
+                         (b.age, b.experience_years, b.draft_year,
+                          b.draft_round, b.draft_pick))
+
+    def test_the_draft_slot_says_which_round_it_was(self):
+        """"Pick 5" and "round 2, pick 5" are thirty-five places apart, and a
+        bare 5 reads as the first."""
+        said = bio_mod.parse(1, self.RECORD).describe()
+        self.assertIn("round 1, pick 5", said)
+        self.assertIn("20 years old", said)
+
+    def test_espns_experience_counts_the_season_being_played(self):
+        """A 2025 draftee reads 2 in 2026-27. Rendered as an ordinal season,
+        because "2 years of experience" reads as one more than it is."""
+        self.assertIn("2nd NBA season", bio_mod.parse(1, self.RECORD).describe())
+
+    def test_a_record_with_nothing_in_it_is_none_not_an_empty_bio(self):
+        """A line reading "age unknown, draft unknown" is worse than no line:
+        it invites the reviewer to reason about an absence."""
+        self.assertIsNone(bio_mod.parse(1, {}))
+        self.assertIsNone(bio_mod.parse(1, None))
+        self.assertIsNone(bio_mod.parse(1, "not a record"))
+
+    def test_undrafted_is_a_reading_and_not_a_gap(self):
+        said = PlayerBio(player_id=1, age=24, experience_years=0).describe()
+        self.assertIn("no draft record", said)
+
+    def test_a_lookup_that_fails_costs_the_line_and_nothing_else(self):
+        class Dead:
+            def get(self, *a, **k):
+                raise OSError("down")
+        bio_mod._CACHE.clear()
+        self.assertIsNone(bio_mod.fetch(123456, Dead()))
+
+    def test_a_miss_is_cached_too(self):
+        """A player ESPN has no record for still has none tomorrow, and the
+        add/drop loop asks about the same bench every day."""
+        calls = []
+
+        class Once:
+            def get(self, *a, **k):
+                calls.append(1)
+                raise OSError("down")
+        bio_mod._CACHE.clear()
+        bio_mod.fetch(999001, Once())
+        bio_mod.fetch(999001, Once())
+        self.assertEqual(1, len(calls))
+
+    def test_the_prompt_carries_it(self):
+        out = judge_mod.build_prompt(
+            league_name="Dynassty", keeper=True, plan=plan(),
+            bios={90: PlayerBio(player_id=90, age=19, draft_year=2026,
+                                draft_round=1, draft_pick=3,
+                                experience_years=1)},
+        )
+        self.assertIn("who he is: 19 years old; 2026 draft, round 1, pick 3",
+                      out)
+
+    def test_the_system_prompt_tells_it_what_to_do_with_that(self):
+        p = judge_mod.SYSTEM
+        self.assertIn("rookie contract", p)
+        self.assertIn("first or second", p)
+        # And the other way round, which is the same mistake reversed.
+        self.assertIn("tenth season", p)
+
+    def test_redraft_is_not_told_how_old_anyone_is(self):
+        """Next season does not count there, so a player's age is not a fact
+        about his value -- and showing it invites weighing it anyway."""
+        h = _Harness(judge=_Judge(judge_mod.Verdict(True, "ok")))
+        h.lg = _League(_Read(pool=[player(90, name="Better", slot=12)]),
+                       keeper=False)
+        asked = []
+        h.app.bio_source = lambda ids: asked.append(list(ids)) or {}
+        h.consider()
+        self.assertEqual([], asked)
+
+    def test_a_keeper_league_looks_up_both_men_in_the_swap(self):
+        h = _Harness(judge=_Judge(judge_mod.Verdict(True, "ok")))
+        h.lg = _League(_Read(pool=[player(90, name="Better", slot=12)]),
+                       keeper=True)
+        asked = []
+        h.app.bio_source = lambda ids: asked.append(sorted(ids)) or {}
+        h.consider()
+        self.assertEqual(1, len(asked))
+        self.assertIn(90, asked[0])
+        self.assertEqual(2, len(asked[0]), "the add and the drop, nobody else")
+
+
+if __name__ == "__main__":
+    unittest.main()

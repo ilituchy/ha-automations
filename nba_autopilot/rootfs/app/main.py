@@ -37,6 +37,7 @@ import discover as discovery
 import judge as judge_mod
 import pipeline
 import usage as usage_mod
+from espn import bio as bio_mod
 from espn import ids
 from espn.read import EspnAuthError, EspnError, EspnRead, make_client
 from espn.write import EspnWrite
@@ -381,6 +382,11 @@ class Autopilot:
         # get right instead of two that can contradict each other -- a key
         # with the switch off, or a switch on with no key, would both need a
         # behaviour nobody could predict from the Configuration tab.
+        #: Age and draft slot for the two men in a swap, looked up only in a
+        #: keeper league. An attribute rather than a direct call so a test can
+        #: answer it without a network, the same seam ``judge`` is.
+        self.bio_source = bio_mod.fetch_many
+
         self.judge: Optional[judge_mod.AddDropJudge] = None
         if cfg.anthropic_api_key:
             self.judge = judge_mod.AddDropJudge(
@@ -1242,12 +1248,26 @@ class Autopilot:
 
         notes: List[str] = []
         reports = join_injuries(list(roster) + list(pool), injuries)
+        keeper = bool(lg.ref.keeper)
+        # Age and draft slot, for the two men in this swap and only in a
+        # keeper league. The request is public, cookie-free and cached for a
+        # week, and it answers the one question ownership share answers
+        # backwards: a nineteen-year-old lottery pick is held in few leagues
+        # *because* he is not producing yet, which reads as "replaceable" to
+        # anything that cannot see how old he is.
+        bios: Mapping[int, Any] = {}
+        look_up = getattr(self, "bio_source", None)
+        if keeper and look_up is not None:
+            bios = look_up([c.player_id
+                            for c in (decision.add, decision.drop)
+                            if c is not None]) or {}
         verdict = self.judge.review(
             league_name=lg.name,
-            keeper=bool(lg.ref.keeper),
+            keeper=keeper,
             plan=decision,
             matchup=matchup,
             reports=reports,
+            bios=bios,
             acquisitions_left=decision.acquisitions_left,
         )
         swap = decision.add.name

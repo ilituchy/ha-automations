@@ -652,3 +652,66 @@ class LiveGame:
     detail: str = ""
     score: Optional[int] = None
     opp_score: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class PlayerBio:
+    """Age, experience and draft slot, from ESPN's public NBA record.
+
+    Read by the add/drop reviewer in a keeper league and by nothing else. It is
+    deliberately absent from everything in ``solve/``: how old a player is has
+    no bearing on who should start tonight, and letting it reach the optimizer
+    would be a way of quietly playing for next season with this week's lineup.
+
+    Every field is ``Optional`` because ESPN's record is uneven -- an undrafted
+    player has no draft slot and that is a fact about him, not a gap.
+    """
+
+    player_id: PlayerId
+    age: Optional[int] = None
+    experience_years: Optional[int] = None
+    draft_year: Optional[int] = None
+    draft_round: Optional[int] = None
+    draft_pick: Optional[int] = None
+
+    def known(self) -> bool:
+        """Whether there is anything here worth putting in front of a reader."""
+        return any(v is not None for v in (
+            self.age, self.experience_years, self.draft_year))
+
+    def describe(self) -> str:
+        """``20 years old; 2025 draft, round 1, pick 5; 2nd NBA season``.
+
+        ESPN's ``experience.years`` counts the season being played, so a man
+        drafted in 2025 reads 2 in 2026-27. Rendered as an ordinal season
+        rather than as "2 years of experience", which reads as one more.
+
+        The draft slot is spelled out rather than given as an overall number
+        because "pick 5" and "round 2, pick 5" are thirty-five places apart and
+        a bare 5 reads as the first.
+        """
+        bits = []
+        if self.age is not None:
+            bits.append("%d years old" % self.age)
+        if self.draft_year is not None:
+            where = "%d draft" % self.draft_year
+            if self.draft_round is not None and self.draft_pick is not None:
+                where += ", round %d, pick %d" % (self.draft_round,
+                                                  self.draft_pick)
+            elif self.draft_round is not None:
+                where += ", round %d" % self.draft_round
+            bits.append(where)
+        elif self.experience_years is not None and not self.experience_years:
+            # ESPN reports no draft record for an undrafted player, and that is
+            # a reading rather than a gap -- it is the opposite of pedigree.
+            bits.append("no draft record")
+        if self.experience_years:
+            bits.append("%s NBA season" % _ordinal(self.experience_years))
+        return "; ".join(bits)
+
+
+def _ordinal(n: int) -> str:
+    """``1`` -> ``1st``. For :meth:`PlayerBio.describe` and nothing else."""
+    if 10 <= (n % 100) <= 20:
+        return "%dth" % n
+    return "%d%s" % (n, {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th"))
