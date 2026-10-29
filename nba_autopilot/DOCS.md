@@ -200,9 +200,15 @@ old a player is has no bearing on who should start tonight.
 It can only **block** a swap. It never picks a player, never proposes a move and
 never ranks the pool, so a rejection is always checkable against the numbers it
 was shown and an approval adds no claim of its own. When it blocks something it
-says why, in its own words, on the status page under that run's notes. It can
-also approve with a caveat, which is appended to the move's rationale rather
-than replacing it — the computed numbers stay on the card.
+says why, in its own words, on the status page under that run's notes.
+
+Whatever it says is **appended** to the move's rationale rather than replacing
+it, so the computed numbers stay on the card and stay first. Open *Show
+details* on a proposed swap and the reviewer's reading of it is the last thing
+there, under `Reviewer's read:`, with a `Reviewer's caveat:` after that when it
+had a reservation it wanted on the record anyway. A card with neither line is a
+card no reviewer saw — because no key is set, or because the swap was written
+without review.
 
 Leave the key empty and nothing changes: swaps are proposed exactly as they were
 before. Fill it in and a swap the reviewer could not be reached about is **not**

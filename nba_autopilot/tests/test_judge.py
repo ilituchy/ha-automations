@@ -466,14 +466,32 @@ class TestTheGateSitsBeforeTheUser(unittest.TestCase):
         self.assertTrue(decision.proposed)
         self.assertEqual([n for n in notes if "review" in n], [])
 
-    def test_an_approval_leaves_the_computed_rationale_alone(self):
-        """The ``Move.rationale`` invariant: the numbers stay checkable."""
+    def test_an_approval_adds_to_the_computed_rationale_without_touching_it(self):
+        """The ``Move.rationale`` invariant: the numbers stay checkable.
+
+        The reviewer's words are *appended*. They were once dropped entirely
+        on a clean approval, which left the commonest card looking unreviewed.
+        """
         h = self.harness(judge_mod.Verdict(True, "Weak is replaceable."))
         decision, notes = h.consider()
         self.assertTrue(decision.proposed)
-        self.assertNotIn("Reviewer", decision.rationale)
+        self.assertIn("Reviewer's read: Weak is replaceable.", decision.rationale)
+        # The computed half is untouched and still comes first.
+        self.assertIn("per game against", decision.rationale)
+        self.assertLess(decision.rationale.find("per game against"),
+                        decision.rationale.find("Reviewer's read:"))
         self.assertTrue(any("cleared review" in n for n in notes))
         self.assertTrue(any("Weak is replaceable." in n for n in notes))
+
+    def test_a_caveat_comes_after_the_read_so_it_lands_last(self):
+        """The card's disclosure puts the last paragraph where the eye ends."""
+        h = self.harness(
+            judge_mod.Verdict(True, "Fine on the numbers.", concern="Thin at C.")
+        )
+        decision, _notes = h.consider()
+        self.assertLess(decision.rationale.find("Reviewer's read:"),
+                        decision.rationale.find("Reviewer's caveat:"))
+        self.assertTrue(decision.rationale.rstrip().endswith("Thin at C."))
 
     def test_a_block_withholds_the_swap_and_says_why(self):
         h = self.harness(
@@ -601,11 +619,11 @@ class TestTheReviewerSeesEverySwap(unittest.TestCase):
         self.assertIn(
             "second move of this run", h.app.judge.seen[1]["plan"].rationale
         )
-        # And what the reviewer saw is what the proposal carries, bar a caveat
-        # the reviewer itself may add.
-        self.assertEqual(
-            h.app.judge.seen[1]["plan"].rationale, decisions[1].rationale
-        )
+        # And what the reviewer saw is what the proposal carries, bar what the
+        # reviewer itself then adds to the end of it.
+        self.assertTrue(decisions[1].rationale.startswith(
+            h.app.judge.seen[1]["plan"].rationale
+        ))
 
 
 class TestABlockIsNotAMove(unittest.TestCase):

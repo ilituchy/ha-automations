@@ -1287,18 +1287,28 @@ class Autopilot:
             return None, notes, bool(verdict.errored)
 
         notes.append("%s cleared review -- %s" % (swap, verdict.reason))
-        if not verdict.concern:
+        # Everything the reviewer said goes on the card, not only into the
+        # record: the card is where the decision is actually made, and words
+        # filed somewhere the user is not looking are words nobody reads. Only
+        # the *caveat* used to come through, which meant a swap the reviewer
+        # had genuinely weighed and cleared looked, on the card, exactly like
+        # a swap it had never been shown -- "dont see any ai analysis on this
+        # one. why?". The approval is the commoner outcome, so that was most
+        # cards. Both are appended to the computed rationale rather than
+        # replacing it -- see the invariant on ``models.Move.rationale`` -- and
+        # the caveat stays last, which is where the card's disclosure puts the
+        # part most worth reading.
+        tail = []
+        if verdict.reason:
+            tail.append("Reviewer's read: %s" % verdict.reason)
+        if verdict.concern:
+            tail.append("Reviewer's caveat: %s" % verdict.concern)
+        if not tail:
             return decision, notes, False
-        # A caveat raised on an approval goes on the card, not only into the
-        # record: the card is where the decision is actually made, and a
-        # reservation filed somewhere the user is not looking is not a
-        # reservation. Appended to the computed rationale rather than replacing
-        # it -- see the invariant on ``models.Move.rationale``.
         return (
             dataclasses.replace(
                 decision,
-                rationale="%s\n\nReviewer's caveat: %s"
-                % (decision.rationale, verdict.concern),
+                rationale="\n\n".join([decision.rationale] + tail),
             ),
             notes,
             False,

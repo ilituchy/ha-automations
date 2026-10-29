@@ -6,6 +6,20 @@ All notable changes to this app are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The reviewer's reasoning is on the card, not only in the run log.** It was
+  only ever shown when the reviewer attached a *caveat*. A swap it had read in
+  full and cleared without reservation carried nothing — so the commonest
+  outcome, a clean approval, produced a card indistinguishable from one no
+  reviewer had ever seen: *"dont see any ai analysis on this one. why?"*
+
+  Open *Show details* and the approval now reads under `Reviewer's read:`,
+  with `Reviewer's caveat:` after it when there is one. Still appended, never
+  substituted: the computed arithmetic stays on the card and stays first, per
+  the invariant on `models.Move.rationale`. A card with neither line now means
+  what it looks like — nobody reviewed that swap.
+
 ### Added
 
 - **Where the game actually is, on every roster row.** A tip-off time that has
