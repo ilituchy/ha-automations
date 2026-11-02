@@ -29,6 +29,7 @@ sys.path.insert(
 )
 
 import pipeline  # noqa: E402
+from solve import budget as budget_mod  # noqa: E402
 import usage as usage_mod  # noqa: E402
 from espn import ids  # noqa: E402
 from models import LeagueSettings, Projection, RosterEntry, StatLimit  # noqa: E402
@@ -856,3 +857,102 @@ class TestRecentFormReading(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheCapIsPricedAgainstStartsWeCouldMake(unittest.TestCase):
+    """``_cap_candidates``: one entry per *startable* player-game, not per game.
+
+    ``budget.shadow_price`` sorts these by value and reads off the marginal one
+    the budget reaches, so an entry for a game no lineup could start pushes that
+    margin up and makes every real opportunity look dearer than it is.
+
+    Measured on the live rosters on 2026-11-02: 91 entries for a roster with 57
+    startable games, four days carrying 25, 23, 17 and 13 players against 11
+    slots, and ``lambda`` at **25.72** where the right answer was **0.00** --
+    the cap was not binding at all (42.3 expected games against 44). The
+    optimizer rationed it anyway and gave two starting slots to men with no game
+    that night while Ace Bailey and VJ Edgecombe sat with games.
+    """
+
+    def case(self, n_players=20, seats=3, days=(1, 2)):
+        roster = [player(i, team=1) for i in range(1, n_players + 1)]
+        values = {i: float(100 - i) for i in range(1, n_players + 1)}
+        projections = {i: projection(i, float(100 - i)) for i in
+                       range(1, n_players + 1)}
+        schedule = {1: {d: 1 for d in days}}
+        return pipeline._cap_candidates(
+            roster, values, projections, list(days), schedule,
+            starting_slots=seats,
+        )
+
+    def test_a_day_contributes_at_most_its_starting_slots(self):
+        """Twenty men with games and three slots is three opportunities."""
+        got = self.case(n_players=20, seats=3, days=(1, 2))
+        self.assertEqual(len(got), 6)
+
+    def test_it_keeps_the_days_best_and_discards_the_rest(self):
+        """The discarded ones are the men a lineup would have benched anyway,
+        so the price has to be read off the last one it would have started."""
+        got = self.case(n_players=20, seats=3, days=(1,))
+        self.assertEqual(sorted(v for v, _ in got), [97.0, 98.0, 99.0])
+
+    def test_a_day_inside_capacity_is_untouched(self):
+        got = self.case(n_players=2, seats=5, days=(1, 2))
+        self.assertEqual(len(got), 4)
+
+    def test_the_price_collapses_when_the_cap_stops_binding(self):
+        """The live failure, in one assertion.
+
+        Uncapped, twenty men over two days look like forty opportunities and a
+        thirty-game budget prices the margin at a real number. Capped at three
+        slots a day there are six, the budget is slack, and a game is free.
+        """
+        budget = budget_mod.GamesBudget(cap=30.0, used=0.0)
+        roster = [player(i, team=1) for i in range(1, 21)]
+        values = {i: float(100 - i) for i in range(1, 21)}
+        projections = {i: projection(i, float(100 - i)) for i in range(1, 21)}
+        schedule = {1: {1: 1, 2: 1}}
+        loose = pipeline._cap_candidates(
+            roster, values, projections, [1, 2], schedule, starting_slots=0)
+        tight = pipeline._cap_candidates(
+            roster, values, projections, [1, 2], schedule, starting_slots=3)
+        self.assertGreater(budget_mod.shadow_price(loose, budget), 0.0)
+        self.assertEqual(budget_mod.shadow_price(tight, budget), 0.0)
+
+    def test_a_locked_starter_is_counted_even_if_he_is_the_cheapest(self):
+        """His game is already spent. Dropping him from the list because the
+        per-day cut preferred three better men understates what is committed,
+        which prices the cap *low* -- and that direction forfeits games
+        outright rather than merely wasting them.
+        """
+        roster = [player(1, slot=11, team=1, locked=True)] + [
+            player(i, slot=12, team=1) for i in range(2, 10)
+        ]
+        values = {1: 1.0}
+        values.update({i: float(50 + i) for i in range(2, 10)})
+        projections = {i: projection(i, values.get(i, 0.0)) for i in range(1, 10)}
+        got = pipeline._cap_candidates(
+            roster, values, projections, [1], {1: {1: 1}},
+            starting_slots=3, scoring_period=1,
+        )
+        self.assertEqual(len(got), 3)
+        self.assertIn(1.0, [v for v, _ in got])
+
+    def test_a_locked_man_on_the_bench_is_not_a_committed_start(self):
+        """He is locked where he sits, and where he sits spends nothing."""
+        roster = [player(1, slot=12, team=1, locked=True)] + [
+            player(i, slot=12, team=1) for i in range(2, 10)
+        ]
+        values = {1: 1.0}
+        values.update({i: float(50 + i) for i in range(2, 10)})
+        projections = {i: projection(i, values.get(i, 0.0)) for i in range(1, 10)}
+        got = pipeline._cap_candidates(
+            roster, values, projections, [1], {1: {1: 1}},
+            starting_slots=3, scoring_period=1,
+        )
+        self.assertNotIn(1.0, [v for v, _ in got])
+
+    def test_without_a_slot_count_the_old_behaviour_stands(self):
+        """Rather than price the cap off nothing when a caller cannot say."""
+        got = self.case(n_players=20, seats=0, days=(1, 2))
+        self.assertEqual(len(got), 40)

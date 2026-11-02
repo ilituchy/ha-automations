@@ -617,6 +617,41 @@ scores, the fix is worth roughly **30–55 fantasy points a week per league**.
 If a league scores *both* total rebounds and the offensive/defensive split, the
 app refuses to value it rather than paying twice for the same rebound.
 
+## Why a playable man gets benched
+
+Both your leagues cap **games played per matchup period** — 44 in the dynasty
+league, 40 in the other — and the dynasty roster can generate far more than
+that, so some nights a player with a game sits on purpose. The app prices one
+game off the cap as a number (`lambda`, in the run notes) and starts nobody
+worth less than it.
+
+That price is computed from the startable games left in the week, and the word
+doing the work is **startable**. A night on which 25 of your players have games
+still has only 11 starting slots, so 14 of those games cannot be played at any
+price. Counting them anyway makes the cap look scarcer than it is, which is
+exactly the wrong direction: the app then benches men it could have started for
+free.
+
+This was wrong until 2026-11-02. The dynasty roster was producing 91 candidate
+games of which 57 were startable, and the price came out at **25.72** when the
+true answer was **0.00** — the cap was not binding at all that week, 42.3
+expected games against a cap of 44. You could see it in the lineup: two of
+eleven starting slots held men with **no game that night** while Ace Bailey, VJ
+Edgecombe, Payton Pritchard and nine others sat on the bench with games. The
+week before it left ten of eleven slots idle on the Tuesday and nine on the
+Sunday — and both leagues still finished *under* the cap they were being
+rationed against, 43 of 44 and 38 of 40.
+
+Each day is now capped at its starting-slot count. When the cap genuinely is
+binding you will still see playable men benched, and the note will say so with
+the price; when it is not, every slot gets filled.
+
+Position eligibility is deliberately not modelled, so the ceiling is a slight
+over-count. That is the safe direction. Over-counting prices the cap too high
+and wastes points; under-counting prices it too low and **forfeits games
+outright** — ESPN voids whole days once you pass the cap, and three teams in
+your dynasty league threw away 141, 137.5 and 40.5 points that way in one week.
+
 ## When his role has changed
 
 A projection assumes a job. ESPN wrote Nikola Jovic's assuming 24.6 minutes a

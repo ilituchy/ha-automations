@@ -92,6 +92,36 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **The games-played cap was priced against starts no lineup could make, and
+  it cost points every night.** `pipeline._cap_candidates` emitted one entry per
+  player-game left in the window with no per-day ceiling.
+  `budget.shadow_price` sorts those by value and reads off the marginal one the
+  budget reaches, so an entry for a game that cannot be started at any price
+  pushes that margin up and makes every real opportunity look dearer than it is.
+
+  On 2026-11-02 the dynasty roster produced **91** candidate entries of which
+  only **57** were startable — four days carried 25, 23, 17 and 13 players with
+  games against 11 starting slots — and `lambda` came out at **25.72** where the
+  correct answer was **0.00**. The cap was not binding that week at all: 42.3
+  expected games against a cap of 44. The optimizer rationed it hard anyway, and
+  the result was visible in the live lineup: **two of eleven starting slots went
+  to men with no game that night** while Ace Bailey, VJ Edgecombe, Payton
+  Pritchard, Trey Murphy III and nine others sat on the bench *with* games. The
+  week before, the same bug left ten of eleven slots idle on 2026-10-27 and nine
+  on 2026-11-01, and both leagues finished under the cap they were being
+  rationed against — 43 of 44 and 38 of 40.
+
+  Each day is now capped at its starting-slot count, keeping that day's
+  highest-valued players, with today's locked starters seated first because
+  their games are already spent. Position eligibility is still not modelled, so
+  the ceiling remains an upper bound — deliberately, because over-counting
+  prices the cap too high and wastes points while under-counting forfeits games
+  outright, and three teams in the dynasty league threw away 141, 137.5 and 40.5
+  points to the cap in a single week.
+
+  After the fix both leagues fill every starting slot with a man who plays:
+  11 of 11 and 10 of 10, against 9 of 11 before.
+
 - **A lineup move's reasoning said "last-15" whichever window it read.** Now
   that the blend can read the last 7 days, naming the wrong one is worse than
   naming none: a reader checking the number against ESPN's own card finds a

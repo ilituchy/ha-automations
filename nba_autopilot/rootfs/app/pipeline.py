@@ -58,7 +58,7 @@ from typing import (
 from espn import ids
 from models import LeagueSettings, Move, PlayerId, Projection, RosterEntry, SlotId
 from solve import assign, budget as budget_mod, value as value_mod
-from solve.calendar import SeasonCalendar, team_games_in
+from solve.calendar import SeasonCalendar, game_days_for, team_games_in
 from solve.projections import (
     AvailabilityNote,
     variance_from_mean,
@@ -202,7 +202,14 @@ def plan_lineup(
         used = games_used.games
         gb = budget_mod.remaining_budget(settings, used)
         horizon = calendar.remaining_periods(matchup_period, scoring_period)
-        candidates = _cap_candidates(roster, values, projections, horizon, schedule)
+        candidates = _cap_candidates(
+            roster, values, projections, horizon, schedule,
+            starting_slots=sum(
+                int(n) for sl, n in settings.lineup_slot_counts.items()
+                if int(n) > 0 and int(sl) not in (ids.BENCH_SLOT, ids.IR_SLOT)
+            ),
+            scoring_period=scoring_period,
+        )
         lam = budget_mod.shadow_price(candidates, gb)
         utilization = budget_mod.utilization_ratio(candidates, gb)
         notes.append(
@@ -460,6 +467,9 @@ def _cap_candidates(
     projections: Mapping[PlayerId, Projection],
     horizon: Sequence[int],
     schedule: Mapping[int, Mapping[int, int]],
+    *,
+    starting_slots: int = 0,
+    scoring_period: Optional[int] = None,
 ) -> List[Tuple[float, float]]:
     """``(conditional_value, p_play)`` per startable player-game left this week.
 
@@ -473,19 +483,70 @@ def _cap_candidates(
     here: the projection is a season per-game average with no opponent or
     rest adjustment, so it is day-invariant by construction.
 
+    **Each day is capped at the number of starting slots**, keeping that day's
+    highest-valued players, and that is the difference between a price and a
+    fiction. ``shadow_price`` sorts these by value and reads off the marginal
+    one the budget reaches; an entry for a game we could not start at any price
+    pushes that margin up and makes every real opportunity look dearer than it
+    is.
+
+    Without it, on 2026-11-02: 91 entries for the dynasty roster of which only
+    57 were startable -- four days carried 25, 23, 17 and 13 players with games
+    against 11 slots -- and ``lambda`` came out at **25.72** where the correct
+    answer was **0.00**. The cap was not binding at all that week (42.3 expected
+    games against a 44 cap) and the optimizer was rationing it hard. Two
+    starting slots went to men with no game that night while Ace Bailey, VJ
+    Edgecombe and Payton Pritchard sat on the bench with games, because each
+    was worth less than a phantom margin. The week before, the same bug left
+    ten of eleven slots idle on one day and nine on another.
+
+    Position eligibility is **not** modelled, so the per-day ceiling is an upper
+    bound on what is really startable. That is the direction to be wrong in:
+    over-counting opportunities prices the cap too high and costs points,
+    under-counting prices it too low and forfeits games outright -- three teams
+    in the dynasty league threw away 141, 137 and 40 points to the cap in one
+    week. This errs toward the former while removing the gross error.
+
     Locked players' games today are included even though they are not choices
-    any more. They are committed spends against the same budget, and omitting
-    them would price the cap as if those games were free.
+    any more -- they are committed spends against the same budget, and omitting
+    them would price the cap as if those games were free. They are seated
+    *first* within today's ceiling for the same reason: a committed low-valued
+    start that the per-day cut discarded would understate what is already spent.
     """
-    out: List[Tuple[float, float]] = []
+    seats = max(int(starting_slots), 0)
+    # day -> [(value, p_play, committed)]
+    by_day: Dict[int, List[Tuple[float, float, bool]]] = {}
     for e in roster:
         proj = projections.get(e.player_id)
         if proj is None:
             continue
-        games = team_games_in(horizon, schedule, e.pro_team_id)
-        if games <= 0:
+        value = float(values.get(e.player_id, 0.0))
+        cost = float(proj.p_play)
+        for day in game_days_for(horizon, schedule, e.pro_team_id):
+            committed = bool(
+                e.lineup_locked
+                and scoring_period is not None
+                and int(day) == int(scoring_period)
+                and ids.is_starting_slot(int(e.current_slot))
+            )
+            by_day.setdefault(int(day), []).append((value, cost, committed))
+
+    out: List[Tuple[float, float]] = []
+    for day in sorted(by_day):
+        cands = by_day[day]
+        if not seats:
+            # No ceiling to apply. Keeps the old behaviour for a caller that
+            # cannot tell us the slot count, rather than silently pricing the
+            # cap off nothing.
+            out.extend((v, c) for v, c, _ in cands)
             continue
-        out.extend([(float(values.get(e.player_id, 0.0)), float(proj.p_play))] * games)
+        locked = [(v, c) for v, c, com in cands if com]
+        rest = sorted(
+            ((v, c) for v, c, com in cands if not com),
+            key=lambda vc: -vc[0],
+        )
+        out.extend(locked)
+        out.extend(rest[: max(seats - len(locked), 0)])
     return out
 
 
