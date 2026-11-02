@@ -2689,3 +2689,80 @@ class TestTheIrActivationCard(unittest.TestCase):
                              activate_name="<img src=x onerror=alert(1)>"))
         self.assertNotIn("<img src=x", out)
         self.assertIn("&lt;img src=x", out)
+
+
+class TestTheDecisionSaysItIsWorking(unittest.TestCase):
+    """*"no way to know something s processing"* -- and there wasn't.
+
+    Approving a swap posts a form, the server writes to ESPN, an accepted
+    add/drop then re-reads the roster and re-plans the lineup, and only then
+    does the 303 come back and the page reload. That is several round trips,
+    five to fifteen seconds, and in between the plain form post showed nothing.
+    Inside Home Assistant's ingress iframe the browser's own loading indicator
+    is not visible either, so a tap produced a card that sat there looking
+    untapped.
+    """
+
+    def page(self):
+        return web.render(web.StatusPage(FakeBot(FakeStore(pending=[
+            _proposal(action_id="R1:ADD_DROP:1"),
+        ]))))
+
+    def test_the_form_still_posts_and_navigates(self):
+        """The whole thing degrades to exactly what it did before.
+
+        The script never calls ``preventDefault``: the post and the 303 are
+        what actually decide anything, and a page whose decisions depend on
+        JavaScript running is a page that silently stops working.
+        """
+        out = self.page()
+        self.assertIn("<form method=post action=decide>", out)
+        self.assertIn("type=submit", out)
+        # The *call*, not the word -- the comment in there says it never
+        # makes one, and a test that cannot tell those apart would pass on a
+        # script that did.
+        self.assertNotIn("preventDefault()", web.DECIDE_JS)
+        self.assertNotIn("return false", web.DECIDE_JS)
+        self.assertNotIn("fetch(", web.DECIDE_JS)
+
+    def test_the_script_is_on_the_page_with_the_buttons(self):
+        out = self.page()
+        self.assertIn('form[action="decide"]', out)
+        self.assertIn("Working", out)
+        self.assertIn("@keyframes spin", out)
+
+    def test_it_is_inert_where_there_is_nothing_to_decide(self):
+        """It ships on every page, like the card dialog, and returns at once
+        when it finds no decide form."""
+        self.assertIn("if (!forms.length) return;", web.DECIDE_JS)
+
+    def test_the_card_is_marked_working_rather_than_removed(self):
+        """A removed card claims the move went through, and this is the one
+        page in the app where that claim can be wrong: the approval can be
+        refused, ESPN can reject the write, and the proposal then ends FAILED
+        with an error worth reading. "Working" is true of every outcome."""
+        self.assertIn("classList.add('working')", web.DECIDE_JS)
+        self.assertIn("aria-busy", web.DECIDE_JS)
+        for gone in ("remove()", "removeChild", "display = 'none'"):
+            self.assertNotIn(gone, web.DECIDE_JS)
+
+    def test_every_decide_button_is_disabled_not_just_the_tapped_card(self):
+        """A second submit while the first is navigating replaces the
+        navigation, so the user sees one decision's result with no sign of the
+        other -- and both were sent, so nothing warns them."""
+        self.assertIn('form[action="decide"] button', web.DECIDE_JS)
+        self.assertIn("b.disabled = true", web.DECIDE_JS)
+
+    def test_coming_back_does_not_leave_a_spinner_turning(self):
+        """The back button serves the page from cache with the buttons still
+        disabled on a decision that finished long ago."""
+        self.assertIn("e.persisted", web.DECIDE_JS)
+        self.assertIn("window.location.reload()", web.DECIDE_JS)
+
+    def test_the_verb_rides_in_a_hidden_input_not_on_the_button(self):
+        """Which is why disabling the button during its own submit is safe:
+        a disabled control is not submitted, and if the verb lived on it the
+        server would get an approval with no verb."""
+        out = self.page()
+        self.assertIn("<input type=hidden name=verb value=APPROVE>", out)
+        self.assertIn("<input type=hidden name=verb value=REJECT>", out)

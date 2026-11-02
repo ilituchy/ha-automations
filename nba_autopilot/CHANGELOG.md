@@ -90,6 +90,31 @@ All notable changes to this app are documented here. The format follows
   instead: that is not a judgment about the man leaving, so the next candidate
   would be withheld for the same non-reason.
 
+### Added
+
+- **A decision now says it is working.** *"no way to know something s
+  processing"* — and there wasn't. Approve posts a form, the server writes to
+  ESPN, an accepted add/drop then re-reads the roster and re-plans the lineup,
+  and only then does the 303 come back and the page reload. Five to fifteen
+  seconds, and in between the plain form post showed nothing at all; inside
+  Home Assistant's ingress iframe the browser's own loading indicator is not
+  visible either, so a tap produced a card that sat there looking untapped.
+
+  The tapped button now carries a spinner and **Working…**, the card dims and
+  goes `aria-busy`, and every decide button on the page is disabled until the
+  reload lands — a second submit mid-flight replaces the first navigation, so
+  the user would see one decision's result with no sign of the other, and both
+  were already sent.
+
+  Deliberately **not** a fetch and never `preventDefault`: the post and the 303
+  remain the only things that decide anything, so with JavaScript off the page
+  behaves exactly as it did. And the card is not removed, because a removed card
+  claims the move went through — a claim that can be wrong here, since the
+  approval can be refused or ESPN can reject the write and the proposal ends
+  `FAILED` with an error worth reading. "Working" is true of every outcome; the
+  reload says which one it was, and the queue lists only `PROPOSED` rows so a
+  card that did go through disappears on its own.
+
 ### Fixed
 
 - **Being in today's starting lineup no longer protects a player from being

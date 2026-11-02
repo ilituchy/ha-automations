@@ -1315,6 +1315,29 @@ button.no {
 button:hover { filter: brightness(1.06); }
 button.no:hover { background: var(--chip); }
 button:active { transform: translateY(1px); }
+button[disabled] { cursor: default; filter: none; opacity: .55; }
+button[disabled]:active { transform: none; }
+
+/* Approving a swap is not instant: the write goes to ESPN and an accepted
+   add/drop then re-reads the roster and re-plans the lineup, which is several
+   round trips. The page answers with a 303 and reloads, so the card does go
+   away -- but five to fifteen seconds after the tap, and in between the plain
+   form post showed nothing at all. Inside Home Assistant's ingress iframe the
+   browser's own loading indicator is not visible either, so the only thing a
+   tap produced was a card that sat there looking untapped. */
+.card.working { opacity: .6; }
+.card.working .why summary { pointer-events: none; }
+.spin {
+  display: inline-block; width: 12px; height: 12px; margin-right: 7px;
+  vertical-align: -2px; border-radius: 50%;
+  border: 2px solid currentColor; border-right-color: transparent;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+/* Someone who has asked for less motion gets the word and no wheel. */
+@media (prefers-reduced-motion: reduce) {
+  .spin { display: none; }
+}
 
 /* A run is not a disclosure. What it changed is the thing the page is open
    for, so it is on the surface of the card and nothing has to be tapped to
@@ -1929,6 +1952,67 @@ CARD_JS = """<script>
     if (e.target === dlg) dlg.close();
   });
   dlg.addEventListener('close', function () { body.innerHTML = ''; });
+})();
+</script>"""
+
+#: Immediate feedback on a decision, because the write behind it is slow.
+#:
+#: Deliberately **not** a fetch: the form posts and the browser navigates as it
+#: always did, and the 303 that comes back is the only thing that says what
+#: happened. All this does is make the wait visible -- disable the buttons, put
+#: a spinner in the one that was tapped, and dim the card.
+#:
+#: The card is not removed. A removed card claims the move went through, and
+#: this is the one page in the app where that claim can be wrong: the approval
+#: can be refused (403), ESPN can reject the write, and the proposal then ends
+#: ``FAILED`` with an error the user needs to read. Dimming says "working",
+#: which is true of every outcome; the reload says which one it was. The queue
+#: only lists ``PROPOSED`` rows, so a card that *did* go through disappears on
+#: its own.
+#:
+#: Every decide button on the page is disabled, not only the tapped card's. A
+#: second submit while the first is navigating replaces the navigation, which
+#: leaves the user looking at the result of one decision with no sign of the
+#: other -- and both were sent, so nothing warns them. One at a time, and the
+#: reload shows what is left.
+DECIDE_JS = """<script>
+(function () {
+  var forms = document.querySelectorAll('form[action="decide"]');
+  if (!forms.length) return;
+  var spent = false;
+
+  function freeze(f) {
+    var all = document.querySelectorAll('form[action="decide"] button');
+    Array.prototype.forEach.call(all, function (b) { b.disabled = true; });
+    var btn = f.querySelector('button');
+    if (btn) {
+      // Width pinned first: the label is about to get shorter and a button
+      // that shrinks under the thumb reads as the page breaking.
+      btn.style.minWidth = btn.offsetWidth + 'px';
+      btn.innerHTML = '<span class=spin></span>Working\u2026';
+    }
+    var card = f.closest ? f.closest('.card') : null;
+    if (card) {
+      card.classList.add('working');
+      card.setAttribute('aria-busy', 'true');
+    }
+  }
+
+  Array.prototype.forEach.call(forms, function (f) {
+    f.addEventListener('submit', function () {
+      // Never preventDefault: if anything here throws, the form still posts.
+      if (spent) return;
+      spent = true;
+      try { freeze(f); } catch (err) { /* the post is already on its way */ }
+    });
+  });
+
+  // Coming back via the back button serves the page from the cache with the
+  // buttons still disabled and a spinner still turning, on a decision that is
+  // long finished. Reload instead, because what the queue holds has changed.
+  window.addEventListener('pageshow', function (e) {
+    if (e.persisted) window.location.reload();
+  });
 })();
 </script>"""
 
@@ -2890,6 +2974,10 @@ def _close(user: str = "") -> str:
         out.append("<footer>signed in as %s</footer>" % _e(user))
     out.append(CARD_SHELL)
     out.append(CARD_JS)
+    # Inert on the pages with no decision on them -- it returns immediately
+    # when it finds no decide form, the same way ``CARD_JS`` returns when there
+    # is no dialog to open.
+    out.append(DECIDE_JS)
     out.append("</main></body></html>")
     return "".join(out)
 

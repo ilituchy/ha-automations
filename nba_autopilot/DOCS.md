@@ -505,6 +505,26 @@ something like `person.ian`.
 
 ## The status page
 
+Tapping **Approve** or **Reject** posts the decision and the page reloads
+itself, so the card leaves the queue on its own — there is nothing to refresh
+by hand. What takes the time is the work behind it: the write goes to ESPN, and
+an accepted add/drop then re-reads your roster and re-plans the lineup, which is
+several round trips and can run to fifteen seconds.
+
+While that is happening the card dims, its buttons go flat and the one you
+tapped says **Working…** with a spinner. Every other decision on the page is
+disabled until the reload lands, deliberately: a second tap mid-flight replaces
+the first navigation, so you would end up looking at one decision's result with
+no sign of the other, and both would already have been sent.
+
+The card is **not** removed on the tap, and that is deliberate too. Removing it
+would claim the move went through, and that claim can be wrong — the approval
+can be refused, or ESPN can reject the write and the proposal ends `failed`
+with an error worth reading. "Working" is true of every outcome; the reload
+tells you which one it was. If JavaScript is off, everything behaves exactly as
+it did before: the form posts, the page reloads, you just do not get the
+spinner.
+
 Open the add-on and you get three views.
 
 **Overview** is the one it starts on: this week's score for each league, then
