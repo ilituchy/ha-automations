@@ -239,6 +239,28 @@ def _after_lineup(roster: Sequence[Any], plan: Any) -> List[Any]:
     return out
 
 
+def _swap_label(decision: Any) -> str:
+    """What to call this move in a note, a log line and a notification title.
+
+    One function because it was three, and the three disagreed: an IR
+    activation has no ``add``, so two of them read it off the wrong attribute
+    and the third called it "the acquisition" -- a title that names neither the
+    player coming back nor the player leaving, on the only move in the app that
+    gives a player away.
+    """
+    back = getattr(decision, "activating", None)
+    if back is not None:
+        return "%s off IR%s" % (
+            back.name,
+            " for %s" % decision.drop.name if decision.drop is not None else "",
+        )
+    if decision.add is None:
+        return decision.drop.name if decision.drop is not None else "nothing"
+    if decision.drop is not None:
+        return "%s for %s" % (decision.add.name, decision.drop.name)
+    return decision.add.name
+
+
 def _apply_swap(
     roster: Sequence[Any], pool: Sequence[Any], decision: Any
 ) -> Tuple[List[Any], List[Any]]:
@@ -263,10 +285,28 @@ def _apply_swap(
     drop_id = (
         int(decision.drop.player_id) if decision.drop is not None else None
     )
-    add_id = int(decision.add.player_id)
+    add_id = (
+        int(decision.add.player_id) if decision.add is not None else None
+    )
+    # An IR activation has no add: nothing comes in off the pool, and what
+    # changes besides the drop is that the returnee stops being on IR and
+    # starts occupying a bench spot. Modelling only the drop would leave the
+    # spot we just paid for looking free, and the next decision in the same
+    # run would spend it again on somebody else.
+    back_id = (
+        int(decision.activating.player_id)
+        if getattr(decision, "activating", None) is not None
+        else None
+    )
     next_roster = [
-        e for e in roster if drop_id is None or int(e.player_id) != drop_id
+        dataclasses.replace(e, current_slot=ids.BENCH_SLOT)
+        if back_id is not None and int(e.player_id) == back_id
+        else e
+        for e in roster
+        if drop_id is None or int(e.player_id) != drop_id
     ]
+    if add_id is None:
+        return next_roster, list(pool)
     for entry in pool:
         if int(entry.player_id) == add_id:
             next_roster.append(
@@ -915,12 +955,88 @@ class Autopilot:
             )
             return [], notes, []
 
+        # The lineup we are about to have in place, not the one ESPN had when
+        # the run started. A player the optimizer just started may already be
+        # tipping off, and a drop that empties a started slot cannot be undone.
+        starters = [
+            pid for pid, slot in plan.target.items()
+            if ids.is_starting_slot(int(slot))
+        ]
+        # The same correction, for the same reason, one field over: the slots
+        # themselves. Here rather than at the call site because this is where
+        # the other half of it already lives, and because a caller who forgets
+        # gets the bug back. See ``_after_lineup``.
+        if lineup_written:
+            roster = _after_lineup(roster, plan)
+
+        # -- the healthy man on IR ----------------------------------------
+        #
+        # Before the pool read, and deliberately: this decision needs no free
+        # agents. The player is already ours, so the only inputs are the
+        # roster, the lineup plan's own values and the schedule -- all of which
+        # we are holding. Below the pool read it would be deferred a day by any
+        # network error, and the thing being deferred is a player scoring
+        # nothing at all.
+        ir_accepted: List["addrop_mod.AddDropPlan"] = []
+        ir_declined: List[Tuple["addrop_mod.AddDropPlan", str, bool]] = []
+        # A drop the reviewer refused for the activation is a drop it has
+        # refused. The verdict is prose, so there is no telling whether it
+        # objected to losing that player or to the activation being worth it --
+        # and offering him up again two attempts later as half of an ordinary
+        # swap is asking the same question in different words.
+        ir_vetoed: List[str] = []
+        if plan.ir_stranded:
+            ir_plan = addrop_mod.plan_ir_activation(
+                settings,
+                roster,
+                dict(plan.values),
+                projections,
+                stranded=plan.ir_stranded,
+                matchup_period=matchup_period,
+                horizon=horizon,
+                schedule=schedule,
+                lam=plan.lam,
+                starters=starters,
+                matchup=matchup,
+                never_drop=self.cfg.never_drop,
+            )
+            notes.extend(ir_plan.notes)
+            if ir_plan.proposed:
+                log.info("IR activation: %s", ir_plan.describe())
+                reviewed, review_notes, unreachable = self._review_addrop(
+                    lg, ir_plan, roster=roster, pool=[], matchup=matchup,
+                    injuries=injuries,
+                )
+                notes.extend(review_notes)
+                if reviewed is None:
+                    ir_declined.append((
+                        ir_plan,
+                        review_notes[-1] if review_notes
+                        else "the reviewer did not approve it",
+                        bool(unreachable),
+                    ))
+                    if not unreachable and ir_plan.drop is not None:
+                        ir_vetoed.append(ir_plan.drop.name)
+                else:
+                    ir_accepted.append(reviewed)
+                    # Applied to ``roster`` itself, not only to the simulated
+                    # copy below: everything after this -- the pool pricing,
+                    # the slot arithmetic, the swaps -- has to see the spot
+                    # this drop opens and the returnee now sitting in it, or
+                    # the next decision is made against a roster that no
+                    # longer exists.
+                    roster = _apply_swap(roster, [], reviewed)[0]
+
         try:
             pool = lg.read.free_agents()
         except Exception as exc:  # noqa: BLE001 - the lineup is already applied
             log.error("could not read the free-agent pool: %s", exc)
             notes.append("add/drop not considered: pool read failed (%s)" % exc)
-            return [], notes, []
+            # The *swaps* are not considered. The IR activation above already
+            # was, and needed no pool to reach a decision -- discarding it here
+            # would have been the whole point of running it first, undone one
+            # ``return`` later.
+            return ir_accepted, notes, ir_declined
 
         model = value_mod.build_value_model(settings)
         values = dict(plan.values)
@@ -933,7 +1049,7 @@ class Autopilot:
                 notes.append(
                     "add/drop not considered: pool projections failed (%s)" % exc
                 )
-                return [], notes, []
+                return ir_accepted, notes, ir_declined
             pool_projections, _pool_avail, unprojected = (
                 projections_mod.build_projections(
                     pool, splits, as_of=datetime.now(timezone.utc),
@@ -974,21 +1090,7 @@ class Autopilot:
             log.error("could not read the acquisition counter: %s", exc)
             notes.append("acquisition counter unavailable (%s)" % exc)
 
-        # The lineup we are about to have in place, not the one ESPN had when
-        # the run started. A player the optimizer just started may already be
-        # tipping off, and a drop that empties a started slot cannot be undone.
-        starters = [
-            pid for pid, slot in plan.target.items()
-            if ids.is_starting_slot(int(slot))
-        ]
-        # The same correction, for the same reason, one field over: the slots
-        # themselves. Here rather than at the call site because this is where
-        # the other half of it already lives, and because a caller who forgets
-        # gets the bug back. See ``_after_lineup``.
-        if lineup_written:
-            roster = _after_lineup(roster, plan)
-
-        accepted: List["addrop_mod.AddDropPlan"] = []
+        accepted: List["addrop_mod.AddDropPlan"] = list(ir_accepted)
         # Advanced after each accepted swap, so swap two is priced against the
         # roster swap one leaves behind rather than against today's. Without
         # this the loop would propose the same best pickup repeatedly, or three
@@ -1006,18 +1108,27 @@ class Autopilot:
         # the app's own doing and are reported as such. Folding them in told a
         # user whose ``never_drop`` is empty that three of his players were in
         # it, which reads as a misconfiguration he then goes looking for.
-        vetoed_names: List[str] = []
+        vetoed_names: List[str] = list(ir_vetoed)
         vetoed_adds: set = set()
         # Every swap this run looked at and would not put in front of the
         # owner, with why. Kept so the question the empty approval queue
         # invites -- "so what did it consider?" -- has an answer that names
         # the two players rather than a line of prose in a run log.
-        declined: List[Tuple["addrop_mod.AddDropPlan", str, bool]] = []
+        declined: List[Tuple["addrop_mod.AddDropPlan", str, bool]] = list(
+            ir_declined
+        )
         # Protected for the rest of the run, and reported as such rather than
         # as a ``never_drop`` entry they are not.
         just_added: List[int] = []
 
         wanted = max(1, int(self.cfg.addrop_max_moves))
+        # Measured against the swaps, not against the IR activation that may
+        # already be in ``accepted``. ``addrop_max_moves`` is how much churn
+        # the user will tolerate per run; an activation is not churn, it is a
+        # roster that cannot field a player it owns. Counting it here meant a
+        # user with the default of one move got the fix *instead of* the week's
+        # upgrade, which is a choice nobody asked to make.
+        already = len(accepted)
         # Never below ``wanted``, so raising the option can never be silently
         # undone by this cap: a user who asks for five swaps and whose reviewer
         # approves all five gets five.
@@ -1028,7 +1139,7 @@ class Autopilot:
         # read identically from the outside and mean opposite things.
         ended_early = False
 
-        while len(accepted) < wanted and attempts < budget:
+        while len(accepted) - already < wanted and attempts < budget:
             attempts += 1
             decision = addrop_mod.plan_addrop(
                 settings,
@@ -1146,7 +1257,7 @@ class Autopilot:
             if sim_used is not None:
                 sim_used[matchup_period] = sim_used.get(matchup_period, 0) + 1
 
-        if not ended_early and len(accepted) < wanted:
+        if not ended_early and len(accepted) - already < wanted:
             # Fell out of the loop having neither filled the order nor run out
             # of candidates, which leaves only one explanation: the reviewer
             # spent the run's looks refusing things. Said plainly, because the
@@ -1156,7 +1267,7 @@ class Autopilot:
             notes.append(
                 "stopped after %d candidate(s): the reviewer blocked %d of "
                 "them, and %d is the most one run will ask it about"
-                % (attempts, attempts - len(accepted), budget)
+                % (attempts, attempts - (len(accepted) - already), budget)
             )
 
         return accepted, notes, declined
@@ -1177,16 +1288,31 @@ class Autopilot:
         to carry, and writing ``0`` would look like a deliberate minimum bid to
         anyone reading the row later.
         """
-        return {
-            "add": int(decision.add.player_id),
-            "add_name": decision.add.name,
+        add = decision.add
+        back = getattr(decision, "activating", None)
+        payload = {
+            "add": int(add.player_id) if add is not None else None,
+            "add_name": add.name if add is not None else None,
             "drop": int(decision.drop.player_id) if decision.drop else None,
             "drop_name": decision.drop.name if decision.drop else None,
             "bid": None,
-            "waiver": bool(decision.add.waiver),
+            # False with no add, and it has to be: ``waiver`` picks ESPN's
+            # transaction type, and a lone drop sent as a waiver claim is
+            # refused -- see the TRAN_* note in ``espn/write.py``. Defaulting
+            # it to True for a plan with nothing coming in would turn the one
+            # irreversible move the app makes unasked into a wire error.
+            "waiver": bool(add.waiver) if add is not None else False,
             "matchup_period": int(matchup_period),
             "reason": decision.reason,
         }
+        if back is not None:
+            # The write does not use these -- he is already on the roster and
+            # the next lineup pass seats him. They are here for the card and
+            # the history, which otherwise show a drop with nothing beside it
+            # and no way to tell it from giving a player away for free.
+            payload["activate"] = int(back.player_id)
+            payload["activate_name"] = back.name
+        return payload
 
     def _record_declined(self, run_id: str, decision: Any, why: str,
                          matchup_period: int, *,
@@ -1258,9 +1384,12 @@ class Autopilot:
         bios: Mapping[int, Any] = {}
         look_up = getattr(self, "bio_source", None)
         if keeper and look_up is not None:
-            bios = look_up([c.player_id
-                            for c in (decision.add, decision.drop)
-                            if c is not None]) or {}
+            bios = look_up([
+                c.player_id
+                for c in (decision.add, decision.drop,
+                          getattr(decision, "activating", None))
+                if c is not None
+            ]) or {}
         verdict = self.judge.review(
             league_name=lg.name,
             keeper=keeper,
@@ -1270,9 +1399,7 @@ class Autopilot:
             bios=bios,
             acquisitions_left=decision.acquisitions_left,
         )
-        swap = decision.add.name
-        if decision.drop is not None:
-            swap = "%s for %s" % (decision.add.name, decision.drop.name)
+        swap = _swap_label(decision)
 
         if not verdict.approve:
             notes.append("%s was not proposed -- %s" % (swap, verdict.describe()))
@@ -1830,7 +1957,12 @@ class Autopilot:
             )
             return
 
-        swap = payload.get("add_name") or "the acquisition"
+        swap = (
+            payload.get("add_name")
+            or ("%s off IR" % payload["activate_name"]
+                if payload.get("activate_name") else None)
+            or "the acquisition"
+        )
         if not self.cfg.autonomy_lineup:
             log.info(
                 "autonomy_lineup is off, so the lineup is left alone after %s; "
@@ -1924,12 +2056,12 @@ class Autopilot:
         # headed with only one of them is a prompt the user cannot answer. The
         # first version read "Dropping <the man coming in>", which named the
         # right player under the wrong verb.
-        swap = decision.add.name
-        if decision.drop is not None:
-            swap = "%s for %s" % (decision.add.name, decision.drop.name)
+        swap = _swap_label(decision)
         title = "%s: %s %s%s" % (
             lg.name,
-            "add/drop" if auto else "approve add/drop?",
+            ("activate" if decision.add is None else "add/drop") if auto
+            else ("activate off IR?" if decision.add is None
+                  else "approve add/drop?"),
             swap,
             " [shadow]" if self.cfg.shadow_mode else "",
         )

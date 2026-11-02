@@ -2098,8 +2098,20 @@ KIND_LABELS = {
 }
 
 
-def _kind(kind: Any) -> str:
+def _kind(kind: Any, payload: Any = None) -> str:
+    """The move's name for a person.
+
+    ``payload`` because the database has one word, ``ADD_DROP``, for two moves
+    that read nothing alike: buying an upgrade, and giving a player away so one
+    we already own can come off IR. A card headed "Add / drop" over a single
+    outgoing name is the second of those described as the first, which is how a
+    reader concludes the app is throwing players away for nothing.
+    """
     key = str(kind).upper()
+    if (key in ("ADD_DROP", "DROP")
+            and isinstance(payload, Mapping)
+            and payload.get("activate")):
+        return "Activate off IR"
     return KIND_LABELS.get(key, key.replace("_", " ").capitalize())
 
 
@@ -2240,18 +2252,27 @@ def _swap(payload: Mapping[str, Any], *, small: bool = False,
 
     Add before drop: the move is read as "who am I getting", and the man
     leaving is the cost of it, so he belongs second and dimmer.
+
+    ``ACTIVATE`` sits where ``ADD`` does and is never beside it: it is the same
+    question -- who am I getting -- answered by a player already on the roster.
+    Without a leg of its own an IR activation renders as a lone outgoing name,
+    which is a drop for nothing as far as the card is concerned.
     """
     out = ["<div class=swap>"]
-    for verb, pid in (("ADD", payload.get("add")), ("DROP", payload.get("drop"))):
+    for verb, pid in (("ADD", payload.get("add")),
+                      ("ACTIVATE", payload.get("activate")),
+                      ("DROP", payload.get("drop"))):
         if not pid:
             continue
         name = payload.get("%s_name" % verb.lower()) or "player %s" % pid
-        side = "in" if verb == "ADD" else "out"
+        side = "out" if verb == "DROP" else "in"
         tags = ""
         if verb == "ADD" and payload.get("waiver"):
             tags = " <span class='tag hold'>waiver claim</span>"
+        if verb == "ACTIVATE":
+            tags = " <span class='tag hold'>off IR</span>"
         badge = "<span class='pip %s'>%s</span>" % (
-            side, "+" if verb == "ADD" else "−")
+            side, "−" if verb == "DROP" else "+")
         out.append("<div class='leg %s'>%s%s%s</div>" % (
             side, _face(pid, "sm" if small else "", badge),
             _who(pid, name, league=league), tags,
@@ -3050,7 +3071,7 @@ def render(page: StatusPage, *, user: str = "",
             parts.append("<div class=card>")
             parts.append(
                 "<div class=eyebrow><span class=league>%s</span>%s</div>" % (
-                    _e(_kind(p["kind"])),
+                    _e(_kind(p["kind"], p["payload"])),
                     ("<span class='delta%s'>%+.1f pts</span>"
                      % ("" if p["value_delta"] > 0 else " down",
                         p["value_delta"]))
@@ -3713,7 +3734,7 @@ def _runs(parts: List[str], runs: List[Dict[str, Any]], tz: Any) -> None:
             parts.append(
                 "<div class=sechead>%s%s</div>" % (
                     "Set automatically" if state == DONE
-                    else _e(_kind(p["kind"])),
+                    else _e(_kind(p["kind"], p["payload"])),
                     "" if state == DONE else
                     "<span class='tag %s'>%s</span>" % (
                         STATE_TAGS.get(state, ""), _e(state.lower())),
@@ -3725,11 +3746,12 @@ def _runs(parts: List[str], runs: List[Dict[str, Any]], tz: Any) -> None:
             for p, _m in rows:
                 payload = p["payload"] if isinstance(p["payload"], Mapping) else {}
                 swap = (_swap(payload, small=True, league=r.get("league_id"))
-                        if payload.get("add") or payload.get("drop") else "")
+                        if payload.get("add") or payload.get("drop")
+                        or payload.get("activate") else "")
                 parts.append(
                     "<li><div class=head><span class=kind>%s</span>"
                     "<span class='tag %s'>%s</span></div>%s%s</li>" % (
-                        _e(_kind(p["kind"])),
+                        _e(_kind(p["kind"], payload)),
                         STATE_TAGS.get(str(p["state"]).upper(), ""),
                         _e(str(p["state"]).lower()),
                         swap,

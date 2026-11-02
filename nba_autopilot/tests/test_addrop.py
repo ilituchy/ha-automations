@@ -1002,3 +1002,223 @@ class TestCapInteraction(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# the healthy man on IR
+# ---------------------------------------------------------------------------
+
+
+class TestIrActivation(unittest.TestCase):
+    """``plan_ir_activation``: a player we own who cannot play for us.
+
+    Found on both live rosters at once, after a week of it. ESPN withdraws a
+    player's IR eligibility the moment he is healthy, but it does not move him
+    -- and the lineup layer may not drop anybody, so it puts him back on IR
+    every morning and says so in a note. Alperen Sengun spent a week there and
+    scored 42.0 points in 33 minutes for nobody. He was the second-most
+    valuable player on one of the two rosters.
+
+    The shape of every test here: a full active roster, an IR slot holding a
+    healthy man, and a question about whether the app will pay a roster spot
+    for him.
+    """
+
+    def case(self, **kw):
+        """Four active players in three starting slots plus one bench, and a
+        healthy man on IR. Active cap is 4 and 4 are in it, so he is stuck.
+        """
+        st = kw.pop("settings", settings(
+            lineup_slot_counts=slot_counts(starting=3, bench=1, ir=2)
+        ))
+        roster = kw.pop("roster", [
+            player(1, name="Star", team=1),
+            player(2, name="Good", team=1),
+            player(3, name="Fine", team=1),
+            player(4, name="Weak", team=1, slot=ids.BENCH_SLOT),
+            player(9, name="Returnee", team=1, slot=ids.IR_SLOT),
+        ])
+        values = kw.pop("values", {
+            1: 40.0, 2: 30.0, 3: 25.0, 4: 6.0, 9: 35.0,
+        })
+        p_play = kw.pop("p_play", {})
+        horizon = kw.pop("horizon", [1, 2, 3])
+        schedule = kw.pop("schedule", {1: {1: 1, 2: 1, 3: 1}})
+        projections = {
+            e.player_id: projection(e.player_id, p_play.get(e.player_id, 1.0))
+            for e in roster
+        }
+        call = dict(stranded=(9,), matchup_period=1, horizon=horizon,
+                    schedule=schedule)
+        call.update(kw)
+        return addrop.plan_ir_activation(
+            st, roster, values, projections, **call
+        )
+
+    def test_a_healthy_man_on_ir_is_bought_a_spot_with_the_cheapest_drop(self):
+        """The whole feature, in one assertion each way.
+
+        ``add`` stays ``None`` on purpose: he is already ours, and an add would
+        spend one of a handful of weekly acquisitions claiming a player who is
+        not in the pool to claim.
+        """
+        plan = self.case()
+        self.assertTrue(plan.proposed)
+        self.assertEqual(plan.reason, addrop.REASON_IR)
+        self.assertIsNone(plan.add)
+        self.assertIsNotNone(plan.activating)
+        self.assertEqual(plan.activating.name, "Returnee")
+        self.assertEqual(plan.drop.name, "Weak")
+        self.assertGreater(plan.gain, 0.0)
+
+    def test_the_rationale_says_the_gain_repeats_every_week(self):
+        """Because it does, and the number on the card does not show it.
+
+        ``gain`` is measured over this matchup period's remaining days. The
+        stranding it ends is permanent -- nothing about tomorrow frees a spot
+        -- so a reader comparing a one-week gain against losing a player
+        forever is comparing the wrong two things unless the card says so.
+        """
+        plan = self.case()
+        self.assertIn("Returnee", plan.rationale)
+        self.assertIn("Weak", plan.rationale)
+        self.assertIn("week after this one", plan.rationale)
+        self.assertIn("IR eligibility", plan.rationale)
+
+    def test_nobody_is_dropped_for_a_returnee_worth_less(self):
+        """The gate. A spot costs a player, so he has to be worth one.
+
+        And the note names him, because this is the state that persists: he
+        will sit on IR unable to play until the owner either drops him or he is
+        re-injured, and that is a decision only the owner can make.
+        """
+        plan = self.case(values={1: 40.0, 2: 30.0, 3: 25.0, 4: 20.0, 9: 2.0})
+        self.assertFalse(plan.proposed)
+        joined = " ".join(plan.notes)
+        self.assertIn("Returnee", joined)
+        self.assertIn("stays parked", joined)
+
+    def test_a_protected_player_is_still_protected(self):
+        """``never_drop`` means what it says, on this decision too.
+
+        The point of routing both decisions through ``_droppable_set``: stating
+        the rules twice is how ``never_drop`` comes to mean one thing on an
+        upgrade and another when the app is tidying up a roster slot.
+        """
+        plan = self.case(never_drop=("weak",))
+        self.assertTrue(plan.proposed)
+        self.assertEqual(plan.drop.name, "Fine")
+        plan = self.case(never_drop=("Weak", "Fine", "Good", "Star"))
+        self.assertFalse(plan.proposed)
+        self.assertIn("cannot come off IR", " ".join(plan.notes))
+
+    def test_a_man_starting_today_is_not_the_drop(self):
+        """His game may already be under way, and a drop cannot be undone."""
+        plan = self.case(starters=(4,))
+        self.assertTrue(plan.proposed)
+        self.assertEqual(plan.drop.name, "Fine")
+
+    def test_nobody_on_ir_is_dropped_to_make_room(self):
+        """Dropping off IR frees an IR slot, which is not the scarce one.
+
+        Including the returnee himself: the roster would be one player lighter
+        and he would still have nowhere to sit, so the move buys nothing.
+        """
+        plan = self.case(
+            roster=[
+                player(1, name="Star", team=1),
+                player(2, name="Good", team=1),
+                player(3, name="Fine", team=1),
+                player(4, name="Weak", team=1, slot=ids.BENCH_SLOT),
+                player(8, name="Parked", team=1, slot=ids.IR_SLOT),
+                player(9, name="Returnee", team=1, slot=ids.IR_SLOT),
+            ],
+            values={1: 40.0, 2: 30.0, 3: 25.0, 4: 20.0, 8: 0.5, 9: 35.0},
+        )
+        # "Parked" is the cheapest man on the roster by a distance, and he is
+        # not the answer.
+        self.assertEqual(plan.drop.name, "Weak")
+        self.assertIn("frees no active spot", " ".join(plan.notes))
+
+    def test_an_open_spot_needs_no_drop_and_says_so(self):
+        """Then he was never stranded, and the two layers disagree.
+
+        Worth a note rather than silence: the lineup plan reported him as
+        having nowhere to go, and the roster says otherwise. One of them is
+        wrong and the notes are where that gets noticed.
+        """
+        plan = self.case(roster=[
+            player(1, name="Star", team=1),
+            player(2, name="Good", team=1),
+            player(9, name="Returnee", team=1, slot=ids.IR_SLOT),
+        ])
+        self.assertFalse(plan.proposed)
+        self.assertIn("already room for him", " ".join(plan.notes))
+
+    def test_the_keeper_rank_gate_applies(self):
+        """A dynasty roster does not give away a player to tidy a slot.
+
+        Same rule as every other drop in the module: only the lowest-valued
+        quarter may go at all, and that is a rule rather than a price.
+        """
+        plan = self.case(settings=settings(
+            lineup_slot_counts=slot_counts(starting=3, bench=1, ir=2),
+            keeper=True,
+        ))
+        self.assertTrue(plan.proposed)
+        self.assertEqual(plan.drop.name, "Weak")
+        self.assertIn("keeper league", " ".join(plan.notes))
+        # And with the weakest man protected there is nobody left inside the
+        # gate, where the redraft version would have reached for the next one.
+        plan = self.case(
+            settings=settings(
+                lineup_slot_counts=slot_counts(starting=3, bench=1, ir=2),
+                keeper=True,
+            ),
+            never_drop=("weak",),
+        )
+        self.assertFalse(plan.proposed)
+
+    def test_the_most_valuable_stranded_man_goes_first(self):
+        """The lineup layer strands the cheapest, so we take them in reverse.
+
+        One per run: each one costs a player, and the second is priced against
+        the roster the first one leaves behind rather than against today's.
+        """
+        plan = self.case(
+            roster=[
+                player(1, name="Star", team=1),
+                player(2, name="Good", team=1),
+                player(3, name="Fine", team=1),
+                player(4, name="Weak", team=1, slot=ids.BENCH_SLOT),
+                player(8, name="Lesser", team=1, slot=ids.IR_SLOT),
+                player(9, name="Returnee", team=1, slot=ids.IR_SLOT),
+            ],
+            values={1: 40.0, 2: 30.0, 3: 25.0, 4: 6.0, 8: 20.0, 9: 35.0},
+            stranded=(8, 9),
+        )
+        self.assertEqual(plan.activating.name, "Returnee")
+        joined = " ".join(plan.notes)
+        self.assertIn("most valuable first", joined)
+        self.assertIn("Lesser", joined)
+
+    def test_a_finished_week_waits_for_the_next_one(self):
+        """No days left means the activation plays him nowhere.
+
+        Declined rather than forced: the drop is permanent and the next run
+        prices the same question against a week he can actually play in.
+        """
+        plan = self.case(horizon=[])
+        self.assertFalse(plan.proposed)
+        self.assertIn("no scoring periods left", " ".join(plan.notes))
+
+    def test_a_roster_without_the_stranded_id_is_quiet(self):
+        """An id that is not ours is not an error, and not a note either.
+
+        The roster is re-read between the lineup plan and here on some paths. A
+        man who left in between is no longer a problem, and the ordinary case
+        -- nobody stuck -- must not print a line every morning saying so.
+        """
+        plan = self.case(stranded=(12345,))
+        self.assertFalse(plan.proposed)
+        self.assertEqual(plan.notes, ())

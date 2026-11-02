@@ -149,6 +149,7 @@ __all__ = [
     "slot_prices",
     "week_surplus",
     "plan_addrop",
+    "plan_ir_activation",
 ]
 
 #: How much better per game an add must be than the player going out, in
@@ -266,6 +267,12 @@ class AddDropPlan:
 
     add: Optional[Candidate] = None
     drop: Optional[Candidate] = None
+    #: On a :data:`REASON_IR` plan, the healthy player the drop makes room for.
+    #: Separate from :attr:`add` and not a substitute for it: he is already
+    #: ours, so the write must not try to acquire him, and a layer that read
+    #: him out of ``add`` would spend an acquisition claiming a player off the
+    #: free-agent pool who is not in it. ``None`` on every other reason.
+    activating: Optional[Candidate] = None
     #: Expected points gained over the rest of the matchup period.
     gain: float = 0.0
     #: :data:`REASON_QUALITY`, :data:`REASON_GAMES`, :data:`REASON_OPEN` or
@@ -293,6 +300,11 @@ class AddDropPlan:
     def describe(self) -> str:
         if not self.proposed:
             return "no add/drop: %s" % (self.notes[0] if self.notes else "no reason")
+        if self.activating is not None:
+            return "drop %s to activate %s off IR; net %+.1f pts (%s)" % (
+                self.drop.describe() if self.drop is not None else "nobody",
+                self.activating.describe(), self.gain, self.reason,
+            )
         if self.add is None:
             return "drop %s to open a roster spot (%s)" % (
                 self.drop.describe(), self.reason,
@@ -385,6 +397,20 @@ def slot_prices(
     suppress a marginal swap, never manufacture one. For an irreversible move
     that is the direction to be wrong in.
 
+    Players sitting on IR are **excluded**, and that is correctness rather than
+    bias: the price of a starting slot is what the worst man filling one is
+    worth, and a man on IR fills nothing -- he cannot be started at all, so he
+    is not who a newcomer displaces. Counting him sets the price off a player
+    who is not in the running for it.
+
+    That mattered most on the decision where the IR man is the subject: in
+    :func:`plan_ir_activation` the returnee is on the roster being priced, so
+    with him in the ordering he set the very threshold his own surplus was then
+    measured against. Two starting slots and a returnee second-best by value
+    priced the slot at exactly his value, his surplus came out 0.0, and an
+    activation worth 50 points a week was never proposed -- by arithmetic that
+    looked, in the notes, like a considered decline.
+
     Values are conditional on playing, not availability-weighted, matching the
     threshold convention in ``budget.shadow_price``.
     """
@@ -395,7 +421,8 @@ def slot_prices(
             (
                 float(values.get(e.player_id, 0.0))
                 for e in roster
-                if (schedule.get(int(e.pro_team_id)) or {}).get(int(day))
+                if int(e.current_slot) != ids.IR_SLOT
+                and (schedule.get(int(e.pro_team_id)) or {}).get(int(day))
             ),
             reverse=True,
         )
@@ -808,6 +835,231 @@ def plan_addrop(
         acquisitions_left=left,
     )
 
+
+def plan_ir_activation(
+    settings: LeagueSettings,
+    roster: Sequence[RosterEntry],
+    values: Mapping[PlayerId, float],
+    projections: Mapping[PlayerId, Projection],
+    *,
+    stranded: Iterable[PlayerId],
+    matchup_period: int,
+    horizon: Sequence[int],
+    schedule: Mapping[int, Mapping[int, int]],
+    lam: float = 0.0,
+    starters: Optional[Iterable[PlayerId]] = None,
+    matchup: Optional[MatchupScore] = None,
+    never_drop: Iterable[str] = (),
+    just_added: Iterable[PlayerId] = (),
+    review_blocked: Iterable[str] = (),
+    keeper_drop_fraction: float = DEFAULT_KEEPER_DROP_FRACTION,
+) -> AddDropPlan:
+    """Free an active spot for a healthy player stuck on IR.
+
+    ``pipeline.plan_lineup`` reports these men up by id in
+    :attr:`~pipeline.LineupPlan.ir_stranded`: ESPN has withdrawn their IR
+    eligibility, every active slot is taken, and the lineup layer is not
+    allowed to drop anybody, so it forces them back onto IR and says so. That
+    is the correct thing for it to do and it is also a dead end -- a player
+    parked there scores for nobody, and nothing about tomorrow changes it. The
+    stranding is **permanent until something drops a player**, which is this
+    layer's job and only this layer's job.
+
+    Found on a live roster after a week of it: Alperen Sengun, ``ACTIVE``, no
+    longer IR-eligible, sat on IR in both leagues and played 33 minutes for
+    42.0 points that counted for neither. He was the second-most valuable
+    player on one of the two rosters. The lineup notes had been saying so every
+    morning, to nobody.
+
+    Deliberately **not** :func:`plan_addrop` with the returnee passed in as an
+    add:
+
+    * He is already ours. An add would spend an acquisition -- a real, capped,
+      weekly resource -- claiming a player who is not in the pool to claim.
+    * The gain here is a lower bound, not an estimate. Every other reason in
+      this module compares two futures in which we field a legal lineup either
+      way; this one compares fielding him against never fielding him again. So
+      the churn floor does not apply: see the gate below.
+
+    What it does not do is propose dropping the stranded man himself. When he
+    is worth less than anybody droppable that is the honest answer, and it is a
+    different and more dangerous decision than this one -- it gives away a
+    player to tidy up a slot. The declining note names him so the owner can
+    make that call.
+
+    Args:
+        stranded: ``LineupPlan.ir_stranded``. Ids not on the roster are
+            ignored rather than an error: the roster is re-read between the
+            lineup plan and here on some paths, and a man who left in between
+            is no longer a problem.
+        values, projections, horizon, schedule, lam: priced exactly as in
+            :func:`plan_addrop`, through the same :func:`_pricer`. The two
+            decisions have to agree about what a player is worth or the one
+            that fires second undoes the other's reasoning.
+        starters, never_drop, just_added, review_blocked, keeper_drop_fraction:
+            the droppability rules, applied through :func:`_droppable_set` so
+            that a man the user protected is protected here too.
+    """
+    notes: List[str] = []
+
+    def nothing() -> AddDropPlan:
+        return AddDropPlan(notes=tuple(notes))
+
+    mine = {int(e.player_id): e for e in roster}
+    want = [mine[int(p)] for p in stranded if int(p) in mine]
+    if not want:
+        # Not a note. This is the overwhelmingly common case -- no healthy man
+        # is stuck -- and a line saying so every morning in every run's notes
+        # is noise that trains the reader to skip the section.
+        return nothing()
+
+    if not horizon:
+        notes.append(
+            "%s stuck on IR, but matchup period %d has no scoring periods "
+            "left, so activating now would not play him -- the next run will "
+            "price it against a fresh week"
+            % (", ".join(e.name for e in want), matchup_period)
+        )
+        return nothing()
+
+    starting_slots = sum(
+        int(n) for s, n in settings.lineup_slot_counts.items()
+        if int(n) > 0 and int(s) not in (ids.BENCH_SLOT, ids.IR_SLOT)
+    )
+    prices = slot_prices(
+        roster, values,
+        starting_slots=starting_slots, horizon=horizon, schedule=schedule,
+    )
+    candidate = _pricer(values, projections, horizon, schedule, lam, prices)
+
+    rule = _droppable_set(
+        settings, roster, candidate,
+        starters=starters, never_drop=never_drop, just_added=just_added,
+        review_blocked=review_blocked,
+        keeper_drop_fraction=keeper_drop_fraction,
+    )
+    notes.extend(rule.notes)
+
+    # The best of them, where the lineup layer stranded the cheapest. The two
+    # halves agree on purpose: it seats as many returnees as it has room for
+    # and holds back the ones it cannot, so the one it held back last is the
+    # one most worth paying a roster spot for.
+    returnees = sorted(
+        (rule.priced[int(e.player_id)] for e in want),
+        key=lambda c: (c.surplus, c.per_game), reverse=True,
+    )
+    back = returnees[0]
+    if len(returnees) > 1:
+        notes.append(
+            "%d healthy player(s) stuck on IR; taking the most valuable first "
+            "(%s), the rest next run: %s"
+            % (len(returnees), back.name,
+               ", ".join(c.name for c in returnees[1:]))
+        )
+
+    if rule.open_spot:
+        # Then he was never stranded, whatever the lineup plan said, and a drop
+        # would be paying for a spot we already have. Said out loud because the
+        # two layers disagreeing about roster occupancy is a bug worth seeing
+        # rather than a condition worth silently tolerating.
+        notes.append(
+            "%s is healthy on IR but %d of %d active spots are in use, so "
+            "there is already room for him -- no drop needed, and the lineup "
+            "plan should have seated him"
+            % (back.name, rule.roster_use, rule.roster_cap)
+        )
+        return nothing()
+
+    # Dropping a man off IR frees an IR slot, not an active one -- the same
+    # reasoning as the IR filter in ``plan_addrop``, and it rules out the
+    # returnee himself along with everybody else parked beside him.
+    outs = [c for c in rule.droppable if not c.on_ir]
+    blocked = list(rule.blocked) + [
+        "%s (on IR, which frees no active spot)" % c.name
+        for c in rule.droppable if c.on_ir
+    ]
+    if blocked:
+        notes.append("not droppable: %s" % ", ".join(sorted(blocked)))
+
+    if not outs:
+        notes.append(
+            "%s is healthy and cannot come off IR: all %d active spots are "
+            "taken and nobody holding one may be dropped, so he scores for "
+            "nobody until that changes"
+            % (back.name, rule.roster_cap)
+        )
+        return nothing()
+
+    # Cheapest out, per-game as the tie-break: two men worth the same to this
+    # week are not worth the same to the season, and the lower-valued one is
+    # the one we would rather not have back.
+    out = min(outs, key=lambda c: (c.surplus, c.per_game))
+    gain = back.surplus - out.surplus
+
+    # Strictly positive, and no churn floor. The floor exists to stop a weekly
+    # acquisition budget being spent on rounding error (see
+    # ``DEFAULT_CHURN_FLOOR``); neither half of that applies here. A drop
+    # spends no acquisition, and ``gain`` is measured over this week's horizon
+    # while the stranding it ends is permanent -- so the real gain is this
+    # number plus every week after it. Requiring it to clear a three-point bar
+    # measured on the pessimistic half of that would decline activations that
+    # are plainly right.
+    if gain <= 0.0:
+        notes.append(
+            "%s is healthy on IR, but the cheapest player we may drop for him "
+            "is %s at %+.1f against his %+.1f, so activating him would cost "
+            "%.1f points this week -- he stays parked, and giving him away "
+            "instead is a call for the owner"
+            % (back.name, out.name, out.surplus, back.surplus, -gain)
+        )
+        return nothing()
+
+    return AddDropPlan(
+        drop=out,
+        activating=back,
+        gain=gain,
+        reason=REASON_IR,
+        rationale=_ir_rationale(back, out, gain, lam, prices, matchup,
+                                rule.roster_cap),
+        notes=tuple(notes),
+    )
+
+
+def _ir_rationale(
+    back: Candidate,
+    out: Candidate,
+    gain: float,
+    lam: float,
+    prices: Mapping[int, float],
+    matchup: Optional[MatchupScore],
+    roster_cap: int,
+) -> str:
+    """The IR activation, in numbers a human can check.
+
+    Written apart from :func:`_rationale` rather than as a fourth branch of it,
+    because the sentence it has to produce is not the same shape: there is no
+    player coming in, the comparison is against zero rather than against an
+    incumbent, and the thing being bought is a roster spot.
+    """
+    lines = [
+        "Activate %s off IR by dropping %s. ESPN has taken away %s's IR "
+        "eligibility while he is healthy, so he occupies an IR slot he cannot "
+        "score from, and all %d active spots are full -- he plays again only "
+        "if somebody goes."
+        % (back.name, out.name, back.name, roster_cap),
+        "He has %d game(s) left this week and projects %.1f per game, worth "
+        "%+.1f points; %s is worth %+.1f over the same days. Net %+.1f."
+        % (back.games, back.per_game, back.surplus,
+           out.name, out.surplus, gain),
+        "That %+.1f counts this week only. He is stuck until a drop frees a "
+        "spot, so every week after this one is the same number again."
+        % gain,
+        "A game off the cap prices at %.2f; a starting slot prices at %s."
+        % (lam, _describe_prices(prices)),
+    ]
+    if matchup is not None:
+        lines.append(matchup.describe().capitalize() + ".")
+    return " ".join(lines)
 
 def _pair_key(
     pair: Tuple[float, str, Candidate, Optional[Candidate]]

@@ -6,6 +6,67 @@ All notable changes to this app are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **A healthy player stuck on IR is now bought a roster spot.** ESPN withdraws
+  a player's IR eligibility as soon as he is healthy but does not move him, and
+  on a full active roster there is no legal slot for him to return to. The
+  lineup layer may not drop anybody, so it forced him back onto IR every
+  morning and reported it to a notes section nobody was reading.
+
+  `solve.addrop.plan_ir_activation` is the decision that was referenced from
+  three docstrings and never written. It proposes a **drop with no add**,
+  priced through the same `_pricer` and `_droppable_set` as every other drop —
+  so `never_drop`, today's starters, the keeper gate and the rest hold here
+  too. Someone else on IR is never the drop; that frees an IR slot, not the
+  active one. It spends no acquisition, and it does not count against
+  `addrop_max_moves`: a roster that cannot field a player it owns is not churn.
+  When the returnee is worth less than anyone droppable, nothing is proposed
+  and the note names him, because giving away a player you own is the owner's
+  call and not the app's.
+
+  Found on both live rosters at once. Alperen Sengun — `ACTIVE`, no longer
+  IR-eligible, second-most valuable player on one of the two teams — spent a
+  week in an IR slot in **both** leagues, including a 42-point game in 33
+  minutes that counted for neither. On the live rosters the new decision prices
+  the fix at **+93.1** points this week in the dynasty league and **+70.7** in
+  the redraft one, and the week after that is the same number again.
+
+### Fixed
+
+- **A starting slot was priced off players who cannot start.**
+  `solve.addrop.slot_prices` ranked the whole roster, IR occupants included, to
+  find "the worst player currently filling a starting slot" — but a man on IR
+  fills nothing and is not who a newcomer displaces, so the price came off a
+  player who was not in the running for it.
+
+  Worst on the decision where the IR man is the subject: in
+  `plan_ir_activation` the returnee is on the roster being priced, so he set
+  the very threshold his own surplus was measured against. Two starting slots
+  and a returnee second-best by value priced the slot at exactly his value, his
+  surplus came out `0.0`, and an activation worth fifty points a week was
+  declined by arithmetic that looked, in the notes, like a considered judgment.
+
+- **`judge.build_prompt` crashed on any plan without an add.** It read the
+  incoming player off `plan.add.player_id` unconditionally; the only decision
+  that produces no add is the one above, so the `AttributeError` stayed latent
+  for exactly as long as the feature was missing. The returnee now arrives
+  under `COMING OFF IR`, with the prompt saying he is already ours and that no
+  acquisition is being spent — a reviewer shown a bare drop is being asked
+  "should we give this man away?", which is a different question and a much
+  easier no.
+
+- **Three places named a move by reading `decision.add.name`**, and a fourth
+  called it "the acquisition". All four now go through one `_swap_label`, so a
+  notification about an activation names the player coming back and the player
+  leaving instead of neither.
+
+- **The card said "Add / drop" over a single outgoing name.** `ADD_DROP` is one
+  database word for two unrelated moves. An activation now renders as
+  *Activate off IR* with a leg of its own for the returnee, tagged `off IR`, on
+  the incoming side. Rendered through the old path it read as a drop for
+  nothing, which is the one thing it is not.
+
 ### Changed
 
 - **The reviewer's reasoning is on the card, not only in the run log.** It was

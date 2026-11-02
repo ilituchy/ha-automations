@@ -387,14 +387,16 @@ class _Harness:
         self.app._calendar = self.cal
         self.schedule = {1: {1: 1, 2: 1, 3: 1}}
 
-    def plan(self, target=None):
+    def plan(self, target=None, stranded=()):
         target = target or {1: START, 2: START, 3: BENCH}
         return pipeline.LineupPlan(
             target=target, moves=(), lam=0.0, utilization=float("inf"),
             values=dict(self.values), notes=(),
+            ir_stranded=tuple(int(p) for p in stranded),
         )
 
-    def consider_all(self, target=None, injuries=None, lineup_written=True):
+    def consider_all(self, target=None, injuries=None, lineup_written=True,
+                     stranded=()):
         # The score is read by the caller rather than by ``_consider_addrops``
         # -- ``run_league`` needs it for the status-page scoreboard too, and one
         # request serves both. Read it here the same way, so a test about a
@@ -408,7 +410,7 @@ class _Harness:
         del self.lg.read.asked[:]
         decisions, notes, declined = self.app._consider_addrops(
             self.lg, self.settings, self.roster, self.projections,
-            self.plan(target),
+            self.plan(target, stranded=stranded),
             cal=self.cal, matchup_period=1, schedule=self.schedule,
             injuries=injuries, matchup=matchup, lineup_written=lineup_written,
         )
@@ -419,7 +421,8 @@ class _Harness:
         self.declined = list(declined)
         return decisions, read_notes + notes
 
-    def consider(self, target=None, injuries=None, lineup_written=True):
+    def consider(self, target=None, injuries=None, lineup_written=True,
+                 stranded=()):
         """The best swap only, or ``None``, plus every note.
 
         Most of the tests below are about one decision -- what blocks it, what
@@ -427,7 +430,8 @@ class _Harness:
         noise obscuring which tests are actually about the list.
         """
         decisions, notes = self.consider_all(
-            target=target, injuries=injuries, lineup_written=lineup_written)
+            target=target, injuries=injuries, lineup_written=lineup_written,
+            stranded=stranded)
         return (decisions[0] if decisions else None), notes
 
     def offer(self, decision):
@@ -1496,3 +1500,125 @@ class TestTheRunRecordsWhatItBelieved(unittest.TestCase):
         self.assertEqual(len(rows), 3)
         self.assertTrue(all(r["p_play"] is None for r in rows))
         self.assertTrue(all(r["status"] == "" for r in rows))
+
+
+# ---------------------------------------------------------------------------
+# the healthy man on IR
+# ---------------------------------------------------------------------------
+
+
+class TestIrActivationReachesTheUser(unittest.TestCase):
+    """``plan_ir_activation`` wired into a run.
+
+    ``test_addrop.py`` covers whether the trade is worth it. This covers the
+    four things the orchestration around it has to get right, each of which was
+    wrong in the version that only had the arithmetic:
+
+    * the proposal has no ``add``, and three separate places read the move's
+      name off ``decision.add.name``;
+    * the payload drives the wire, and ``waiver`` defaulting to true turns a
+      lone drop into a refused transaction;
+    * ``addrop_max_moves`` is a churn budget and an activation is not churn;
+    * and it must not be behind the free-agent pool read, because it does not
+      need one.
+    """
+
+    def harness(self, **kw):
+        h = _Harness(st=settings(
+            lineup_slot_counts={START: 2, BENCH: 1, ids.IR_SLOT: 2}
+        ), **kw)
+        # Four men for three active spots, with the fourth on IR: healthy, no
+        # longer IR-eligible per ESPN, and nowhere to sit. The live shape.
+        h.roster = h.roster + [
+            player(9, name="Returnee", slot=ids.IR_SLOT),
+        ]
+        h.projections[9] = projection(9, 55.0)
+        h.values[9] = 55.0
+        return h
+
+    def test_a_stranded_healthy_man_is_offered_with_no_add(self):
+        h = self.harness()
+        decisions, notes = h.consider_all(stranded=(9,))
+        self.assertTrue(decisions)
+        first = decisions[0]
+        self.assertEqual(first.reason, "ir-activation")
+        self.assertIsNone(first.add)
+        self.assertEqual(first.activating.name, "Returnee")
+        # P3, not "Weak": the two cheaper men are in starting slots this run
+        # put them in, and a drop that empties a started slot cannot be undone.
+        self.assertEqual(first.drop.name, "P3")
+
+    def test_the_payload_names_him_and_does_not_claim_a_waiver(self):
+        """``waiver`` picks ESPN's transaction type.
+
+        A lone DROP is a ``ROSTER`` mutation; sent as a waiver claim it is
+        refused outright. The old payload read ``bool(decision.add.waiver)``,
+        which on this plan is an ``AttributeError`` -- and the obvious repair,
+        defaulting it to the method's own ``True``, would have turned the one
+        unprompted irreversible move in the app into a wire error.
+        """
+        h = self.harness()
+        decisions, _ = h.consider_all(stranded=(9,))
+        payload = h.app._addrop_payload(decisions[0], 1)
+        self.assertIsNone(payload["add"])
+        self.assertIsNone(payload["add_name"])
+        self.assertEqual(payload["activate"], 9)
+        self.assertEqual(payload["activate_name"], "Returnee")
+        self.assertEqual(payload["drop_name"], "P3")
+        self.assertFalse(payload["waiver"])
+        self.assertEqual(payload["reason"], "ir-activation")
+
+    def test_it_does_not_spend_the_runs_swap_budget(self):
+        """``addrop_max_moves`` is how much churn the user will tolerate.
+
+        An activation is not churn -- it is a roster that cannot field a player
+        it owns. Counted against the budget, a user on the default of one move
+        got the fix *instead of* the week's upgrade, which is a choice nobody
+        asked to make.
+        """
+        h = self.harness()
+        decisions, notes = h.consider_all(stranded=(9,))
+        self.assertEqual(decisions[0].reason, "ir-activation")
+        # The swap funnel still ran: either it found something, or it said why
+        # not. What it must not do is never be asked.
+        self.assertTrue(
+            len(decisions) > 1
+            or any("hurdle" in n or "churn floor" in n or "pool" in n
+                   for n in notes),
+            notes,
+        )
+
+    def test_a_failed_pool_read_still_activates_him(self):
+        """It needs no free agents, so a pool fetch must not gate it.
+
+        The lineup is already written by the time add/drop runs, which is why
+        every read here degrades to a note. This one degraded to *skipping the
+        activation*, and the thing being skipped is a player scoring nothing at
+        all -- deferred a day by an unrelated network error.
+        """
+        h = self.harness(read=_Read(fail={"free_agents"}))
+        decisions, notes = h.consider_all(stranded=(9,))
+        self.assertTrue(decisions)
+        self.assertEqual(decisions[0].reason, "ir-activation")
+        self.assertTrue(any("pool read failed" in n for n in notes), notes)
+
+    def test_the_notification_asks_about_an_activation_not_an_add(self):
+        """The title is the whole question on a phone.
+
+        "approve add/drop? Weak" names the man leaving under a verb about the
+        man arriving, on the one move that gives a player away.
+        """
+        h = self.harness()
+        decisions, _ = h.consider_all(stranded=(9,))
+        h.offer(decisions[0])
+        self.assertTrue(h.ha.sent)
+        title = h.ha.sent[-1]["title"]
+        self.assertIn("activate off IR?", title)
+        self.assertIn("Returnee", title)
+        self.assertIn("P3", title)
+
+    def test_nothing_stranded_says_nothing(self):
+        """The ordinary morning. No note, because there is no news."""
+        h = self.harness()
+        _decisions, notes = h.consider_all()
+        self.assertFalse(any("IR" in n and "stuck" in n for n in notes), notes)

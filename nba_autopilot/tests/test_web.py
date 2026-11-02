@@ -2633,3 +2633,59 @@ class TestTheNoteParserStillMatchesWhatIsWritten(unittest.TestCase):
         out = web.render(page)
         self.assertIn("%d swaps it did not put to you"
                       % web.StatusPage.CONSIDERED_PER_LEAGUE, out)
+
+
+class TestTheIrActivationCard(unittest.TestCase):
+    """A drop with nothing beside it reads as giving a player away.
+
+    The database has one word, ``ADD_DROP``, for two moves that have nothing in
+    common: buying an upgrade, and paying a roster spot so a player we already
+    own can come off IR. Rendered through the add/drop path the second one is a
+    card headed "Add / drop" with a single outgoing name under a minus sign --
+    which is a correct description of a different move, and the one a user would
+    decline.
+    """
+
+    PAYLOAD = {
+        "add": None, "add_name": None,
+        "activate": 9, "activate_name": "Alperen Sengun",
+        "drop": 20, "drop_name": "Out Man",
+        "waiver": False, "reason": "ir-activation",
+    }
+
+    def test_the_heading_names_the_move(self):
+        self.assertEqual(web._kind("ADD_DROP", self.PAYLOAD),
+                         "Activate off IR")
+        # And an ordinary swap is untouched, with or without a payload.
+        self.assertEqual(web._kind("ADD_DROP"), "Add / drop")
+        self.assertEqual(
+            web._kind("ADD_DROP", {"add": 10, "drop": 20}), "Add / drop")
+
+    def test_the_returnee_gets_a_leg_of_his_own(self):
+        out = web._swap(self.PAYLOAD)
+        self.assertIn("Alperen Sengun", out)
+        self.assertIn("Out Man", out)
+        self.assertIn("off IR", out)
+        # Linked like any other player, so the card can be read before it is
+        # answered.
+        self.assertIn("/id/9'", out)
+        self.assertIn("/id/20'", out)
+
+    def test_he_is_on_the_incoming_side_and_the_drop_on_the_outgoing_one(self):
+        """The pip is the only thing distinguishing them at a glance."""
+        out = web._swap(self.PAYLOAD)
+        self.assertIn("<span class='pip in'>+</span>", out)
+        self.assertIn("<span class='pip out'>−</span>", out)
+
+    def test_an_ordinary_swap_grows_no_third_leg(self):
+        out = web._swap({"add": 10, "add_name": "In Man",
+                         "drop": 20, "drop_name": "Out Man", "waiver": False})
+        self.assertNotIn("off IR", out)
+        self.assertEqual(out.count("class='pip"), 2)
+
+    def test_the_name_is_escaped_like_every_other(self):
+        """It comes from ESPN, so it is untrusted like the rest of them."""
+        out = web._swap(dict(self.PAYLOAD,
+                             activate_name="<img src=x onerror=alert(1)>"))
+        self.assertNotIn("<img src=x", out)
+        self.assertIn("&lt;img src=x", out)

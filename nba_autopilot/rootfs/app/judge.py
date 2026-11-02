@@ -347,8 +347,32 @@ def build_prompt(
             "Acquisitions left this week: %d" % acquisitions_left
         )
     lines.append("")
-    lines.extend(_side("COMING IN", plan.add, reports.get(plan.add.player_id),
-                       bios.get(plan.add.player_id)))
+    # An IR activation has no add: the man coming back is already ours, and
+    # reading him out of ``add`` crashed here for as long as nothing produced
+    # one. He is still the player the reviewer has to weigh, so he goes in the
+    # same place under his own heading -- what is being bought is his roster
+    # spot, and the prompt has to say so or the reviewer reads a bare drop and
+    # asks, reasonably, what we are getting for it.
+    coming = plan.add if plan.add is not None else getattr(
+        plan, "activating", None
+    )
+    if coming is None:
+        lines.append(
+            "COMING IN: nobody. This is a drop on its own."
+        )
+    else:
+        lines.extend(_side(
+            "COMING OFF IR" if plan.add is None else "COMING IN",
+            coming, reports.get(coming.player_id), bios.get(coming.player_id),
+        ))
+        if plan.add is None:
+            lines.append(
+                "He is already on our roster. ESPN has withdrawn his IR "
+                "eligibility while he is healthy, so he holds an IR slot he "
+                "cannot score from, and the active roster is full -- the drop "
+                "below is what lets him play at all. No acquisition is spent: "
+                "nobody is being picked up."
+            )
     lines.append("")
     if plan.drop is None:
         lines.append(
@@ -368,7 +392,8 @@ def build_prompt(
     lines.append("Its own wording of the case: %s" % plan.rationale)
     lines.append("")
     lines.append(
-        "Does this swap make sense? Call record_verdict with your answer."
+        "Does this %s make sense? Call record_verdict with your answer."
+        % ("move" if plan.add is None and coming is not None else "swap")
     )
     return "\n".join(lines)
 

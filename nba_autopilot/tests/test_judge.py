@@ -926,3 +926,68 @@ class TestWhoHeIsNotJustWhatHeScores(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheIrActivationPrompt(unittest.TestCase):
+    """An activation has no ``add``, and the prompt is where that bit.
+
+    ``build_prompt`` read the man coming in off ``plan.add.player_id``
+    unconditionally, which is an ``AttributeError`` the moment anything
+    produces a plan without one -- and the only thing that does is the move the
+    app makes for roster legality rather than for points. So the crash was
+    latent for exactly as long as the feature was missing.
+
+    What the reviewer has to be told, beyond not crashing: the player is
+    already ours, no acquisition is being spent, and the drop is the price of
+    him playing at all. A reviewer shown a bare drop answers a different and
+    much easier question -- "should we give this man away?" -- and answers it no.
+    """
+
+    def ir_plan(self, **kw):
+        base = dict(
+            add=None,
+            activating=cand(9, "Returnee", per_game=51.4, surplus=40.0,
+                            percent_owned=96.1, draft_adp=18.0, draft_rank=18),
+            drop=cand(4, "Weak", per_game=6.0, surplus=2.0, percent_owned=3.2),
+            gain=38.0,
+            reason="ir-activation",
+            rationale="Activate Returnee off IR by dropping Weak.",
+        )
+        base.update(kw)
+        return AddDropPlan(**base)
+
+    def test_the_returnee_arrives_under_his_own_heading(self):
+        p = judge_mod.build_prompt(
+            league_name="Dynassty", keeper=True, plan=self.ir_plan()
+        )
+        self.assertIn("COMING OFF IR: Returnee", p)
+        self.assertNotIn("COMING IN:", p)
+        self.assertIn("GOING OUT: Weak", p)
+        self.assertIn("51.4 points per game", p)
+        self.assertIn("owned in 96% of ESPN leagues", p)
+
+    def test_it_says_he_is_already_ours_and_costs_no_acquisition(self):
+        p = judge_mod.build_prompt(
+            league_name="Dynassty", keeper=True, plan=self.ir_plan()
+        )
+        self.assertIn("already on our roster", p)
+        self.assertIn("No acquisition is spent", p)
+        self.assertIn("lets him play at all", p)
+
+    def test_it_asks_about_a_move_not_a_swap(self):
+        """Nothing is being swapped, and the closing question said otherwise."""
+        p = judge_mod.build_prompt(
+            league_name="Dynassty", keeper=True, plan=self.ir_plan()
+        )
+        self.assertIn("Does this move make sense?", p)
+        self.assertNotIn("Does this swap make sense?", p)
+
+    def test_an_ordinary_swap_still_reads_as_one(self):
+        """The regression guard for the branch above."""
+        p = judge_mod.build_prompt(
+            league_name="Dynassty", keeper=True, plan=plan()
+        )
+        self.assertIn("COMING IN: Better", p)
+        self.assertNotIn("COMING OFF IR", p)
+        self.assertNotIn("already on our roster", p)
+        self.assertIn("Does this swap make sense?", p)

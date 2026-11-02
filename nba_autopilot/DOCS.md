@@ -105,6 +105,43 @@ used to *waive* the floor, never to raise it. ESPN publishes no projected final
 for basketball, so a lead you can see accumulated is not evidence the week is
 safe — there is no opponent projection behind it.
 
+### Getting a healthy player off IR
+
+ESPN takes away a player's IR eligibility the moment he is healthy, but it does
+not move him — he stays in the IR slot, where he scores for nobody. If your
+active roster is full there is no legal slot for him to come back to, and the
+lineup layer is not allowed to drop anybody, so on its own it can only report
+the problem and put him back every morning.
+
+So that is a separate decision, and it looks like a **drop with nothing coming
+in**. The card is headed *Activate off IR* and shows two names: the player
+coming back, and the one being given away to make space for him. No acquisition
+is spent — he is already yours, nobody is being picked up — and the move does
+not count against `addrop_max_moves`, because a roster that cannot field a
+player it owns is not churn.
+
+It is proposed only when he is worth more than the cheapest player you may
+drop, measured over the rest of the week. Every protection that applies to an
+ordinary drop applies here: `never_drop`, a man starting today, a player picked
+up earlier in the same run, and the keeper gate. Someone else sitting on IR is
+never the drop — that frees an IR slot, not the active one he needs.
+
+When he is worth *less* than anyone droppable, nothing is proposed and the run's
+notes say so by name. That state is permanent until you act: he will hold an IR
+slot he cannot play from until you either drop him yourself or he gets injured
+again. The app will not give away a player you own just to tidy up a slot.
+
+The gain on the card is for **this week only**. Nothing about tomorrow frees a
+roster spot, so if the activation is worth +40 points this week it is worth
+about that again next week, and the week after. Worth remembering when you are
+weighing it against losing a player permanently.
+
+> This was missing for the app's first two weeks, and it cost real points.
+> Alperen Sengun was healthy, no longer IR-eligible, and sat in an IR slot in
+> **both** leagues for a week — including a 42-point, 33-minute game that
+> counted for neither. He was the second-most valuable player on one of the two
+> rosters. The lineup notes had been saying so every morning.
+
 ### Several swaps in one run
 
 One run can offer up to `addrop_max_moves` swaps — three by default. Each
