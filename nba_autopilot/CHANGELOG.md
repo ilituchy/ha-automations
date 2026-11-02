@@ -92,6 +92,17 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **Documented the deploy trap that shipped the previous fix as a no-op.**
+  `POST /store/reload` fails intermittently with an empty `unknown_error`, and
+  when it does the Supervisor's cached repository stays at the previous commit
+  and the rebuild builds *that* — while the add-on stops, restarts and logs
+  every sign of a successful deploy. The cap fix below was pushed, rebuilt and
+  "deployed" at 09:55 on 2026-11-02; the 09:58 run still priced a game off the
+  cap at 33.21 where the new code gives 0.00. `docs/DEPLOY.md` now records the
+  retry loop and the rule that follows from it: verify a number only the new
+  code can produce, because the add-on pins `0.1.0` and `update_available` is
+  always false however far behind the image is.
+
 - **The games-played cap was priced against starts no lineup could make, and
   it cost points every night.** `pipeline._cap_candidates` emitted one entry per
   player-game left in the window with no per-day ceiling.
