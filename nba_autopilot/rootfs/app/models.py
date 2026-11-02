@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, FrozenSet, Mapping, Optional
+from typing import Any, Dict, FrozenSet, Mapping, Optional
 
 PlayerId = int
 SlotId = int
@@ -73,6 +73,17 @@ class Projection:
     form_games: float = 0.0
     form_weight: float = 0.0
 
+    #: Whether his minutes have diverged from the ones ESPN projected him for,
+    #: and so how stale the projection in ``mean`` is. A
+    #: ``solve.role.RoleRead``, typed loosely here because ``models`` is below
+    #: ``solve`` in the import order and must stay there.
+    #:
+    #: Carried for the same reason ``form_weight`` is: it moved the number, so
+    #: a reader checking the number is owed it. ``None`` on a projection built
+    #: before this existed, and on a player ESPN does not call ACTIVE -- for
+    #: whom a minutes drop is ``p_play``'s business, not the projection's.
+    role: Optional[Any] = None
+
     def expected(self) -> Dict[StatId, float]:
         """Availability-weighted mean. Safe to call regardless of provenance."""
         if self.p_play_applied:
@@ -132,6 +143,41 @@ class Projection:
             mu = self.mean.get(k, 0.0)
             out[k] = p * v + p * (1.0 - p) * mu * mu
         return out
+
+
+@dataclass(frozen=True)
+class ProPlayer:
+    """An NBA player as a member of his NBA team, not of a fantasy roster.
+
+    Deliberately not a :class:`RosterEntry`: he has no fantasy slot, no
+    eligibility and no acquisition status, because the question he answers is
+    "who else is on this man's team tonight, and how big a part of it are
+    they". Carrying him in a type that has those fields would invite a caller
+    to read a slot that means nothing.
+
+    ``minutes`` is his season average, which is the only size measure needed
+    here -- the point of this type is to say how much of a rotation an absence
+    removes.
+    """
+
+    player_id: PlayerId
+    name: str
+    pro_team_id: ProTeamId
+    injury_status: str
+    minutes: float = 0.0
+
+    @property
+    def out(self) -> bool:
+        """Ruled out, as opposed to doubtful or merely listed."""
+        return str(self.injury_status or "").upper() in (
+            "OUT", "INJURY_RESERVE", "SUSPENSION", "OUT_FOR_SEASON",
+        )
+
+    @property
+    def doubtful(self) -> bool:
+        """Listed but not ruled out -- ESPN's ``DAY_TO_DAY`` and friends."""
+        st = str(self.injury_status or "").upper()
+        return st not in ("ACTIVE", "") and not self.out
 
 
 @dataclass(frozen=True)

@@ -991,3 +991,76 @@ class TestTheIrActivationPrompt(unittest.TestCase):
         self.assertNotIn("COMING OFF IR", p)
         self.assertNotIn("already on our roster", p)
         self.assertIn("Does this swap make sense?", p)
+
+
+class TestTheMinutesSignalsReachTheReviewer(unittest.TestCase):
+    """The two things the arithmetic cannot weigh, in front of the layer that can.
+
+    ``solve/role.py`` has already moved the projection by the time the reviewer
+    sees it, so the reviewer is owed the reason. ``solve/absence.py`` has
+    deliberately *not* moved anything -- the share of a vacated rotation that
+    lands on one man could not be measured -- so the reviewer is the only place
+    that fact can be acted on at all, and it can do what the regression cannot:
+    reason about position.
+    """
+
+    class _Role:
+        def __init__(self, said):
+            self._said = said
+
+        def describe(self):
+            return self._said
+
+    def test_a_role_change_is_stated_for_the_man_it_describes(self):
+        p = judge_mod.build_prompt(
+            league_name="Dynassty", keeper=True, plan=plan(),
+            roles={90: self._Role("Role expanded: ESPN projects 22.8 minutes")},
+        )
+        self.assertIn("Role expanded: ESPN projects 22.8 minutes", p)
+        # Under the man it is about, not in a section of its own.
+        self.assertLess(p.find("COMING IN: Better"), p.find("Role expanded"))
+        self.assertLess(p.find("Role expanded"), p.find("GOING OUT: Weak"))
+
+    def test_the_drop_side_gets_its_own_read(self):
+        p = judge_mod.build_prompt(
+            league_name="Dynassty", keeper=True, plan=plan(),
+            roles={2: self._Role("Role shrunk: playing 13.2")},
+        )
+        self.assertIn("Role shrunk: playing 13.2", p)
+        self.assertLess(p.find("GOING OUT: Weak"), p.find("Role shrunk"))
+
+    def test_absent_teammates_are_stated_too(self):
+        p = judge_mod.build_prompt(
+            league_name="The Chairman's", keeper=False, plan=plan(),
+            absences={90: self._Role(
+                "Team-mates missing: Joel Embiid (35 min/g, doubtful)")},
+        )
+        self.assertIn("Joel Embiid (35 min/g, doubtful)", p)
+
+    def test_both_appear_and_the_role_read_comes_first(self):
+        """What has happened before what might: the first explains the number
+        above it, the second is a reason to doubt that number."""
+        p = judge_mod.build_prompt(
+            league_name="Dynassty", keeper=True, plan=plan(),
+            roles={90: self._Role("ROLEREAD")},
+            absences={90: self._Role("ABSENCEREAD")},
+        )
+        self.assertLess(p.find("ROLEREAD"), p.find("ABSENCEREAD"))
+
+    def test_an_empty_description_adds_no_line(self):
+        """The ordinary case is both silent, and a prompt padded with "no
+        change detected" per player teaches the reader to skim."""
+        p = judge_mod.build_prompt(
+            league_name="Dynassty", keeper=True, plan=plan(),
+            roles={90: self._Role(""), 2: self._Role("")},
+            absences={90: self._Role("")},
+        )
+        bare = judge_mod.build_prompt(
+            league_name="Dynassty", keeper=True, plan=plan())
+        self.assertEqual(p, bare)
+
+    def test_neither_is_required(self):
+        """Every existing caller passes neither, and must keep working."""
+        p = judge_mod.build_prompt(
+            league_name="Dynassty", keeper=True, plan=plan())
+        self.assertIn("COMING IN: Better", p)

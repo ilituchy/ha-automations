@@ -181,7 +181,8 @@ class _Read:
     """
 
     def __init__(self, *, pool=(), pool_mean=45.0, pool_means=None, score=None,
-                 used=None, fail=(), fresh_roster=(), fresh_settings=None):
+                 used=None, fail=(), fresh_roster=(), fresh_settings=None,
+                 pro_rotations=None):
         self.pool = list(pool)
         self.pool_mean = pool_mean
         # Per-player, for the tests about the *list* of swaps. One mean for the
@@ -193,6 +194,7 @@ class _Read:
         self.fail = set(fail)
         self.fresh_roster = list(fresh_roster)
         self.fresh_settings = fresh_settings
+        self.pro_rotations = dict(pro_rotations or {})
         self.asked = []
 
     def _maybe_fail(self, what):
@@ -203,6 +205,18 @@ class _Read:
     def free_agents(self, limit: int = 200):
         self._maybe_fail("free_agents")
         return list(self.pool)
+
+    def pro_team_players(self, pro_team_ids, limit=600):
+        """Team-mates, for the availability read the reviewer is shown.
+
+        Empty by default: the tests here are about the swap funnel, and a
+        fixture that invented rotations would make every prompt assertion
+        depend on them. ``pro_rotations`` fills it for the tests that are
+        about the read itself.
+        """
+        self._maybe_fail("pro_team_players")
+        return {int(t): list(self.pro_rotations.get(int(t), ()))
+                for t in pro_team_ids}
 
     def player_projections(self, ids_):
         self._maybe_fail("player_projections")

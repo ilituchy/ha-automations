@@ -279,7 +279,8 @@ def _report_for(note: Any) -> str:
     return head or body
 
 
-def _side(label: str, cand: Any, note: Any, bio: Any = None) -> List[str]:
+def _side(label: str, cand: Any, note: Any, bio: Any = None,
+          role: Any = None, absence: Any = None) -> List[str]:
     lines = [
         "%s: %s" % (label, cand.name),
         "  projects %.1f points per game when he plays" % cand.per_game,
@@ -299,6 +300,16 @@ def _side(label: str, cand: Any, note: Any, bio: Any = None) -> List[str]:
     report = _report_for(note)
     if report:
         lines.append("  injury news: %s" % report)
+    # Why the projection above may be stale, and why it may be about to be.
+    # Both are minutes facts, and the reviewer is the only layer that can
+    # weigh them against position -- see ``solve/absence.py`` on the share
+    # that could not be measured.
+    said = getattr(role, "describe", lambda: "")() if role is not None else ""
+    if said:
+        lines.append("  %s" % said)
+    said = getattr(absence, "describe", lambda: "")() if absence is not None else ""
+    if said:
+        lines.append("  %s" % said)
     outlook = _outlook(getattr(cand, "outlook", ""))
     if outlook:
         lines.append("  ESPN's season outlook: %s" % outlook)
@@ -313,6 +324,8 @@ def build_prompt(
     matchup: Any = None,
     reports: Optional[Mapping[int, Any]] = None,
     bios: Optional[Mapping[int, Any]] = None,
+    roles: Optional[Mapping[int, Any]] = None,
+    absences: Optional[Mapping[int, Any]] = None,
     acquisitions_left: Optional[int] = None,
 ) -> str:
     """The whole case, in the order a reader needs it.
@@ -328,6 +341,8 @@ def build_prompt(
     """
     reports = reports or {}
     bios = bios or {}
+    roles = roles or {}
+    absences = absences or {}
     lines: List[str] = []
     lines.append("League: %s" % league_name)
     lines.append(
@@ -364,6 +379,7 @@ def build_prompt(
         lines.extend(_side(
             "COMING OFF IR" if plan.add is None else "COMING IN",
             coming, reports.get(coming.player_id), bios.get(coming.player_id),
+            roles.get(coming.player_id), absences.get(coming.player_id),
         ))
         if plan.add is None:
             lines.append(
@@ -382,7 +398,9 @@ def build_prompt(
     else:
         lines.extend(
             _side("GOING OUT", plan.drop, reports.get(plan.drop.player_id),
-                  bios.get(plan.drop.player_id))
+                  bios.get(plan.drop.player_id),
+                  roles.get(plan.drop.player_id),
+                  absences.get(plan.drop.player_id))
         )
     lines.append("")
     lines.append(
@@ -467,6 +485,8 @@ class AddDropJudge:
         matchup: Any = None,
         reports: Optional[Mapping[int, Any]] = None,
         bios: Optional[Mapping[int, Any]] = None,
+        roles: Optional[Mapping[int, Any]] = None,
+        absences: Optional[Mapping[int, Any]] = None,
         acquisitions_left: Optional[int] = None,
     ) -> Verdict:
         """Judge one swap. Never raises -- a failure comes back as a block.
@@ -483,6 +503,8 @@ class AddDropJudge:
             matchup=matchup,
             reports=reports,
             bios=bios,
+            roles=roles,
+            absences=absences,
             acquisitions_left=acquisitions_left,
         )
         log.debug("judge prompt:\n%s", prompt)

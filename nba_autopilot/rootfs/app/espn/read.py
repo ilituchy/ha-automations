@@ -30,6 +30,7 @@ from models import (
     MatchupWindow,
     PlayerCard,
     ProGame,
+    ProPlayer,
     ProTeamId,
     RosterEntry,
     StatLimit,
@@ -906,6 +907,85 @@ class EspnRead:
             out[pid] = splits
         return out
 
+
+    def pro_team_players(
+        self, pro_team_ids: Iterable[ProTeamId], *, limit: int = 600
+    ) -> Dict[ProTeamId, List[ProPlayer]]:
+        """Everyone on these NBA teams, with injury status and season minutes.
+
+        ``pro_team_id -> players``, regardless of who owns them in fantasy or
+        whether anybody does. That last part is the point: a man's rotation-mate
+        is usually on somebody else's fantasy roster, so neither ``roster()``
+        nor ``free_agents()`` can see him, and "who else is out on his team
+        tonight" is unanswerable from either.
+
+        VERIFIED LIVE 2026-11-02
+        ========================
+        ``filterProTeamIds`` on ``kona_player_info`` returned all 54 players
+        across two NBA teams in **one** request, each with
+        ``injuryStatus`` and a season split carrying ``MINUTES``. So the whole
+        signal costs one call per run however many teams are asked for, which
+        is why they are all asked for at once rather than team by team.
+
+        ``sortPercOwned`` is mandatory alongside ``limit``, exactly as in
+        :meth:`free_agents` -- ESPN answers a limit without a sort with
+        ``400 FILTER_LIMIT_MISSING_SORT``. It also means a truncated result
+        keeps the most-owned players, who are the ones whose absence moves a
+        rotation.
+        """
+        wanted = sorted({int(t) for t in pro_team_ids})
+        if not wanted:
+            return {}
+        flt = {
+            "players": {
+                "filterProTeamIds": {"value": wanted},
+                "limit": int(limit),
+                "offset": 0,
+                "sortPercOwned": {"sortAsc": False, "sortPriority": 1},
+                "filterStatsForTopScoringPeriodIds": {
+                    "value": 5,
+                    "additionalValue": [
+                        "00%d" % self.cfg.season,
+                        "10%d" % self.cfg.season,
+                    ],
+                },
+            }
+        }
+        raw = self._get(self._league_url, ("kona_player_info",), fantasy_filter=flt)
+        out: Dict[ProTeamId, List[ProPlayer]] = {t: [] for t in wanted}
+        # ``statSourceId + statSplitTypeId``, the same composite key
+        # :meth:`player_projections` builds -- *not* the ``id`` field, which
+        # spells the same split ``"002027"``. Keying on the wrong one of those
+        # two returns every player with zero minutes, which reads exactly like
+        # a team with nobody in its rotation.
+        season_key = ids.SPLIT_SEASON_TOTAL
+        for p in raw.get("players") or []:
+            player = p.get("player") or p
+            try:
+                pid = int(player.get("id"))
+            except (TypeError, ValueError):
+                continue
+            team = int(player.get("proTeamId") or 0)
+            if team not in out:
+                continue
+            minutes = 0.0
+            for st in player.get("stats") or []:
+                key = "%s%s" % (st.get("statSourceId"), st.get("statSplitTypeId"))
+                if key != season_key:
+                    continue
+                stats = st.get("averageStats") or st.get("stats") or {}
+                raw_min = stats.get(str(ids.MINUTES), stats.get(ids.MINUTES))
+                if raw_min is not None:
+                    minutes = float(raw_min)
+                break
+            out[team].append(ProPlayer(
+                player_id=pid,
+                name=str(player.get("fullName") or player.get("name") or pid),
+                pro_team_id=team,
+                injury_status=str(player.get("injuryStatus") or "ACTIVE"),
+                minutes=minutes,
+            ))
+        return out
 
     #: The Stats table: which splits, in which order, under which headings.
     #: ``00`` is the season, ``01``/``02``/``03`` the trailing 7, 15 and 30

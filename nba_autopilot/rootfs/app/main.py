@@ -45,6 +45,7 @@ import ha.bridge as bridge_mod
 from ha.bridge import Action, ActionEvent, HaBridge
 from sources.defense import Defense, TeamDefense
 from sources.espn_injuries import EspnInjuries
+from solve import absence as absence_mod
 from solve import addrop as addrop_mod
 from solve import budget as budget_mod
 from solve import projections as projections_mod
@@ -984,6 +985,11 @@ class Autopilot:
         # we are holding. Below the pool read it would be deferred a day by any
         # network error, and the thing being deferred is a player scoring
         # nothing at all.
+        # Read before the IR block, for the same reason the IR block is up
+        # here: it needs no pool, and the reviewer sees the activation first.
+        # Extended with the pool's teams once the pool is known, so an add
+        # candidate about to inherit someone's minutes is judged on that too.
+        absences = self._absence_reads(lg, list(roster), notes)
         ir_accepted: List["addrop_mod.AddDropPlan"] = []
         ir_declined: List[Tuple["addrop_mod.AddDropPlan", str, bool]] = []
         # A drop the reviewer refused for the activation is a drop it has
@@ -1026,7 +1032,7 @@ class Autopilot:
             log.info("IR activation: %s", ir_plan.describe())
             reviewed, review_notes, unreachable = self._review_addrop(
                 lg, ir_plan, roster=roster, pool=[], matchup=matchup,
-                injuries=injuries,
+                injuries=injuries, projections=projections, absences=absences,
             )
             notes.extend(review_notes)
             if reviewed is not None:
@@ -1106,6 +1112,19 @@ class Autopilot:
         # priced with exactly the same arithmetic as the add side.
         everyone = dict(pool_projections)
         everyone.update(projections)
+
+        # The pool's NBA teams, for the add side of a swap. A second request,
+        # and only for the teams the roster did not already cover.
+        if pool:
+            fresh = [
+                e for e in pool
+                if int(e.pro_team_id) not in {
+                    int(x.pro_team_id) for x in roster
+                }
+            ]
+            if fresh:
+                absences = dict(absences)
+                absences.update(self._absence_reads(lg, fresh, notes))
 
         if matchup is None:
             # A bye, or the preseason. Not an error, and specifically not a
@@ -1239,7 +1258,7 @@ class Autopilot:
             reviewed, review_notes, unreachable = self._review_addrop(
                 lg, decision,
                 roster=sim_roster, pool=sim_pool, matchup=matchup,
-                injuries=injuries,
+                injuries=injuries, projections=everyone, absences=absences,
             )
             notes.extend(review_notes)
             if reviewed is None:
@@ -1371,6 +1390,32 @@ class Autopilot:
         except Exception as exc:  # noqa: BLE001
             log.warning("could not record the declined swap: %s", exc)
 
+    def _absence_reads(
+        self, lg: "League", players: Sequence[Any], notes: List[str]
+    ) -> Dict[Any, Any]:
+        """Who is missing from each of these men's NBA teams. Never raises.
+
+        One ESPN request for every team involved -- see
+        ``EspnRead.pro_team_players``, which is why they go in together rather
+        than one call per team. Degrades to an empty map and a note: it informs
+        the reviewer and appears on the player card, and neither is worth a run
+        when the lineup is already written.
+        """
+        teams = sorted({int(getattr(e, "pro_team_id", 0) or 0) for e in players})
+        teams = [t for t in teams if t]
+        if not teams:
+            return {}
+        try:
+            pro = lg.read.pro_team_players(teams)
+        except Exception as exc:  # noqa: BLE001 - informational only
+            log.warning("could not read team-mate availability: %s", exc)
+            notes.append(
+                "team-mate availability unavailable (%s), so the reviewer is "
+                "judging on the box scores alone" % exc
+            )
+            return {}
+        return absence_mod.read_absences(players, pro)
+
     def _review_addrop(
         self,
         lg: "League",
@@ -1380,6 +1425,8 @@ class Autopilot:
         pool: Sequence[Any],
         matchup: Optional[Any],
         injuries: Optional[Any],
+        projections: Optional[Mapping[Any, Any]] = None,
+        absences: Optional[Mapping[Any, Any]] = None,
     ) -> Tuple[Optional["addrop_mod.AddDropPlan"], List[str], bool]:
         """Show the swap to the reviewer before the user sees it.
 
@@ -1420,6 +1467,15 @@ class Autopilot:
                           getattr(decision, "activating", None))
                 if c is not None
             ]) or {}
+        # Why the numbers above may be stale, and why they may be about to
+        # be. Both are minutes facts and the reviewer is the only layer that
+        # can weigh them against position -- ``solve/absence.py`` records the
+        # measurement that failed and why this is prose rather than a term.
+        roles = {
+            pid: proj.role
+            for pid, proj in (projections or {}).items()
+            if getattr(proj, "role", None) is not None
+        }
         verdict = self.judge.review(
             league_name=lg.name,
             keeper=keeper,
@@ -1427,6 +1483,8 @@ class Autopilot:
             matchup=matchup,
             reports=reports,
             bios=bios,
+            roles=roles,
+            absences=absences or {},
             acquisitions_left=decision.acquisitions_left,
         )
         swap = _swap_label(decision)

@@ -617,6 +617,85 @@ scores, the fix is worth roughly **30–55 fantasy points a week per league**.
 If a league scores *both* total rebounds and the offensive/defensive split, the
 app refuses to value it rather than paying twice for the same rebound.
 
+## When his role has changed
+
+A projection assumes a job. ESPN wrote Nikola Jovic's assuming 24.6 minutes a
+night; he is playing 13.2. The projection is not a noisy estimate of his
+current role — it is an accurate estimate of a role he no longer has, and
+averaging it into the mean adds a known error rather than information.
+
+So the app compares the minutes a player is **actually** getting against the
+minutes ESPN projected him for, and when they have come apart it believes the
+recent games more. Specifically: past a 3-minute deadband the weight on his
+recent form rises toward 0.90, reaching it at a 12-minute divergence, and the
+window it reads switches from the last 15 days to the last 7 when the shorter
+one shows the role is still moving.
+
+Minutes rather than points, deliberately. Points move because the player
+changed or because the ball bounced; minutes move because somebody decided. On
+**1,588 player-days** from this season, fitted within player, fantasy points run
+**+1.33 per extra minute** with an R² of 0.255 — minutes alone explain a quarter
+of a player's night-to-night variation, and the relationship is linear from −12
+to +10 minutes with no flattening at either end.
+
+Three guards, each of which cost accuracy when it was missing:
+
+- **Only players ESPN lists ACTIVE.** A hurt man's minutes collapse is an
+  availability fact and the play-probability model already prices it. Jaren
+  Jackson Jr's last-7 window was a single 10-minute game he left injured; read
+  as a demotion it moved his value from 34.3 to 16.0 against an actual 30.7.
+- **At least three games in the window.** The same point from the other side.
+- **A deadband**, because every recent window wobbles a minute or two against
+  every projection, and players inside it were already being projected almost
+  exactly right.
+
+Measured against what players actually scored over the following three games,
+across 31 player-seasons on both rosters: mean absolute error **4.45 → 4.09**
+and RMSE **5.59 → 5.50**. On the 13 players the rule moves, MAE **4.14 → 3.30**.
+Both metrics had to improve — an earlier version cut MAE and *raised* RMSE,
+trading typical accuracy for occasional large misses, which is the wrong trade
+for a rule that benches people.
+
+You will see this on the status page in a lineup move's reasoning, after the
+form line: *"last-7 34.0 from 3 games, 78% of the mean — role expanded: ESPN
+projects 30.7 minutes a night, he is playing 37.0 over the last 7 days"*.
+
+### Who else is missing tonight
+
+The rule above cannot see a role change that has not happened yet, and the
+clearest case on your own roster is Anfernee Simons: his recent minutes are
+*below* his projection, so it shrinks him — while his actual production runs far
+above both, because LeBron James and Joel Embiid have been sitting and the
+minutes they vacate land on him. No backward-looking window contains tonight's
+absence.
+
+So the app also reads, in one request per run, every player on every NBA team
+your rosters touch, with his injury status and his season minutes. When a
+starter-sized hole is missing from a player's rotation — 20+ minutes a man, 24+
+in total — that is stated on the swap card and in the reviewer's brief:
+*"Team-mates missing: Paolo Banchero (34 min/g, out), Jalen Suggs (33 min/g,
+out), Anthony Black (28 min/g, out) — 95 minutes ruled out against his own 35.3
+minutes a night."*
+
+**It is reported, not priced**, and the reason is honest. Fitting "minutes
+vacated by absent team-mates" against "minutes our man actually gained", on 246
+team-days reconstructed from this season's box scores, gave a slope of **+0.014**
+— indistinguishable from nothing — with buckets running −0.018, +0.003, +0.020,
++0.126 in no order at all. That is not evidence the mechanism is absent; it is
+evidence this measurement cannot see it, for three structural reasons: "recorded
+no minutes" bundles injured with rested with did-not-play; the archive only
+holds players rostered in your two leagues, so most vacated minutes land on
+players it cannot see; and position is everything — a backup centre absorbs
+nearly all of a starting centre's minutes and a guard absorbs none, so averaged
+over positions the effect cancels.
+
+Rather than invent a coefficient and quietly move every projection with it, the
+app states the fact and leaves the judgment to the layer that can reason about
+position: the AI reviewer, which can say "Simons is a guard and Embiid is a
+centre, but LeBron out means the ball-handling minutes have to go somewhere".
+That is the kind of thing the arithmetic cannot do and a large part of why the
+reviewer exists.
+
 ## Who he is playing
 
 A projection is nudged up or down by the team the player faces that day. Two

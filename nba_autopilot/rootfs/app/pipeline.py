@@ -571,6 +571,16 @@ def _form_bit(proj: Projection, model: Any) -> Optional[str]:
     few to count" is a defensible answer to *why is this man benched the day
     after 51 points*; saying nothing is not, and saying nothing is what the
     rationale did before.
+
+    The window is **named from the projection** rather than written in. It used
+    to say "last-15" unconditionally, which was true until ``solve/role.py``
+    gave the blend a reason to read the last 7 days instead -- and a rationale
+    that reports the wrong window is worse than one that reports none, because
+    a reader checking the number against ESPN's card finds a different one and
+    concludes the model is broken.
+
+    When the role has moved, that is appended: it is the reason the weight is
+    what it is, and the weight is the number most likely to be questioned.
     """
     form = proj.form_mean
     if not form:
@@ -580,11 +590,21 @@ def _form_bit(proj: Projection, model: Any) -> Optional[str]:
     )
     games = proj.form_games
     plural = "" if games == 1 else "s"
+    role = getattr(proj, "role", None)
+    window = "last-7" if (
+        role is not None and getattr(role, "split", None) == ids.SPLIT_LAST_7
+    ) else "last-15"
     if proj.form_weight > 0.0:
-        return "last-15 %.1f from %.0f game%s, %.0f%% of the mean" % (
-            priced, games, plural, proj.form_weight * 100.0)
-    # Reachable only when ESPN sent a recent split with no games in it.
-    return "last-15 %.1f from %.0f game%s, not counted" % (priced, games, plural)
+        bit = "%s %.1f from %.0f game%s, %.0f%% of the mean" % (
+            window, priced, games, plural, proj.form_weight * 100.0)
+    else:
+        # Reachable only when ESPN sent a recent split with no games in it.
+        bit = "%s %.1f from %.0f game%s, not counted" % (
+            window, priced, games, plural)
+    said = getattr(role, "describe", lambda: "")() if role is not None else ""
+    if said:
+        bit = "%s -- %s" % (bit, said[0].lower() + said[1:])
+    return bit
 
 
 def _moves_for(

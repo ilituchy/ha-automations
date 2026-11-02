@@ -8,6 +8,55 @@ All notable changes to this app are documented here. The format follows
 
 ### Added
 
+- **A projection whose role assumption has gone stale is now reweighted.**
+  `solve/role.py` compares the minutes a player is actually getting against the
+  minutes ESPN projected him for. Past a 3-minute deadband the weight on his
+  recent form rises toward 0.90, reaching it at 12 minutes, and the window read
+  switches from the last 15 days to the last 7 when the shorter one shows the
+  role is still moving.
+
+  The existing form shrinkage answers *how much of a small sample should I
+  believe* and is measured and untouched. This answers a different question that
+  looks identical from outside: *is the thing I am shrinking toward still true*.
+  ESPN projected Nikola Jovic at 24.6 minutes a night; he plays 13.2. That
+  projection is not a noisy estimate of his current role, it is an accurate
+  estimate of a role he no longer has.
+
+  Minutes rather than points, because points move when the player changes *or*
+  when the ball bounces and minutes move only when somebody decides. Measured
+  on **1,588 player-days** this season, within player: fantasy points run
+  **+1.33 per extra minute**, R² 0.255, linear from −12 to +10 minutes. Scored
+  against what players then did over three games on 31 player-seasons: MAE
+  **4.45 → 4.09**, RMSE **5.59 → 5.50**, and MAE **4.14 → 3.30** on the thirteen
+  the rule moves. Both metrics had to improve; an earlier version cut MAE and
+  raised RMSE, which is the wrong trade for a rule that benches people.
+
+  Three guards, each of which cost accuracy when absent: ACTIVE players only
+  (Jaren Jackson Jr's last-7 was one 10-minute game he left injured — read as a
+  demotion it moved his value from 34.3 to 16.0 against an actual 30.7), a
+  minimum of three games in the window, and the deadband.
+
+- **Who else is missing from a player's NBA team is now read and reported.**
+  `EspnRead.pro_team_players` pulls every player on every NBA team the rosters
+  touch — injury status and season minutes — in **one** request per run, via
+  `filterProTeamIds` on `kona_player_info`. `solve/absence.py` turns that into
+  "a starter-sized hole is missing from his rotation", which goes on the swap
+  card and into the reviewer's brief.
+
+  This is the signal the rule above structurally cannot see. Anfernee Simons'
+  recent minutes are *below* his projection, so it shrinks him, while his actual
+  production is far above both — LeBron James and Joel Embiid have been sitting
+  and the vacated minutes land on him. No backward-looking window contains
+  tonight's absence.
+
+  **Reported, not priced.** Fitting vacated team-mate minutes against minutes
+  actually gained, on 246 team-days, gave a slope of **+0.014** with buckets in
+  no order at all. That is a measurement failure, not an absent effect — the
+  proxy bundles injured with rested, the archive sees only one to six of a
+  nine-man rotation, and position is everything, so averaging over positions
+  cancels the effect. Rather than invent the coefficient, the app states the
+  fact and leaves it to the layer that can reason about position.
+
 - **A healthy player stuck on IR is now bought a roster spot.** ESPN withdraws
   a player's IR eligibility as soon as he is healthy but does not move him, and
   on a full active roster there is no legal slot for him to return to. The
@@ -42,6 +91,13 @@ All notable changes to this app are documented here. The format follows
   would be withheld for the same non-reason.
 
 ### Fixed
+
+- **A lineup move's reasoning said "last-15" whichever window it read.** Now
+  that the blend can read the last 7 days, naming the wrong one is worse than
+  naming none: a reader checking the number against ESPN's own card finds a
+  different one and concludes the model is broken. The window is named from the
+  projection, and the role change is appended as the reason the weight is what
+  it is.
 
 - **A starting slot was priced off players who cannot start.**
   `solve.addrop.slot_prices` ranked the whole roster, IR occupants included, to

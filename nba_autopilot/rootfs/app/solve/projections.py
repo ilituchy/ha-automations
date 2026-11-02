@@ -107,6 +107,8 @@ from models import P_PLAY_PRIOR, Projection, RosterEntry
 PlayerId = int
 StatId = int
 
+from solve import role as role_mod
+
 log = logging.getLogger(__name__)
 
 __all__ = [
@@ -494,15 +496,24 @@ def form_weight(games: float, has_recent: bool) -> float:
 
 def recent_form(
     splits: Mapping[str, Mapping[StatId, float]],
+    *,
+    role: Optional["role_mod.RoleRead"] = None,
 ) -> Tuple[Optional[Dict[StatId, float]], float, float]:
-    """``(last-15 per-game mean, season games played, blend weight)``.
+    """``(recent per-game mean, that window's games, blend weight)``.
 
     The mean is returned whether or not it is used, because the page shows what
     the model is *discounting* as well as what it acted on. A reader who has
     just watched a player go for 51 is owed the number and the reason it did
     not move the lineup, rather than a rationale that silently omits it.
+
+    ``role`` is a :class:`solve.role.RoleRead`, and it changes two things: which
+    window is read, and how much of it goes in. Both only when his minutes have
+    diverged from the ones ESPN projected him for -- see that module for why
+    the shrinkage below is the right answer to a different question. Omitted or
+    unchanged, the behaviour is exactly the last-15 blend it always was.
     """
-    split = splits.get(ids.SPLIT_LAST_15) or {}
+    key = role.split if role is not None else ids.SPLIT_LAST_15
+    split = splits.get(key) or {}
     recent = {
         int(k): float(v) for k, v in split.items() if int(k) not in _EXCLUDED
     }
@@ -514,11 +525,19 @@ def recent_form(
     if games <= 0.0:
         games = float(
             (splits.get(ids.SPLIT_SEASON_TOTAL) or {}).get(ids.GP_STAT, 0.0))
-    return (recent or None), games, form_weight(games, bool(recent))
+    weight = form_weight(games, bool(recent))
+    if role is not None and recent:
+        # Lifted, never lowered, and only past the deadband. The sample-size
+        # shrinkage still sets the floor: a role change is a reason to believe
+        # the window more, not a reason to stop counting how big it is.
+        weight = role.adjust(weight)
+    return (recent or None), games, weight
 
 
 def per_game_mean(
     splits: Mapping[str, Mapping[StatId, float]],
+    *,
+    role: Optional["role_mod.RoleRead"] = None,
 ) -> Optional[Dict[StatId, float]]:
     """Per-game production means for one player, or ``None`` if unprojectable.
 
@@ -543,12 +562,15 @@ def per_game_mean(
     if not mean:
         return None
 
-    recent, games, w = recent_form(splits)
+    recent, games, w = recent_form(splits, role=role)
     if recent and w > 0.0:
         for stat in list(mean):
             if stat in recent:
                 mean[stat] = (1.0 - w) * mean[stat] + w * float(recent[stat])
-        log.debug("blended last-15 at weight %.2f over %.0f games", w, games)
+        log.debug(
+            "blended %s at weight %.2f over %.0f games",
+            role.split if role is not None else ids.SPLIT_LAST_15, w, games,
+        )
 
     return mean
 
@@ -659,7 +681,16 @@ def build_projections(
 
     for entry in roster:
         by_split = splits.get(entry.player_id) or {}
-        mean = per_game_mean(by_split)
+        # Read before the blend, because it chooses which window the blend
+        # reads. ESPN's own status, not an override from Sleeper or the injury
+        # report: this gate is about whether a minutes change is a role change
+        # or an injury, and a source that only ever makes a player *less*
+        # available cannot answer that -- see ``p_play_for``.
+        role = role_mod.read_role(
+            by_split,
+            active=str(entry.injury_status or "ACTIVE").upper() == "ACTIVE",
+        )
+        mean = per_game_mean(by_split, role=role)
         if mean is None:
             skipped.append(entry)
             continue
@@ -677,7 +708,7 @@ def build_projections(
             by_split.get(ids.SPLIT_SEASON_PROJECTED) or {}
         ).get(ids.GP_STAT)
 
-        form, form_games, form_w = recent_form(by_split)
+        form, form_games, form_w = recent_form(by_split, role=role)
 
         override = (statuses or {}).get(entry.player_id)
         note = p_play_for(
@@ -704,6 +735,7 @@ def build_projections(
             form_mean=form,
             form_games=form_games,
             form_weight=form_w,
+            role=role if role.changed else None,
         )
 
     if skipped:
