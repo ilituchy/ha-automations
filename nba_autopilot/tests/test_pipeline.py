@@ -1031,3 +1031,70 @@ class TestTheCapIsPricedAgainstStartsWeCouldMake(unittest.TestCase):
         """Rather than price the cap off nothing when a caller cannot say."""
         got = self.case(n_players=20, seats=0, days=(1, 2))
         self.assertEqual(len(got), 40)
+
+
+class TestABaselineFromTheWrongWeek(unittest.TestCase):
+    """A snapshot flagged as a week's first day, recorded on another week's day.
+
+    Both can be true at once, which is the part that took finding. The season
+    grid is rebuilt from ESPN's scoring-period dates every run, and early in a
+    season -- when few dates exist -- it can put a week boundary in the wrong
+    place. A baseline written under that calendar is permanent, because
+    ``Store.record_gp_snapshot`` is ``INSERT OR IGNORE`` on purpose: the useful
+    reading is the earliest one in the week and a later run must not overwrite
+    it.
+
+    Live on 2026-11-02: a baseline for matchup period 3 carrying a season total
+    of 65 had been written during matchup period 2, and day one of the week read
+    as 23 of 44 games already spent.
+    """
+
+    def measure(self, reader, store, period, matchup, seats=11):
+        return usage_mod.measure(
+            reader, store, league_id=1, team_id=2,
+            calendar=calendar_like_2027(),
+            scoring_period=period, matchup_period=matchup,
+            starting_slots=seats,
+        )
+
+    def test_a_baseline_recorded_outside_the_period_is_refused(self):
+        store = _FakeSnapshots()
+        # Written while the calendar thought period 4 began matchup period 2.
+        store.rows[(1, 2, 2)] = {
+            "scoring_period": 4, "season_gp": 65, "is_baseline": 1,
+        }
+        cal = calendar_like_2027()
+        self.assertNotIn(4, cal.periods_in_matchup(2))
+        got = self.measure(_FakeReader({}, 88), store, period=8, matchup=2)
+        self.assertFalse(got.trustworthy)
+        self.assertIn("earlier and wrong season calendar", got.note)
+        self.assertIn("scoring period 4", got.note)
+
+    def test_a_baseline_on_the_periods_real_first_day_is_used(self):
+        store = _FakeSnapshots()
+        first = calendar_like_2027().periods_in_matchup(2)[0]
+        store.rows[(1, 2, 2)] = {
+            "scoring_period": first, "season_gp": 65, "is_baseline": 1,
+        }
+        got = self.measure(_FakeReader({}, 70), store,
+                           period=first + 1, matchup=2)
+        self.assertEqual(got.games, 5.0)
+        self.assertTrue(got.trustworthy)
+
+    def test_the_counter_still_wins_when_ESPN_has_one(self):
+        """A wrong baseline must not cost us a reading we actually have.
+
+        ``statBySlot`` is the counter the cap is enforced against; the delta is
+        only ever a cross-check, and a refused cross-check is not a reason to
+        discard the real number.
+        """
+        store = _FakeSnapshots()
+        store.rows[(1, 2, 2)] = {
+            "scoring_period": 4, "season_gp": 65, "is_baseline": 1,
+        }
+        got = self.measure(
+            _FakeReader({ids.TEAM_TOTAL_LIMIT_SLOT: 12}, 88),
+            store, period=8, matchup=2,
+        )
+        self.assertEqual(got.games, 12.0)
+        self.assertTrue(got.trustworthy)

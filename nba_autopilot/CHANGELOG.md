@@ -118,7 +118,19 @@ All notable changes to this app are documented here. The format follows
   Pritchard and nine others sat with games. ESPN's own counter for the period
   was `{}`, and for the period just finished a tidy 44 of 44.
 
-  Two fixes. An empty counter on the period's first day now reads as zero —
+  And the mechanism behind the stale baseline, which took finding because both
+  halves of it look impossible together: the row was flagged as a week's first
+  day *and* recorded on a day that week does not contain. The season grid is
+  rebuilt from ESPN's scoring-period dates on every run, and early in a season —
+  when few dates exist — it can put a week boundary in the wrong place. A
+  baseline written under that calendar is permanent, because
+  `Store.record_gp_snapshot` is `INSERT OR IGNORE` by design: the useful reading
+  is the earliest one in the week and a later run must not overwrite it. So a
+  baseline is now checked against today's calendar by the scoring period it
+  records, which is certain, rather than inferred from the size of the delta,
+  which is only a net.
+
+  Three fixes. An empty counter on the period's first day now reads as zero —
   recorded **after** the baseline snapshot, never before, because the first day
   is the only moment a baseline can be captured and returning early would trade
   one correct zero for a week with no baseline at all. And the season-delta is

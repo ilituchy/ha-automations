@@ -278,6 +278,29 @@ def measure(
                 % (matchup_period, snap.get("scoring_period"),
                    periods[0] if periods else "?")
             )
+        elif periods and int(snap.get("scoring_period") or -1) != periods[0]:
+            # Flagged as a baseline, and recorded on a day this matchup period
+            # does not contain. Both can be true at once because the flag was
+            # written under an *earlier* calendar: the season grid is rebuilt
+            # from ESPN's scoring-period dates on every run, and early in the
+            # season -- when few dates exist -- it can put a week's boundary in
+            # the wrong place. A row written then is permanent, because
+            # ``Store.record_gp_snapshot`` is ``INSERT OR IGNORE`` by design.
+            #
+            # This is what happened: a baseline for matchup period 3 carrying a
+            # season total of 65 was written during matchup period 2, and today
+            # it made day one of the week read as 23 of 44 games already spent.
+            # Checked against the recorded scoring period rather than inferred
+            # from the size of the delta, because this is certain and the
+            # arithmetic ceiling below is only a net.
+            baseline_note = (
+                "baseline for matchup period %d is flagged as the period's "
+                "first day but was recorded on scoring period %s, which is not "
+                "in this period (%s) -- it was written under an earlier and "
+                "wrong season calendar"
+                % (matchup_period, snap.get("scoring_period"),
+                   ", ".join(str(x) for x in periods))
+            )
         else:
             delta = max(int(season_gp) - int(snap.get("season_gp") or 0), 0)
             ceiling = _impossible_delta(
