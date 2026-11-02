@@ -1622,3 +1622,118 @@ class TestIrActivationReachesTheUser(unittest.TestCase):
         h = self.harness()
         _decisions, notes = h.consider_all()
         self.assertFalse(any("IR" in n and "stuck" in n for n in notes), notes)
+
+
+class _SerialJudge:
+    """Answers each review differently, in order, and records what it saw."""
+
+    def __init__(self, *verdicts):
+        self.verdicts = list(verdicts)
+        self.seen = []
+
+    def review(self, **kw):
+        self.seen.append(kw)
+        # Approving once the script runs out, so a test that scripts only the
+        # IR reviews is not also silently scripting the swap funnel's.
+        return self.verdicts.pop(0) if self.verdicts else _ok("unscripted")
+
+
+def _ok(reason="fine"):
+    import judge as judge_mod
+    return judge_mod.Verdict(True, reason)
+
+
+def _no(reason="no"):
+    import judge as judge_mod
+    return judge_mod.Verdict(False, reason)
+
+
+class TestTheBlockedDropIsRetried(unittest.TestCase):
+    """A veto is a judgment about the man leaving, not about the activation.
+
+    The morning this shipped, the reviewer blocked dropping Jakob Poeltl and
+    was right to -- *"a one-game shoulder sit, not a long-term absence"*. With
+    one candidate per run that single sound veto would have left the returnee
+    on IR for another day, which is the whole failure the feature exists to
+    stop. So the run reaches for the next-cheapest man instead.
+    """
+
+    #: What ``plan_lineup`` produces for a stranded man: back on IR. A target
+    #: that starts him instead makes him undroppable *and* leaves him in the
+    #: starting-slot pricing, where he sets his own threshold.
+    TARGET = {1: START, 4: START, 2: BENCH, 3: BENCH, 5: BENCH,
+              9: ids.IR_SLOT}
+
+    def harness(self, *verdicts, **kw):
+        # Two starting slots and two bench, filled exactly, so the returnee has
+        # nowhere to go. Two of the four are on the bench and droppable, which
+        # is what gives the retry a second candidate to reach for. The marginal
+        # starting slot prices at 40 -- the second-best man playing -- so the
+        # returnee's 55 clears it and the two bench men's do not.
+        h = _Harness(st=settings(
+            lineup_slot_counts={START: 2, BENCH: 3, ids.IR_SLOT: 2}
+        ), judge=_SerialJudge(*verdicts), **kw)
+        h.roster = [player(1), player(4, name="Second"),
+                    player(2, name="Weak", slot=BENCH),
+                    player(3, name="Spare", slot=BENCH),
+                    player(5, name="Third", slot=BENCH),
+                    player(9, name="Returnee", slot=ids.IR_SLOT)]
+        h.projections = {1: projection(1, 60.0), 4: projection(4, 40.0),
+                         2: projection(2, 5.0), 3: projection(3, 12.0),
+                         5: projection(5, 15.0), 9: projection(9, 55.0)}
+        h.values = {1: 60.0, 4: 40.0, 2: 5.0, 3: 12.0, 5: 15.0, 9: 55.0}
+        return h
+
+    @staticmethod
+    def ir_reviews(h):
+        """Only the activations. The swap funnel reviews things too."""
+        return [k["plan"] for k in h.app.judge.seen
+                if k["plan"].reason == "ir-activation"]
+
+    def test_a_vetoed_drop_is_replaced_by_the_next_cheapest(self):
+        h = self.harness(_no("not him"), _ok("this one is fine"))
+        decisions, _notes = h.consider_all(
+            target=self.TARGET, stranded=(9,))
+        self.assertTrue(decisions)
+        self.assertEqual(decisions[0].reason, "ir-activation")
+        # Weak first, because he is cheapest; Spare once Weak is vetoed.
+        self.assertEqual(
+            [p.drop.name for p in self.ir_reviews(h)], ["Weak", "Spare"])
+        self.assertEqual(decisions[0].drop.name, "Spare")
+
+    def test_the_vetoed_man_is_not_offered_twice(self):
+        """Asking the same question in different words is still asking it."""
+        h = self.harness(_no("not him"), _no("nor him"), _no("nor him either"))
+        decisions, notes = h.consider_all(
+            target=self.TARGET, stranded=(9,))
+        self.assertFalse([d for d in decisions if d.reason == "ir-activation"])
+        names = [p.drop.name for p in self.ir_reviews(h)]
+        self.assertEqual(len(names), len(set(names)), names)
+        self.assertEqual(len(names), 3, names)
+
+    def test_giving_up_says_so_rather_than_going_quiet(self):
+        """Three blocks and a silent run is indistinguishable from no problem."""
+        h = self.harness(_no("a"), _no("b"), _no("c"))
+        _decisions, notes = h.consider_all(
+            target=self.TARGET, stranded=(9,))
+        self.assertTrue(
+            any("gave up activating off IR" in n for n in notes), notes)
+
+    def test_an_unreachable_reviewer_stops_rather_than_burning_the_queue(self):
+        """It is not a judgment, so the next man would be withheld for it too.
+
+        And the budget is small: spending it failing the same way would leave
+        nothing for the candidate that mattered.
+        """
+        import judge as judge_mod
+        h = self.harness(judge_mod.Verdict(False, "timed out", errored=True))
+        _decisions, _notes = h.consider_all(
+            target=self.TARGET, stranded=(9,))
+        self.assertEqual(len(self.ir_reviews(h)), 1)
+
+    def test_the_first_approval_ends_the_search(self):
+        h = self.harness(_ok("fine"), _ok("also fine"))
+        decisions, _notes = h.consider_all(
+            target=self.TARGET, stranded=(9,))
+        self.assertEqual(decisions[0].drop.name, "Weak")
+        self.assertEqual(len(self.ir_reviews(h)), 1)

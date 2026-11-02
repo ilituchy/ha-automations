@@ -78,6 +78,13 @@ DEFENSE_TTL = timedelta(days=7)
 #: the reviewer exists.
 MAX_ADDROP_REVIEWS = 5
 
+#: How many drops to offer the reviewer for one IR activation before giving up.
+#: Lower than ``MAX_ADDROP_REVIEWS`` because the candidates are taken
+#: cheapest-first: by the fourth the man leaving is worth enough that declining
+#: is the right answer anyway, and the gain gate usually ends the loop before
+#: this does.
+MAX_IR_REVIEWS = 3
+
 #: Distinguishes "not built yet" from "built, and the answer was None". Without
 #: it a failed calendar build would be retried on every league of every run,
 #: which means re-downloading a multi-megabyte season document to get the same
@@ -985,7 +992,15 @@ class Autopilot:
         # and offering him up again two attempts later as half of an ordinary
         # swap is asking the same question in different words.
         ir_vetoed: List[str] = []
-        if plan.ir_stranded:
+        # The *drop* is retried, not the activation: a veto is a judgment about
+        # the man leaving, and the run has a queue of cheaper-first candidates
+        # behind him. Observed the morning this shipped -- the reviewer blocked
+        # dropping Jakob Poeltl, correctly ("a one-game shoulder sit, not a
+        # long-term absence"), and with one shot per run that single sound veto
+        # would have stranded the returnee for another day. Each attempt reaches
+        # for a more valuable man, so the gain shrinks and the loop ends on its
+        # own; the budget is only there to bound the reviewer calls.
+        for _ in range(MAX_IR_REVIEWS if plan.ir_stranded else 0):
             ir_plan = addrop_mod.plan_ir_activation(
                 settings,
                 roster,
@@ -999,33 +1014,48 @@ class Autopilot:
                 starters=starters,
                 matchup=matchup,
                 never_drop=self.cfg.never_drop,
+                review_blocked=ir_vetoed,
             )
-            notes.extend(ir_plan.notes)
-            if ir_plan.proposed:
-                log.info("IR activation: %s", ir_plan.describe())
-                reviewed, review_notes, unreachable = self._review_addrop(
-                    lg, ir_plan, roster=roster, pool=[], matchup=matchup,
-                    injuries=injuries,
+            # Only on the attempt that settles it. The declining notes of the
+            # attempts in between repeat the whole droppability list each time,
+            # which buries the sentence that says what actually happened.
+            if not ir_plan.proposed or not ir_vetoed:
+                notes.extend(ir_plan.notes)
+            if not ir_plan.proposed:
+                break
+            log.info("IR activation: %s", ir_plan.describe())
+            reviewed, review_notes, unreachable = self._review_addrop(
+                lg, ir_plan, roster=roster, pool=[], matchup=matchup,
+                injuries=injuries,
+            )
+            notes.extend(review_notes)
+            if reviewed is not None:
+                ir_accepted.append(reviewed)
+                # Applied to ``roster`` itself, not only to the simulated copy
+                # below: everything after this -- the pool pricing, the slot
+                # arithmetic, the swaps -- has to see the spot this drop opens
+                # and the returnee now sitting in it, or the next decision is
+                # made against a roster that no longer exists.
+                roster = _apply_swap(roster, [], reviewed)[0]
+                break
+            ir_declined.append((
+                ir_plan,
+                review_notes[-1] if review_notes
+                else "the reviewer did not approve it",
+                bool(unreachable),
+            ))
+            if unreachable or ir_plan.drop is None:
+                # Not a judgment about this drop, so the next candidate would
+                # be withheld for the same non-reason.
+                break
+            ir_vetoed.append(ir_plan.drop.name)
+        else:
+            if plan.ir_stranded and not ir_accepted:
+                notes.append(
+                    "gave up activating off IR after %d candidate(s): the "
+                    "reviewer blocked every man cheap enough to drop for him"
+                    % MAX_IR_REVIEWS
                 )
-                notes.extend(review_notes)
-                if reviewed is None:
-                    ir_declined.append((
-                        ir_plan,
-                        review_notes[-1] if review_notes
-                        else "the reviewer did not approve it",
-                        bool(unreachable),
-                    ))
-                    if not unreachable and ir_plan.drop is not None:
-                        ir_vetoed.append(ir_plan.drop.name)
-                else:
-                    ir_accepted.append(reviewed)
-                    # Applied to ``roster`` itself, not only to the simulated
-                    # copy below: everything after this -- the pool pricing,
-                    # the slot arithmetic, the swaps -- has to see the spot
-                    # this drop opens and the returnee now sitting in it, or
-                    # the next decision is made against a roster that no
-                    # longer exists.
-                    roster = _apply_swap(roster, [], reviewed)[0]
 
         try:
             pool = lg.read.free_agents()

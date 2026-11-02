@@ -126,6 +126,12 @@ ordinary drop applies here: `never_drop`, a man starting today, a player picked
 up earlier in the same run, and the keeper gate. Someone else sitting on IR is
 never the drop — that frees an IR slot, not the active one he needs.
 
+If the reviewer blocks the drop, the run offers it the next-cheapest man
+instead, up to three candidates. That matters more than it sounds: the first
+time this ran, the reviewer blocked dropping a centre who was listed day-to-day
+and due back the same day — a good call — and without the retry that one veto
+would have left the returnee on IR for another day.
+
 When he is worth *less* than anyone droppable, nothing is proposed and the run's
 notes say so by name. That state is permanent until you act: he will hold an IR
 slot he cannot play from until you either drop him yourself or he gets injured

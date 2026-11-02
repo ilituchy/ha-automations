@@ -32,6 +32,15 @@ All notable changes to this app are documented here. The format follows
   the fix at **+93.1** points this week in the dynasty league and **+70.7** in
   the redraft one, and the week after that is the same number again.
 
+  The *drop* is retried when the reviewer blocks it, up to `MAX_IR_REVIEWS`
+  candidates, cheapest first. On the morning this shipped the reviewer blocked
+  dropping Jakob Poeltl and was right to — *"a one-game shoulder sit, not a
+  long-term absence"* — and with one shot per run that single sound veto would
+  have left the returnee on IR for another day, which is the whole failure the
+  feature exists to stop. A reviewer that cannot be *reached* stops the search
+  instead: that is not a judgment about the man leaving, so the next candidate
+  would be withheld for the same non-reason.
+
 ### Fixed
 
 - **A starting slot was priced off players who cannot start.**
