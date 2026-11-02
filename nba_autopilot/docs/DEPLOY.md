@@ -33,7 +33,13 @@ the cap at **33.21** where the new code gives **0.00** — the old image, one
 commit behind, running and reporting success. The commit before it had deployed
 correctly minutes earlier, so the difference was entirely the reload.
 
-## So: retry the reload until it succeeds, and verify in the behaviour
+## And a reload that returns success is still not enough
+
+A reload that returns `True` has *started* the pull, not finished it. The same
+fix failed to deploy a second time after a reload that succeeded, because the
+rebuild went out two seconds later and read a cache still being written.
+
+So: retry until it succeeds, **then wait**, then rebuild.
 
 ```python
 for attempt in range(5):
@@ -42,13 +48,28 @@ for attempt in range(5):
     await asyncio.sleep(10)
 else:
     raise SystemExit("store reload never succeeded -- do not rebuild on a stale cache")
+await asyncio.sleep(30)                     # let the pull land
+await call(f"/addons/{SLUG}/rebuild", "post")
 ```
 
-Then rebuild, and **check a number only the new code can produce**. Pick one
-before deploying, from whatever the change is supposed to alter — a `lambda` in
-the cap note, a new sentence in a rationale, a log line that did not exist.
-`version` cannot serve: the add-on pins `0.1.0`, so `version_latest` matches it
-and `update_available` is always `false` however far behind the image is.
+Then **check a number only the new code can produce**. Pick it before
+deploying, from whatever the change is supposed to alter. `version` cannot
+serve: the add-on pins `0.1.0`, so `version_latest` matches it and
+`update_available` is always `false` however far behind the image is.
+
+The standing canary is the `games cap:` line `pipeline.plan_lineup` logs on
+every run that prices the cap. It carries `lambda`, the startable player-game
+count and the scheduled one, so one glance says both which image is running and
+whether the cap is really binding:
+
+```
+games cap: 44 cap, 0 used, 7 day(s) left, 57 startable player-game(s)
+           of 91 scheduled, lambda 0.00, utilization 1.04
+```
+
+If a change does not alter that line, add one that does, deploy, and confirm it
+appears before trusting anything else about the run.
+
 
 ## Triggering a run without waiting for 09:00
 
