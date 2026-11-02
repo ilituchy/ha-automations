@@ -1626,6 +1626,13 @@ class Autopilot:
             calendar=cal,
             scoring_period=settings.current_scoring_period,
             matchup_period=matchup_period,
+            # Bounds the season-delta fallback: a day has this many starting
+            # slots and a start is the only way to spend a game, so no reading
+            # above ``days * slots`` is a reading of this week.
+            starting_slots=sum(
+                int(n) for sl, n in settings.lineup_slot_counts.items()
+                if int(n) > 0 and int(sl) not in (ids.BENCH_SLOT, ids.IR_SLOT)
+            ),
         ) if settings.has_gp_cap else None
         if games_used is not None:
             log.info("games used: %s", games_used.describe())

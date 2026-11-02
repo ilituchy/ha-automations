@@ -646,6 +646,28 @@ Each day is now capped at its starting-slot count. When the cap genuinely is
 binding you will still see playable men benched, and the note will say so with
 the price; when it is not, every slot gets filled.
 
+There was a second and larger half to the same symptom: **how many games the
+app thought you had already spent.** ESPN fills its per-period counter as games
+finish, so on the first day of a week it is empty — which means zero. The app
+read "empty" as "missing" and rebuilt the number from a season-total delta
+instead, and on 2026-11-02 that delta said **23 of 44 games already gone**
+before a ball had been thrown, against a baseline left over from an earlier
+week. With 21 games "remaining" instead of 44 the cap bound hard and the
+rationing above was arithmetically correct — on numbers that were wrong.
+
+An empty counter on a week's first day now reads as zero. And the season-delta
+fallback is bounded by what the days have had room for — days elapsed times
+starting slots, which a start cannot exceed however the week has gone — so a
+baseline from the wrong week is refused rather than believed.
+
+The run log now carries the whole picture on one line, so this is visible
+rather than inferable:
+
+```
+games cap: 44 cap, 0 used, 7 day(s) left, 57 startable player-game(s)
+           of 91 scheduled, lambda 0.00, utilization 1.04
+```
+
 Position eligibility is deliberately not modelled, so the ceiling is a slight
 over-count. That is the safe direction. Over-counting prices the cap too high
 and wastes points; under-counting prices it too low and **forfeits games

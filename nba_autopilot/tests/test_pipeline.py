@@ -224,12 +224,82 @@ class _FakeSnapshots:
 
 
 class TestGamesUsed(unittest.TestCase):
-    def measure(self, reader, store, period=1, matchup=1, cal=None):
+    def measure(self, reader, store, period=1, matchup=1, cal=None, seats=0):
         return usage_mod.measure(
             reader, store, league_id=1, team_id=2,
             calendar=cal or calendar_like_2027(),
             scoring_period=period, matchup_period=matchup,
+            starting_slots=seats,
         )
+
+    def test_an_empty_counter_on_day_one_is_zero_not_a_reconstruction(self):
+        """What ESPN's silence means depends on the day.
+
+        It fills ``statBySlot`` as games finish, so empty on the first day of a
+        matchup period is a reading of zero -- not a missing reading to be
+        rebuilt from somewhere less reliable. Taking the fallback cost points
+        on 2026-11-02: day one of matchup period 3, the season-delta returned
+        **23** of a 44-game cap against a baseline from an earlier week, and
+        the optimizer priced a game at 33.21 and gave two starting slots to men
+        with no game that night. ESPN's own counter said ``{}``.
+        """
+        store = _FakeSnapshots()
+        got = self.measure(_FakeReader({}, 88), store, period=1, matchup=1)
+        self.assertEqual(got.games, 0.0)
+        self.assertTrue(got.trustworthy)
+        self.assertEqual(got.from_stat_by_slot, 0)
+        self.assertIn("nothing has been spent yet", got.note)
+
+    def test_the_baseline_is_still_captured_before_that_exit(self):
+        """The first day is the *only* moment a baseline can be taken.
+
+        Returning early without recording it would trade today's correct zero
+        for a week with no baseline at all, and every day after today would
+        fall through to no reading.
+        """
+        store = _FakeSnapshots()
+        self.measure(_FakeReader({}, 50), store, period=1, matchup=1)
+        got = self.measure(_FakeReader({}, 57), store, period=3, matchup=1)
+        self.assertEqual(got.games, 7.0)
+        self.assertEqual(got.source, usage_mod.SOURCE_SEASON_DELTA)
+
+    def test_a_delta_larger_than_the_days_had_room_for_is_refused(self):
+        """A day has a fixed number of starting slots and a start is the only
+        way to spend a game, so ``days * slots`` cannot be exceeded however the
+        week has gone. Anything above it is a reading of a different week.
+        """
+        store = _FakeSnapshots()
+        self.measure(_FakeReader({}, 65), store, period=1, matchup=1, seats=11)
+        # Day two, and the baseline says 23 games have gone. Two days at
+        # eleven slots is twenty-two; twenty-three is impossible.
+        got = self.measure(_FakeReader({}, 88), store, period=2, matchup=1,
+                           seats=11)
+        self.assertFalse(got.trustworthy)
+        self.assertIn("impossible", got.note)
+        self.assertIn("wrong week", got.note)
+
+    def test_a_delta_inside_that_ceiling_is_still_taken(self):
+        store = _FakeSnapshots()
+        self.measure(_FakeReader({}, 65), store, period=1, matchup=1, seats=11)
+        got = self.measure(_FakeReader({}, 85), store, period=2, matchup=1,
+                           seats=11)
+        self.assertEqual(got.games, 20.0)
+        self.assertTrue(got.trustworthy)
+
+    def test_without_a_slot_count_the_ceiling_cannot_run(self):
+        """And "could not check" must not read as "checked and fine" -- it
+        simply leaves the old behaviour, which the note still describes."""
+        store = _FakeSnapshots()
+        self.measure(_FakeReader({}, 65), store, period=1, matchup=1)
+        got = self.measure(_FakeReader({}, 88), store, period=2, matchup=1)
+        self.assertEqual(got.games, 23.0)
+
+    def test_the_ceiling_counts_days_elapsed_not_the_whole_week(self):
+        self.assertEqual(usage_mod._impossible_delta([7, 8, 9], 7, 11), 11)
+        self.assertEqual(usage_mod._impossible_delta([7, 8, 9], 9, 11), 33)
+        self.assertIsNone(usage_mod._impossible_delta([7, 8, 9], 99, 11))
+        self.assertIsNone(usage_mod._impossible_delta([], 7, 11))
+        self.assertIsNone(usage_mod._impossible_delta([7], 7, 0))
 
     def test_reads_the_pooled_team_total_slot(self):
         """The live shape: one entry, at the team-total pseudo-slot."""
@@ -255,13 +325,18 @@ class TestGamesUsed(unittest.TestCase):
 
     def test_season_delta_needs_a_first_day_baseline(self):
         store = _FakeSnapshots()
-        # First run of the week, on the week's first day: baseline captured.
+        # First run of the week, on the week's first day: baseline captured,
+        # and the reading is a plain zero off ESPN's own empty counter rather
+        # than a delta against a baseline taken the same instant.
         got = self.measure(_FakeReader({}, 10), store, period=1, matchup=1)
         self.assertEqual(got.games, 0.0)
-        self.assertEqual(got.source, usage_mod.SOURCE_SEASON_DELTA)
-        # Later in the same week, four more games played.
+        self.assertEqual(got.source, usage_mod.SOURCE_STAT_BY_SLOT)
+        # Later in the same week, four more games played. This is the path the
+        # baseline above exists for, and it still works -- which is the point
+        # of capturing the snapshot *before* taking that early exit.
         got = self.measure(_FakeReader({}, 14), store, period=4, matchup=1)
         self.assertEqual(got.games, 4.0)
+        self.assertEqual(got.source, usage_mod.SOURCE_SEASON_DELTA)
         self.assertTrue(got.trustworthy)
 
     def test_midweek_baseline_is_refused_not_used(self):

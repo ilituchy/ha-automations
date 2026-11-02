@@ -103,6 +103,34 @@ All notable changes to this app are documented here. The format follows
   code can produce, because the add-on pins `0.1.0` and `update_available` is
   always false however far behind the image is.
 
+- **The games-played cap read as two-thirds spent on the first day of the
+  week, and that is what was actually benching playable men.** ESPN fills
+  `cumulativeScore.statBySlot` as games finish, so on day one of a matchup
+  period it is empty — a reading of **zero**, not a missing reading. `usage.py`
+  treated it as missing and reconstructed the number from a season-games-played
+  delta against a stored baseline. On 2026-11-02, day one of matchup period 3,
+  that delta came back **23** of a 44-game cap in the dynasty league and **21**
+  of 40 in the other, from a baseline belonging to an earlier week.
+
+  So `lambda` was 33.21 with 21 games "left" instead of 44, and the optimizer
+  was right to ration on the numbers it had: two of eleven starting slots went
+  to men with **no game that night** while Ace Bailey, VJ Edgecombe, Payton
+  Pritchard and nine others sat with games. ESPN's own counter for the period
+  was `{}`, and for the period just finished a tidy 44 of 44.
+
+  Two fixes. An empty counter on the period's first day now reads as zero —
+  recorded **after** the baseline snapshot, never before, because the first day
+  is the only moment a baseline can be captured and returning early would trade
+  one correct zero for a week with no baseline at all. And the season-delta is
+  now bounded by `days elapsed x starting slots`, which a start cannot exceed
+  however the week has gone; above it the baseline is from the wrong week and
+  is refused with a note that says so.
+
+  This was the real cause of the idle starting slots. The per-day candidate cap
+  below is a genuine and separate fix — it took the dynasty candidate list from
+  91 entries to 57 — but with the budget reading 21 instead of 44 the cap still
+  bound hard, and that is why the first deploy appeared to change nothing.
+
 - **`lambda` now reaches the logs.** It is the single number that decides
   whether a playable man sits, and it was going to the status page only — the
   logs carried it incidentally, inside an add/drop rationale, and only on runs

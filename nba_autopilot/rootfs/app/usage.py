@@ -167,6 +167,39 @@ def starts_from_stat_by_slot(by_slot: Mapping[int, int]) -> Optional[int]:
     return pooled
 
 
+def _elapsed(periods: Sequence[int], scoring_period: int) -> int:
+    """Scoring periods of this matchup period that have begun, today included.
+
+    One-indexed, so the first day of the week is 1. Zero when the period is
+    unknown or today is not in it.
+    """
+    try:
+        return list(periods).index(int(scoring_period)) + 1
+    except ValueError:
+        return 0
+
+
+def _impossible_delta(
+    periods: Sequence[int], scoring_period: int, starting_slots: int
+) -> Optional[int]:
+    """The most games that *could* have been spent so far, or ``None``.
+
+    A hard ceiling, not an estimate: a day has a fixed number of starting
+    slots and a start is the only way to spend a game, so ``days * slots``
+    cannot be exceeded however the week has gone. Anything above it is not a
+    high reading, it is a reading of something else -- in practice a baseline
+    snapshot belonging to an earlier matchup period.
+
+    ``None`` when we cannot bound it, which is the honest answer when the
+    calendar or the slot count is missing. Callers must not treat that as
+    "no ceiling, therefore fine"; it means the check could not run.
+    """
+    days = _elapsed(periods, scoring_period)
+    if days <= 0 or starting_slots <= 0:
+        return None
+    return days * int(starting_slots)
+
+
 def measure(
     read: _Reader,
     store: Optional[_Snapshots],
@@ -176,6 +209,7 @@ def measure(
     calendar: Optional[SeasonCalendar],
     scoring_period: int,
     matchup_period: int,
+    starting_slots: int = 0,
 ) -> GamesUsed:
     """Best available reading of games used this matchup period.
 
@@ -184,6 +218,9 @@ def measure(
     that skips this -- because the add-on was down, or because the week started
     before it was installed -- leaves the week without a baseline, which is
     reported rather than papered over.
+
+    ``starting_slots`` is how many players can start in a day, and it is here
+    to bound the season-delta. See :func:`_impossible_delta`.
     """
     by_slot = dict(read.games_used() or {})
     direct = starts_from_stat_by_slot(by_slot)
@@ -203,6 +240,34 @@ def measure(
             season_gp=int(season_gp),
             is_baseline=is_first_day,
         )
+        # ESPN fills ``statBySlot`` as games finish. Empty on the *first* day
+        # of a matchup period therefore means nothing has finished yet, which
+        # is a reading of zero -- not a missing reading to be reconstructed
+        # from somewhere less reliable.
+        #
+        # **After** the snapshot above, never before it. The first day is the
+        # only moment the week's baseline can be captured, so returning early
+        # would trade today's correct zero for a whole week with no baseline at
+        # all, and every day after today would fall through to no reading.
+        #
+        # Taking the fallback instead cost real points. On 2026-11-02, day one
+        # of matchup period 3 with an empty ``statBySlot``, the season-delta
+        # returned **23** of a 44-game cap against a baseline belonging to an
+        # earlier week -- so the optimizer believed half the week was spent
+        # before a ball had been thrown. Lambda came out at 33.21 and two of
+        # eleven starting slots went to men with no game that night while Ace
+        # Bailey and VJ Edgecombe sat with games. ESPN's own counter for the
+        # period was ``{}``, and for the period just finished a tidy 44 of 44.
+        if direct is None and is_first_day:
+            return GamesUsed(
+                games=0.0,
+                source=SOURCE_STAT_BY_SLOT,
+                trustworthy=True,
+                from_stat_by_slot=0,
+                note="first day of the matchup period and ESPN's counter is "
+                     "empty, so nothing has been spent yet",
+            )
+
         snap = store.gp_snapshot(int(league_id), int(team_id), int(matchup_period))
         if snap is None:
             baseline_note = "no baseline snapshot for matchup period %d" % matchup_period
@@ -215,6 +280,21 @@ def measure(
             )
         else:
             delta = max(int(season_gp) - int(snap.get("season_gp") or 0), 0)
+            ceiling = _impossible_delta(
+                periods, int(scoring_period), int(starting_slots))
+            if ceiling is not None and delta > ceiling:
+                # The baseline is from the wrong week. Nothing else explains a
+                # delta larger than the days have had room for, and trusting it
+                # prices the cap as if the week were half gone.
+                baseline_note = (
+                    "season-delta of %d games is impossible %d day(s) into "
+                    "matchup period %d -- at %d starting slots a day the most "
+                    "that could have been spent is %d, so the baseline "
+                    "snapshot is from the wrong week"
+                    % (delta, _elapsed(periods, int(scoring_period)),
+                       matchup_period, int(starting_slots), ceiling)
+                )
+                delta = None
     elif season_gp is None:
         baseline_note = "ESPN reported no season games-played for this team"
     elif calendar is None:
