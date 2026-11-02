@@ -103,6 +103,14 @@ All notable changes to this app are documented here. The format follows
   code can produce, because the add-on pins `0.1.0` and `update_available` is
   always false however far behind the image is.
 
+- **`lambda` now reaches the logs.** It is the single number that decides
+  whether a playable man sits, and it was going to the status page only — the
+  logs carried it incidentally, inside an add/drop rationale, and only on runs
+  that happened to propose a swap. A run that benched four players for the cap
+  left no record of the price it benched them at. `pipeline.plan_lineup` now
+  logs `games cap: … startable player-game(s) of … scheduled, lambda …`, which
+  also serves as the standing deploy canary.
+
 - **The games-played cap was priced against starts no lineup could make, and
   it cost points every night.** `pipeline._cap_candidates` emitted one entry per
   player-game left in the window with no per-day ceiling.

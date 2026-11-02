@@ -214,8 +214,27 @@ def plan_lineup(
         utilization = budget_mod.utilization_ratio(candidates, gb)
         notes.append(
             "cap %.0f, used %.0f, %d day(s) left in matchup period %d, "
-            "lambda %.2f, utilization %.2f"
-            % (cap, used, len(horizon), matchup_period, lam, utilization)
+            "%d startable player-game(s), lambda %.2f, utilization %.2f"
+            % (cap, used, len(horizon), matchup_period, len(candidates),
+               lam, utilization)
+        )
+        # Logged as well as noted. ``lambda`` is the single number that decides
+        # whether a playable man sits, and until now it reached the *status
+        # page* only -- the logs carried it incidentally, inside an add/drop
+        # rationale, and only on the runs that happened to propose a swap. A
+        # run that benched four players for the cap left no record of the price
+        # it benched them at.
+        #
+        # It is also the deploy canary. See ``docs/DEPLOY.md``: a stale rebuild
+        # restarts cleanly and logs every sign of success, so the only way to
+        # know which image is running is a number only the new code prints.
+        log.info(
+            "games cap: %.0f cap, %.0f used, %d day(s) left, %d startable "
+            "player-game(s) of %d scheduled, lambda %.2f, utilization %.2f",
+            cap, used, len(horizon), len(candidates),
+            sum(team_games_in(horizon, schedule, e.pro_team_id)
+                for e in roster if e.player_id in projections),
+            lam, utilization,
         )
 
     # -- partition the roster ----------------------------------------------
