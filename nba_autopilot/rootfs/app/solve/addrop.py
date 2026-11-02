@@ -212,6 +212,17 @@ class Candidate:
     #: than an active one -- so on a roster whose active slots are all taken,
     #: he is not a way to make room for a healthy pickup.
     on_ir: bool = False
+    #: False when ESPN has him on **no NBA team** -- ``proTeamId`` of 0. He
+    #: cannot be started by anybody until somebody signs him, so he cannot
+    #: score, and no projection of his is a projection of anything.
+    #:
+    #: Needed as its own fact because none of the others catch it. His
+    #: ``p_play`` is a healthy 0.75, because availability is read off an injury
+    #: designation and he has none. His :attr:`per_game` is 32.3, because
+    #: ESPN's preseason projection was written while he still had a team and
+    #: still says 62 games. Only :attr:`games` knows, at zero, and that is also
+    #: what a man on a bye week looks like.
+    on_nba_team: bool = True
     #: ESPN's market readings, carried verbatim from :class:`RosterEntry` and
     #: used by **nothing in this module**. Every gate above is priced in points
     #: or in percent-per-game, and adding "but the league likes him" as a term
@@ -498,6 +509,7 @@ def _pricer(
             p_play=p_play,
             waiver=e.must_claim_on_waivers,
             on_ir=int(e.current_slot) == ids.IR_SLOT,
+            on_nba_team=int(e.pro_team_id) != 0,
             percent_owned=e.percent_owned,
             draft_adp=e.draft_adp,
             draft_rank=e.draft_rank,
@@ -559,11 +571,28 @@ def _droppable_set(
         # would mean inventing a horizon, so the rule is stated as a rule.
         keep_rank = max(int(round(len(mine) * float(keeper_drop_fraction))), 1)
         eligible_by_rank = {c.player_id for c in by_value[:keep_rank]}
+        # A man on no NBA team is never protected by it, whatever his rank.
+        #
+        # The gate's premise is that a player we keep has value beyond this
+        # week; a player nobody has signed has no value in any week until that
+        # changes, and the rank it would protect him on is a reading of a
+        # projection written while he still had a team. Two of them -- Jaden
+        # Ivey at 32.3 a game and Cam Thomas at 39.3, both at ``proTeamId`` 0,
+        # both still projected for 60-odd games -- ranked 20th and 23rd of 27
+        # on a live dynasty roster and were protected from being dropped for a
+        # whole season while holding two of its twenty-four spots.
+        teamless = {c.player_id for c in mine if not c.on_nba_team}
+        eligible_by_rank |= teamless
         notes.append(
             "keeper league: only the %d lowest-valued of %d players may be "
             "dropped, and being out for the season is not by itself a reason"
             % (keep_rank, len(mine))
         )
+        if teamless:
+            notes.append(
+                "on no NBA team, so droppable whatever the keeper gate says: %s"
+                % ", ".join(sorted(priced[p].name for p in teamless))
+            )
     else:
         eligible_by_rank = {c.player_id for c in mine}
 
@@ -990,10 +1019,17 @@ def plan_ir_activation(
         )
         return nothing()
 
-    # Cheapest out, per-game as the tie-break: two men worth the same to this
-    # week are not worth the same to the season, and the lower-valued one is
-    # the one we would rather not have back.
-    out = min(outs, key=lambda c: (c.surplus, c.per_game))
+    # Cheapest out, ordered exactly as :func:`_pair_key` orders a swap's drop
+    # side: a man on no NBA team first, then the least likely to suit up, then
+    # the lowest projection. Stating it differently here is how the two
+    # decisions come to disagree about who is expendable -- and the ordering
+    # matters most in exactly the case this function handles, where half the
+    # bench has a surplus of zero and the tie-break *is* the decision.
+    out = min(
+        outs,
+        key=lambda c: (c.surplus, 0 if not c.on_nba_team else 1,
+                       c.p_play, c.per_game),
+    )
     gain = back.surplus - out.surplus
 
     # Strictly positive, and no churn floor. The floor exists to stop a weekly
@@ -1063,7 +1099,7 @@ def _ir_rationale(
 
 def _pair_key(
     pair: Tuple[float, str, Candidate, Optional[Candidate]]
-) -> Tuple[float, float, float, float, int]:
+) -> Tuple[float, int, float, float, float, int]:
     """Sort key for candidate swaps, best first.
 
     Gain decides it. The rest is a tie-break, and ties are common rather than
@@ -1071,12 +1107,20 @@ def _pair_key(
     exactly zero, so on a Saturday half the bench is indistinguishable on
     points alone.
 
-    The tie-break is **lowest ``p_play`` first**, then lowest per-game value. A
-    player who will not suit up cannot help us at any point, while two healthy
-    players with nothing left this week can both still matter if someone ahead
-    of them is ruled out tomorrow. That ordering is also what makes a
-    season-ending injury the drop of choice in a redraft league without
-    "is he injured" appearing anywhere as a rule -- it falls out of ``p_play``.
+    The tie-break is **a man on no NBA team first**, then lowest ``p_play``,
+    then lowest per-game value. A player who will not suit up cannot help us at
+    any point, while two healthy players with nothing left this week can both
+    still matter if someone ahead of them is ruled out tomorrow. That ordering
+    is also what makes a season-ending injury the drop of choice in a redraft
+    league without "is he injured" appearing anywhere as a rule -- it falls out
+    of ``p_play``.
+
+    Teamlessness has to come before ``p_play`` rather than fall out of it,
+    because it does not: a man nobody has signed carries no injury designation,
+    so his ``p_play`` is the healthy 0.75 prior and he sorts *behind* every
+    genuinely injured player and behind anyone with a lower projection. On a
+    live roster that put Jaden Ivey, who could not be started by anybody,
+    behind two men who could.
 
     Player id last, so a run is reproducible rather than dependent on roster
     ordering.
@@ -1085,6 +1129,7 @@ def _pair_key(
     return (
         -gain,
         # An open roster spot sorts ahead of every real drop: nothing goes out.
+        0 if out is None else (0 if not out.on_nba_team else 1),
         out.p_play if out is not None else -1.0,
         out.per_game if out is not None else -1.0,
         -add.per_game,

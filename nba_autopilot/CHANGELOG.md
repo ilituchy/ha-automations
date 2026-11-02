@@ -92,6 +92,33 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **A player on no NBA team was protected from being dropped, and had been all
+  season.** *"why has he been on the team the whole year without being on a
+  team lol"* — Jaden Ivey and Cam Thomas both carry ESPN `proTeamId` 0. Nobody
+  has signed them, so they cannot be started by anybody and cannot score. They
+  were holding two of twenty-four spots on the dynasty roster.
+
+  Every other signal said they were fine. `p_play` is the healthy 0.75 prior,
+  because availability is read off an injury designation and they have none.
+  Their per-game values are **32.3** and **39.3**, because ESPN's preseason
+  projection was written while they still had teams and still says 62 and 65
+  games. That ranked them 20th and 23rd of 27, so the keeper gate — whose whole
+  premise is "this player has value beyond this week" — *protected* them.
+
+  `Candidate.on_nba_team` is now its own fact, because none of the others catch
+  it: only the game count knows, at zero, and that is also what a man on a bye
+  week looks like. A teamless player is droppable whatever the keeper gate says,
+  and sorts **first** among equal-surplus drops in both `_pair_key` and
+  `plan_ir_activation` — ahead of `p_play`, which would otherwise put him behind
+  every genuinely injured player and behind anyone with a lower projection. The
+  reviewer is told plainly, since without it it is being asked to approve giving
+  away a 32-point scorer.
+
+  The two decisions now state that ordering once instead of twice, which is how
+  they came to disagree about who was expendable. On the live roster the IR
+  activation went from proposing Nikola Jovic — who can play — to Jaden Ivey,
+  who cannot.
+
 - **Documented the deploy trap that shipped the previous fix as a no-op.**
   `POST /store/reload` fails intermittently with an empty `unknown_error`, and
   when it does the Supervisor's cached repository stays at the previous commit

@@ -1222,3 +1222,105 @@ class TestIrActivation(unittest.TestCase):
         plan = self.case(stranded=(12345,))
         self.assertFalse(plan.proposed)
         self.assertEqual(plan.notes, ())
+
+
+class TestAManOnNoNbaTeam(unittest.TestCase):
+    """``proTeamId`` 0: signed by nobody, so he cannot score for anybody.
+
+    Needed as its own fact because every other signal says he is fine. His
+    ``p_play`` is the healthy 0.75 prior, because availability is read off an
+    injury designation and he has none. His per-game value is whatever ESPN
+    projected while he still had a team, and ESPN keeps projecting him for
+    sixty-odd games. Only his game count knows, at zero -- and that is also
+    what a man on a bye week looks like.
+
+    Live on the dynasty roster: Jaden Ivey at 32.3 a game and Cam Thomas at
+    39.3, both on no team, both still projected for 60-odd games. The keeper
+    gate ranked them 20th and 23rd of 27 and so **protected them from being
+    dropped** -- for a whole season, holding two of twenty-four roster spots.
+    *"why has he been on the team the whole year without being on a team lol"*
+    """
+
+    def case(self, **kw):
+        """A full keeper roster with one man on no NBA team.
+
+        Team 3 plays on no day of the window, so his game count is zero either
+        way; what distinguishes him is ``pro_team_id`` 0 and a high value.
+        """
+        st = kw.pop("settings", settings(
+            lineup_slot_counts=slot_counts(starting=2, bench=2),
+            keeper=True,
+        ))
+        roster = kw.pop("roster", [
+            player(1, name="Star", team=1),
+            player(2, name="Good", team=1),
+            player(3, name="Cheap", team=1, slot=ids.BENCH_SLOT),
+            player(4, name="Teamless", team=0, slot=ids.BENCH_SLOT),
+        ])
+        values = kw.pop("values", {1: 50.0, 2: 40.0, 3: 12.0, 4: 32.0,
+                                   90: 45.0})
+        pool = kw.pop("pool", [player(90, name="Better", team=1)])
+        p_play = kw.pop("p_play", {})
+        case = _Case(roster=roster, pool=pool, values=values, settings=st,
+                     p_play=p_play, **kw)
+        return case
+
+    def test_the_keeper_gate_does_not_protect_him(self):
+        """The gate's premise is value beyond this week. He has none in any
+        week until somebody signs him, and the rank protecting him is read off
+        a projection written while he still had a team."""
+        plan = self.case().run(starters=(1, 2))
+        joined = " ".join(plan.notes)
+        self.assertIn("on no NBA team, so droppable whatever the keeper gate "
+                      "says: Teamless", joined)
+
+    def test_he_is_the_drop_ahead_of_a_cheaper_real_player(self):
+        """The ordering, which does *not* fall out of the other signals.
+
+        "Cheap" is worth 12 a game against his 32, so every value-based
+        tie-break prefers giving Cheap away -- and Cheap can actually play.
+        """
+        plan = self.case().run(starters=(1, 2))
+        self.assertTrue(plan.proposed)
+        self.assertEqual(plan.drop.name, "Teamless")
+
+    def test_a_real_player_is_still_preferred_when_nobody_is_teamless(self):
+        """The regression guard: this must not reorder ordinary swaps."""
+        plan = self.case(roster=[
+            player(1, name="Star", team=1),
+            player(2, name="Good", team=1),
+            player(3, name="Cheap", team=1, slot=ids.BENCH_SLOT),
+            player(4, name="Fine", team=1, slot=ids.BENCH_SLOT),
+        ], values={1: 50.0, 2: 40.0, 3: 12.0, 4: 32.0,
+                   90: 45.0}).run(starters=(1, 2))
+        self.assertEqual(plan.drop.name, "Cheap")
+
+    def test_the_flag_rides_on_the_candidate(self):
+        plan = self.case().run(starters=(1, 2))
+        self.assertFalse(plan.drop.on_nba_team)
+
+    def test_an_ir_activation_reaches_for_him_first_too(self):
+        """Stating the ordering differently in the two decisions is how they
+        come to disagree about who is expendable."""
+        st = settings(
+            lineup_slot_counts=slot_counts(starting=2, bench=2, ir=2),
+            keeper=True,
+        )
+        roster = [
+            player(1, name="Star", team=1),
+            player(2, name="Good", team=1),
+            player(3, name="Cheap", team=1, slot=ids.BENCH_SLOT),
+            player(4, name="Teamless", team=0, slot=ids.BENCH_SLOT),
+            player(9, name="Returnee", team=1, slot=ids.IR_SLOT),
+        ]
+        values = {1: 50.0, 2: 40.0, 3: 12.0, 4: 32.0, 9: 45.0}
+        projections = {
+            e.player_id: projection(e.player_id, 1.0) for e in roster
+        }
+        plan = addrop.plan_ir_activation(
+            st, roster, values, projections, stranded=(9,),
+            matchup_period=1, horizon=[1, 2, 3],
+            schedule={1: {1: 1, 2: 1, 3: 1}}, starters=(1, 2),
+        )
+        self.assertTrue(plan.proposed)
+        self.assertEqual(plan.drop.name, "Teamless")

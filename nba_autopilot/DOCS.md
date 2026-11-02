@@ -105,6 +105,41 @@ used to *waive* the floor, never to raise it. ESPN publishes no projected final
 for basketball, so a lead you can see accumulated is not evidence the week is
 safe — there is no opponent projection behind it.
 
+### Who gets dropped, and what the app will not weigh
+
+The drop is chosen on **this week's points and nothing else**: what each
+droppable player is worth over the days remaining, after the games cap and the
+slot price. When several tie — and on a Saturday half a bench ties at exactly
+zero — the order is: a man on no NBA team first, then the least likely to suit
+up, then the lowest projection.
+
+Two protections are absolute. A player **starting today** is never dropped,
+because his game may already be under way and a drop cannot be undone. And a
+player on **IR** is never the drop when the active roster is full, because
+dropping him frees an IR slot rather than the active one that is scarce.
+
+A man on **no NBA team** — ESPN `proTeamId` 0 — is always droppable, including
+in a keeper league. Nothing else catches this: he carries no injury
+designation, so his availability reads as healthy, and ESPN keeps projecting
+him for sixty-odd games off a line written while he still had a team. Jaden Ivey
+and Cam Thomas sat on the dynasty roster for a season that way, ranked 20th and
+23rd of 27 by a value they could not produce, and the keeper gate protected them
+the whole time.
+
+**What the app does not weigh is asset value.** It has no rest-of-season term,
+so "which of these two is the better player to keep" is a question the
+arithmetic never asks. Ownership share, draft position and ESPN's outlook are
+all read and carried, and are deliberately used by **nothing** in the drop
+decision — converting "the league likes him" into fantasy points would mean
+inventing an exchange rate between ownership share and scoring.
+
+They go to the AI reviewer instead, which is the layer that can reason in those
+terms, and it does. Asked to approve dropping Ryan Rollins it approved, but
+added: *"Rollins (58% owned, solid outlook) will likely be claimed off waivers
+quickly, so if Sengun gets re-injured you won't easily get him back."* That is
+the asset judgment the points model is structurally unable to make, and the
+caveat on the card is where to look for it.
+
 ### Getting a healthy player off IR
 
 ESPN takes away a player's IR eligibility the moment he is healthy, but it does

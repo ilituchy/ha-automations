@@ -291,6 +291,18 @@ def _side(label: str, cand: Any, note: Any, bio: Any = None,
     ]
     if getattr(cand, "on_ir", False):
         lines.append("  currently parked in an injured-reserve slot")
+    if not getattr(cand, "on_nba_team", True):
+        # Said plainly, because every other number above him reads as though he
+        # plays. ESPN keeps projecting a man it has on no team -- 60-odd games
+        # and a per-game line written while he still had one -- and his
+        # availability is a healthy prior because he carries no injury
+        # designation. Without this line the reviewer is looking at a 32-point
+        # scorer and asked to approve giving him away.
+        lines.append(
+            "  **on no NBA team at all** (ESPN proTeamId 0), so he cannot be "
+            "started by anybody and cannot score until somebody signs him. "
+            "The projection above was written while he still had a team."
+        )
     # Only ever populated for a keeper league. In a redraft league a player's
     # age is not a fact about his value, and putting it in front of a reader
     # who has been told next season does not count is an invitation to weigh
