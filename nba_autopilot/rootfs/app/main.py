@@ -1021,6 +1021,7 @@ class Autopilot:
                 matchup=matchup,
                 never_drop=self.cfg.never_drop,
                 review_blocked=ir_vetoed,
+                may_drop_starters=bool(self.cfg.autonomy_lineup),
             )
             # Only on the attempt that settles it. The declining notes of the
             # attempts in between repeat the whole droppability list each time,
@@ -1209,6 +1210,13 @@ class Autopilot:
                 just_added=just_added,
                 margin_pct=self.cfg.addrop_margin_pct,
                 churn_floor=self.cfg.addrop_churn_floor,
+                # A man in today's lineup is still droppable, because at 09:00
+                # no NBA game has begun, ESPN's own ``lineupLocked`` is what
+                # catches the one that has, and the surplus already prices what
+                # losing his starts costs. Conditional only on our being
+                # allowed to refill the slot he leaves -- see the
+                # ``may_drop_starters`` note in ``solve/addrop.py``.
+                may_drop_starters=bool(self.cfg.autonomy_lineup),
             )
             if attempts == 1 and decision.acquisitions_left is not None:
                 # Once, from the real counter. Re-reporting it per attempt would

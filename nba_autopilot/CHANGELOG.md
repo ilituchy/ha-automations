@@ -92,6 +92,33 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **Being in today's starting lineup no longer protects a player from being
+  dropped.** *"its 9 fucking am when this runs"* — the block was justified as
+  "his game may already be under way, and a drop that empties a started slot
+  cannot be undone", and neither half survives: the run fires at 09:00 and the
+  earliest NBA tip-off is seven hours later, ESPN's own `lineupLocked` is what
+  catches a game that *has* started and is checked separately, and a proposal
+  expires after six hours — before tip-off — so within its own lifetime the risk
+  cannot materialise.
+
+  What it cost was the candidates. The lineup plan has just promoted the best
+  available men into starting slots, so the block removed exactly the players
+  most worth comparing. In the test fixture it made the app give away a player
+  worth 30 a game in order to protect one worth 5.
+
+  It was never needed to keep a good starter safe, either: the surplus already
+  prices what losing his starts costs. Toumani Camara, starting, priced at
+  **+29.8** against **+21.1** for a bench player — the most expensive of three
+  candidates rather than the cheapest. Lifting the block took the redraft
+  league's droppable pool from 5 of 15 to all 15 and changed the chosen drop not
+  at all.
+
+  The one genuine cost is the emptied slot, which `_rebalance_after_swap`
+  refills by re-planning the lineup. That repair is gated on `autonomy_lineup`,
+  so the block is still applied when it is off — there, nothing would fix the
+  hole. `Candidate.starting_today` carries the fact to the reviewer regardless,
+  since dropping a man in today's lineup is something it should know.
+
 - **A player on no NBA team was protected from being dropped, and had been all
   season.** *"why has he been on the team the whole year without being on a
   team lol"* — Jaden Ivey and Cam Thomas both carry ESPN `proTeamId` 0. Nobody

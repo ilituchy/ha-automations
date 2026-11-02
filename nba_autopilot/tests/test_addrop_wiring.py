@@ -530,23 +530,48 @@ class TestDegradation(unittest.TestCase):
 
 
 class TestStartersComeFromThePlan(unittest.TestCase):
-    def test_the_protected_starters_are_this_runs_not_espns(self):
-        """P2 sits on ESPN's roster in a starting slot and the optimizer is
-        about to bench him, so he is droppable. P3 is the reverse: benched on
-        ESPN and started by this run, so he is not -- his game may be tipping
-        off by the time a tap arrives.
+    def test_being_in_todays_lineup_does_not_protect_a_man_from_a_drop(self):
+        """*"its 9 fucking am when this runs"* -- and the cost was severe.
+
+        "Weak" is worth 5.0 a game and P3 is worth 30.0. With "Weak" started by
+        this run the old block took him off the table, and the swap went after
+        **P3 instead** -- giving away a player worth six times as much to
+        protect one whose game would not begin for another seven hours.
+
+        The block was justified as "his game may already be under way, and a
+        drop that empties a started slot cannot be undone". ESPN's own
+        ``lineupLocked`` is what catches a game that has started, and it is
+        checked separately; the emptied slot is refilled by the rebalance after
+        the swap. So the surplus decides, and the surplus already prices what
+        losing a man's starts costs.
         """
         h = _Harness(read=_Read(pool=[player(90, name="Better")]))
-        # P3 started, P2 benched: the opposite of the current roster slots.
-        decision, _notes = h.consider(
-            target={1: START, 3: START, 2: BENCH}
-        )
-        self.assertTrue(decision.proposed)
-        self.assertEqual(decision.drop.name, "Weak")
+        for target in ({1: START, 3: START, 2: BENCH},
+                       {1: START, 2: START, 3: BENCH}):
+            decision, notes = h.consider(target=target)
+            self.assertTrue(decision.proposed)
+            self.assertEqual(decision.drop.name, "Weak", target)
+            self.assertNotIn("starting today", " ".join(notes))
 
-        # And with P2 started instead, he is off the table and the swap goes
-        # after P3 instead -- the protection redirects the drop, it does not
-        # switch add/drop off.
+    def test_the_starters_list_is_still_this_runs_and_reaches_the_candidate(self):
+        """It is no longer a protection, but it is still a fact the reviewer is
+        owed: dropping a man in today's lineup empties a slot. Read off this
+        run's plan rather than ESPN's current slots, which is what makes it
+        true of the lineup about to be in place."""
+        h = _Harness(read=_Read(pool=[player(90, name="Better")]))
+        decision, _notes = h.consider(target={1: START, 2: START, 3: BENCH})
+        self.assertTrue(decision.drop.starting_today)
+        decision, _notes = h.consider(target={1: START, 3: START, 2: BENCH})
+        self.assertFalse(decision.drop.starting_today)
+
+    def test_with_the_lineup_left_alone_the_protection_comes_back(self):
+        """``autonomy_lineup`` off means nothing refills the slot.
+
+        Then the block is the only thing between a drop and an empty starting
+        slot all night, which is the one part of the old reasoning that holds.
+        """
+        h = _Harness(read=_Read(pool=[player(90, name="Better")]),
+                     autonomy_lineup=False)
         decision, notes = h.consider(target={1: START, 2: START, 3: BENCH})
         self.assertEqual(decision.drop.name, "P3")
         self.assertIn("Weak (starting today)", " ".join(notes))
@@ -1558,9 +1583,11 @@ class TestIrActivationReachesTheUser(unittest.TestCase):
         self.assertEqual(first.reason, "ir-activation")
         self.assertIsNone(first.add)
         self.assertEqual(first.activating.name, "Returnee")
-        # P3, not "Weak": the two cheaper men are in starting slots this run
-        # put them in, and a drop that empties a started slot cannot be undone.
-        self.assertEqual(first.drop.name, "P3")
+        # "Weak", at 5.0 a game. He is in today's lineup and that no longer
+        # protects him: no NBA game has begun at 09:00, ESPN's own
+        # ``lineupLocked`` catches one that has, and the rebalance after the
+        # swap refills the slot he leaves.
+        self.assertEqual(first.drop.name, "Weak")
 
     def test_the_payload_names_him_and_does_not_claim_a_waiver(self):
         """``waiver`` picks ESPN's transaction type.
@@ -1578,7 +1605,7 @@ class TestIrActivationReachesTheUser(unittest.TestCase):
         self.assertIsNone(payload["add_name"])
         self.assertEqual(payload["activate"], 9)
         self.assertEqual(payload["activate_name"], "Returnee")
-        self.assertEqual(payload["drop_name"], "P3")
+        self.assertEqual(payload["drop_name"], "Weak")
         self.assertFalse(payload["waiver"])
         self.assertEqual(payload["reason"], "ir-activation")
 
@@ -1629,7 +1656,7 @@ class TestIrActivationReachesTheUser(unittest.TestCase):
         title = h.ha.sent[-1]["title"]
         self.assertIn("activate off IR?", title)
         self.assertIn("Returnee", title)
-        self.assertIn("P3", title)
+        self.assertIn("Weak", title)
 
     def test_nothing_stranded_says_nothing(self):
         """The ordinary morning. No note, because there is no news."""

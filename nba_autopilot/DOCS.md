@@ -113,10 +113,33 @@ slot price. When several tie — and on a Saturday half a bench ties at exactly
 zero — the order is: a man on no NBA team first, then the least likely to suit
 up, then the lowest projection.
 
-Two protections are absolute. A player **starting today** is never dropped,
-because his game may already be under way and a drop cannot be undone. And a
-player on **IR** is never the drop when the active roster is full, because
-dropping him frees an IR slot rather than the active one that is scarce.
+A player on **IR** is never the drop when the active roster is full, because
+dropping him frees an IR slot rather than the active one that is scarce. A
+player ESPN has **locked** — his game has tipped off — is never dropped either,
+because the write would be rejected.
+
+Being in **today's starting lineup is not a protection**, and used to be. The
+reasoning was "his game may already be under way and a drop cannot be undone",
+and neither half holds: the run fires at 09:00 and the earliest tip-off is seven
+hours later, ESPN's own lock is what catches a game that has started, and a
+proposal expires after six hours — before tip-off. Meanwhile the lineup plan has
+just promoted your best available men into starting slots, so blocking starters
+removed exactly the players most worth comparing. In the test fixture it made
+the app give away a player worth 30 a game to protect one worth 5.
+
+It was never what kept a good starter safe either. The surplus already prices
+what losing his starts costs, so a man worth starting has a high surplus and is
+not the cheapest drop — Toumani Camara, who was starting, priced at **+29.8**
+against **+21.1** for a bench player, the most expensive of the three rather
+than the cheapest, with no protection needed to say so. Lifting the block took
+the droppable pool in the redraft league from 5 players of 15 to all 15, and
+changed the actual choice not at all.
+
+The one real cost is the slot he leaves empty, and the app refills it by
+re-planning the lineup straight after the swap. That repair is gated on
+`autonomy_lineup`, so with that switched **off** the old protection comes back —
+nothing would fix the hole, and an empty starting slot all night is worse than a
+suboptimal drop.
 
 A man on **no NBA team** — ESPN `proTeamId` 0 — is always droppable, including
 in a keeper league. Nothing else catches this: he carries no injury

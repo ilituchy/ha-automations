@@ -504,7 +504,10 @@ class TestTheGateSitsBeforeTheUser(unittest.TestCase):
         self.assertIn("blocked it", joined)
         # Both players named, so the note reads on its own: a status page line
         # saying only "blocked it" cannot be checked against anything.
-        self.assertIn("Better for P3", joined)
+        # "Weak", not P3: a man in today's lineup is droppable now, and he is
+        # the cheap one. The old block pushed this onto P3 at six times the
+        # value -- see ``test_addrop_wiring``.
+        self.assertIn("Better for Weak", joined)
 
     def test_an_unreachable_reviewer_also_withholds_it(self):
         h = self.harness(

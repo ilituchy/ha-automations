@@ -291,6 +291,12 @@ def _side(label: str, cand: Any, note: Any, bio: Any = None,
     ]
     if getattr(cand, "on_ir", False):
         lines.append("  currently parked in an injured-reserve slot")
+    if getattr(cand, "starting_today", False):
+        lines.append(
+            "  he is in today's starting lineup -- dropping him empties that "
+            "slot, and the app refills it by re-planning the lineup "
+            "immediately after the swap goes through"
+        )
     if not getattr(cand, "on_nba_team", True):
         # Said plainly, because every other number above him reads as though he
         # plays. ESPN keeps projecting a man it has on no team -- 60-odd games

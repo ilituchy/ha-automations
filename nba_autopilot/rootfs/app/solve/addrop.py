@@ -212,6 +212,11 @@ class Candidate:
     #: than an active one -- so on a roster whose active slots are all taken,
     #: he is not a way to make room for a healthy pickup.
     on_ir: bool = False
+    #: True when this run's lineup plan puts him in a starting slot today.
+    #: Not a protection -- see ``_droppable_set``'s ``may_drop_starters`` --
+    #: but the reviewer and the card are owed it, because dropping him empties
+    #: a slot the app then has to refill.
+    starting_today: bool = False
     #: False when ESPN has him on **no NBA team** -- ``proTeamId`` of 0. He
     #: cannot be started by anybody until somebody signs him, so he cannot
     #: score, and no projection of his is a projection of anything.
@@ -483,6 +488,7 @@ def _pricer(
     schedule: Mapping[int, Mapping[int, int]],
     lam: float,
     prices: Mapping[int, float],
+    starters: Iterable[PlayerId] = (),
 ) -> Callable[[RosterEntry], Candidate]:
     """A function turning a roster entry into a priced :class:`Candidate`.
 
@@ -491,6 +497,8 @@ def _pricer(
     one and a drop proposed by the other would otherwise be comparable only by
     coincidence.
     """
+
+    today = {int(p) for p in starters}
 
     def candidate(e: RosterEntry) -> Candidate:
         proj = projections.get(e.player_id)
@@ -510,6 +518,7 @@ def _pricer(
             waiver=e.must_claim_on_waivers,
             on_ir=int(e.current_slot) == ids.IR_SLOT,
             on_nba_team=int(e.pro_team_id) != 0,
+            starting_today=int(e.player_id) in today,
             percent_owned=e.percent_owned,
             draft_adp=e.draft_adp,
             draft_rank=e.draft_rank,
@@ -542,6 +551,7 @@ def _droppable_set(
     just_added: Iterable[PlayerId] = (),
     review_blocked: Iterable[str] = (),
     keeper_drop_fraction: float = DEFAULT_KEEPER_DROP_FRACTION,
+    may_drop_starters: bool = False,
 ) -> _Droppable:
     """The droppability rules, in one place.
 
@@ -555,6 +565,36 @@ def _droppable_set(
     go: that answer differs between the callers -- see the note at the IR filter
     in :func:`plan_addrop` -- so ``droppable`` includes him and the caller
     filters.
+
+    ``may_drop_starters`` lifts the "starting today" block, and the caller
+    should normally set it. The block was justified as *"his game may already
+    be under way, and a drop that empties a started slot cannot be undone"*,
+    and neither half of that survives examination:
+
+    * **His game has not started.** The run fires at 09:00 local and the
+      earliest NBA tip-off is seven hours later. When a game *has* started ESPN
+      sets ``lineupLocked``, which is checked two lines above this and is the
+      real guard -- so for the case the block was written for, the block is
+      redundant. A proposal also expires after six hours, before tip-off, so
+      within its own lifetime the risk cannot materialise.
+    * **The emptied slot gets refilled.** ``Autopilot._rebalance_after_swap``
+      re-reads the roster and re-plans the lineup after every executed swap.
+
+    What it cost was the candidates. The lineup plan has just promoted the best
+    available men into starting slots, so blocking starters removes exactly the
+    players most worth comparing -- *"its 9 fucking am when this runs"*. And it
+    was never needed to stop a *good* starter being given away: the surplus
+    arithmetic already prices what losing his starts costs, so a man worth
+    starting has a positive surplus and is not the cheapest drop. On the live
+    redraft roster Toumani Camara, who was starting, priced at +29.8 against
+    +21.1 for a bench player -- the most expensive of the three, not the
+    cheapest, with no protection needed to say so.
+
+    It stays available because of the second bullet: the refill is gated on
+    ``autonomy_lineup``. With that off nothing repairs the hole, and then the
+    block is the only thing standing between a drop and an empty starting slot
+    all night. That is the caller's knowledge, not this module's, which is why
+    this is a parameter rather than a rule.
     """
     notes: List[str] = []
     protected = {n.strip().lower() for n in never_drop if n.strip()}
@@ -613,7 +653,7 @@ def _droppable_set(
         if e.lineup_locked:
             blocked.append("%s (locked)" % e.name)
             continue
-        if int(e.player_id) in started:
+        if int(e.player_id) in started and not may_drop_starters:
             blocked.append("%s (starting today)" % e.name)
             continue
         if cand.player_id not in eligible_by_rank:
@@ -662,6 +702,7 @@ def plan_addrop(
     margin_pct: float = DEFAULT_MARGIN_PCT,
     churn_floor: float = DEFAULT_CHURN_FLOOR,
     keeper_drop_fraction: float = DEFAULT_KEEPER_DROP_FRACTION,
+    may_drop_starters: bool = False,
     pool_limit: int = 40,
 ) -> AddDropPlan:
     """Decide at most one swap for the rest of this matchup period.
@@ -743,7 +784,10 @@ def plan_addrop(
         starting_slots=starting_slots, horizon=horizon, schedule=schedule,
     )
 
-    candidate = _pricer(values, projections, horizon, schedule, lam, prices)
+    candidate = _pricer(
+        values, projections, horizon, schedule, lam, prices,
+        starters=starters or (),
+    )
 
     # -- who may go out ----------------------------------------------------
 
@@ -752,6 +796,7 @@ def plan_addrop(
         starters=starters, never_drop=never_drop, just_added=just_added,
         review_blocked=review_blocked,
         keeper_drop_fraction=keeper_drop_fraction,
+        may_drop_starters=may_drop_starters,
     )
     notes.extend(rule.notes)
     priced = rule.priced
@@ -882,6 +927,7 @@ def plan_ir_activation(
     just_added: Iterable[PlayerId] = (),
     review_blocked: Iterable[str] = (),
     keeper_drop_fraction: float = DEFAULT_KEEPER_DROP_FRACTION,
+    may_drop_starters: bool = False,
 ) -> AddDropPlan:
     """Free an active spot for a healthy player stuck on IR.
 
@@ -959,13 +1005,17 @@ def plan_ir_activation(
         roster, values,
         starting_slots=starting_slots, horizon=horizon, schedule=schedule,
     )
-    candidate = _pricer(values, projections, horizon, schedule, lam, prices)
+    candidate = _pricer(
+        values, projections, horizon, schedule, lam, prices,
+        starters=starters or (),
+    )
 
     rule = _droppable_set(
         settings, roster, candidate,
         starters=starters, never_drop=never_drop, just_added=just_added,
         review_blocked=review_blocked,
         keeper_drop_fraction=keeper_drop_fraction,
+        may_drop_starters=may_drop_starters,
     )
     notes.extend(rule.notes)
 
