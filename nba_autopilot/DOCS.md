@@ -682,6 +682,35 @@ For each one:
 4. Anything else becomes a notification with **Approve** / **Reject** buttons,
    naming the league, and is listed on the status page until it is decided.
 
+### If the app was not running when a run time came round
+
+The scheduler keeps its jobs in memory, so a fire that lands while the add-on
+is stopped is not replayed when it comes back -- a reboot across 09:00 would
+otherwise cost you the whole day with no error anywhere. This happens more than
+you would think: Home Assistant reboots the host by itself to commit OS
+updates, at whatever time the update lands.
+
+So at startup the app looks at the run times that have already gone by **today**
+and at when the last run began. If a time passed and no run started after it,
+it runs once, immediately, and says so:
+
+```
+the 09:00 run never happened -- nothing was running at the time;
+doing it now, 23 minute(s) late
+```
+
+Two deliberate limits:
+
+* **Only today.** A box that boots at 14:00 does not replay yesterday's 09:00.
+  That plan is for a scoring period that has closed, and acting on it is worse
+  than skipping it.
+* **Only within six hours.** The earliest NBA tip-off is seven hours after a
+  09:00 run, so a later catch-up would be seating players ESPN is about to lock.
+  Past the window it waits for tomorrow.
+
+Restarting the add-on repeatedly -- a deploy, say -- does not re-run anything,
+because the day's run is already on record.
+
 A league that errors out is logged and skipped; the remaining leagues still run.
 Results are written to the status UI and to SQLite at `/data/autopilot.db`,
 which is private to the app and included in backups. Every run row and journal

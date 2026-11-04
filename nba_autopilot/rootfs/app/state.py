@@ -356,6 +356,33 @@ class Store:
                 ),
             )
 
+    def last_run_started(self) -> Optional[datetime]:
+        """When the most recent run began, or ``None`` if none ever has.
+
+        Read at startup to decide whether a scheduled fire was missed while
+        this process did not exist -- see ``Autopilot.missed_run``. The row is
+        written by :meth:`start_run` before any ESPN write, so a run that began
+        and then failed still counts as having happened; the catch-up is for a
+        run that never started at all, not for one that started badly.
+
+        ``started_at`` is the ISO-8601 UTC string :func:`_now` wrote, so the
+        lexicographic ``ORDER BY`` is also a chronological one.
+        """
+        with self._lock:
+            row = self.db.execute(
+                "SELECT started_at FROM runs ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+        if row is None or not row["started_at"]:
+            return None
+        try:
+            return datetime.fromisoformat(str(row["started_at"]))
+        except ValueError:
+            # A hand-edited or pre-migration row must not stop the daemon
+            # booting. Unknown beats wrong: the caller treats None as "no run
+            # on record", which at worst repeats a run that already happened.
+            log.warning("unparseable runs.started_at %r", row["started_at"])
+            return None
+
     # -- games-played baselines --------------------------------------------
 
     def record_gp_snapshot(

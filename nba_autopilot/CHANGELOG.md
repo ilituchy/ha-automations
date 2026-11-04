@@ -6,6 +6,33 @@ All notable changes to this app are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A run time that passes while the app is stopped is no longer lost.**
+  `AsyncIOScheduler` keeps its jobs in memory: they are registered afresh at
+  every container start and the next fire is computed from *now*, so a fire
+  that lands while the process is dead was simply dropped. The
+  `misfire_grace_time=3600` already set does not cover this -- it forgives a
+  scheduler that was running and busy, not one that did not exist -- and
+  nothing logged an error, so the only symptom was a day on which no lineup
+  was set.
+
+  Not hypothetical. On 2026-11-04 Home Assistant's own
+  `resolution.fixups.system_execute_reboot` rebooted the Green at 09:12:09 to
+  commit an OS update and the add-on was down until 09:15. That day's run had
+  finished at 09:00:31 and survived by eleven and a half minutes. HA picks
+  that moment itself, so the margin is luck.
+
+  `Autopilot.missed_run` now reads `Store.last_run_started` at startup and
+  runs once if a time has gone by today with no run started after it. Bounded
+  twice: only today's times, because replaying yesterday's plan writes into a
+  scoring period that has closed; and only within `CATCHUP_GRACE` of six
+  hours, because the earliest NBA tip-off is seven hours after the 09:00 fire
+  and a later catch-up would be seating players ESPN is about to lock. The
+  test is `last_run >= due` rather than "a run happened today", which is what
+  makes repeated restarts -- three in four minutes on the day this was found
+  -- run it at most once.
+
 ### Added
 
 - **A projection whose role assumption has gone stale is now reweighted.**

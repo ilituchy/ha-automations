@@ -67,6 +67,14 @@ INJURY_NOTE_TTL = timedelta(minutes=15)
 #: costs a 25 MB public fetch. See :mod:`sources.defense`.
 DEFENSE_TTL = timedelta(days=7)
 
+#: How late a missed daily run may be and still be worth doing on startup.
+#: The run's job is to seat today's lineup before tip-off, and the earliest NBA
+#: tip-off is seven hours after the 09:00 fire (the reasoning is written out in
+#: ``solve/addrop``). Six hours therefore still leaves an hour of margin, while
+#: anything later would be planning into slots ESPN is about to lock -- at which
+#: point not running is the better of the two wrong answers.
+CATCHUP_GRACE = timedelta(hours=6)
+
 #: Candidates one run will put in front of the add/drop reviewer, per league.
 #: Separate from ``addrop_max_moves``, which caps the swaps that reach the user:
 #: a blocked swap is not a move, so it must not spend the move budget, or a run
@@ -2352,6 +2360,72 @@ class Autopilot:
 
     # -- daemon ------------------------------------------------------------
 
+    def missed_run(
+        self,
+        now: datetime,
+        last_run: Optional[datetime],
+    ) -> Optional[datetime]:
+        """The run time that fired while nothing was running, if there is one.
+
+        ``AsyncIOScheduler`` keeps its jobs in memory. They are registered
+        fresh at every container start and the next fire is computed from
+        *now*, so a fire that falls while the process is dead is never
+        replayed. ``misfire_grace_time`` does not cover this: it forgives a
+        scheduler that was running and busy, not one that did not exist.
+
+        Observed live. On 2026-11-04 Home Assistant's own
+        ``resolution.fixups.system_execute_reboot`` rebooted the Green at
+        09:12:09 to commit an OS update, and the add-on was down until 09:15.
+        That day's run had finished at 09:00:31 and was safe by eleven and a
+        half minutes. Had the reboot landed a little earlier the run would have
+        been skipped in silence -- no error, no notification, just a day on
+        which no lineup was set.
+
+        Only *today's* times count, and only the latest of them:
+
+        * Replaying yesterday's 09:00 when the box boots at today's 14:00 would
+          plan against a scoring period that has closed. That is worse than not
+          running, so a missed day stays missed.
+        * When two configured times have both gone by, doing the earlier one
+          first is the same work twice over with staler inputs.
+
+        ``last_run >= due`` rather than "some run happened today" is what makes
+        this idempotent across the restarts that a deploy causes: three
+        rebuilds in four minutes all see the 09:00 run already on record and
+        none of them repeats it.
+        """
+        due: Optional[datetime] = None
+        for t in self.cfg.run_times:
+            hour, minute = (int(x) for x in t.split(":"))
+            fire = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if fire <= now and (due is None or fire > due):
+                due = fire
+        if due is None:
+            return None
+        if now - due > CATCHUP_GRACE:
+            return None
+        if last_run is not None and last_run >= due:
+            return None
+        return due
+
+    async def _catch_up(self, due: datetime) -> None:
+        """Run a missed fire, isolated so its failure cannot take the daemon down.
+
+        ``run_once`` already survives a single league throwing. This catches
+        the rest -- a broken cookie, a store that will not open -- because a
+        catch-up that raises must not stop the scheduler, the notification
+        listener or the page from coming up behind it.
+        """
+        try:
+            await self.scheduled_run()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "the catch-up run for %s failed; tomorrow's scheduled run is "
+                "unaffected", due.strftime("%H:%M"),
+            )
+
     async def scheduled_run(self) -> None:
         """The daily run, as the scheduler invokes it.
 
@@ -2425,6 +2499,21 @@ class Autopilot:
         )
         sched.start()
 
+        # A fire that happened while this process did not exist is not replayed
+        # by the scheduler, so it is replayed here. Bound to a name because a
+        # bare `create_task` result is collectable mid-flight.
+        now = datetime.now(self.tz)
+        due = self.missed_run(now, self.store.last_run_started())
+        catchup: "Optional[asyncio.Task[None]]" = None
+        if due is not None:
+            log.warning(
+                "the %s run never happened -- nothing was running at the time; "
+                "doing it now, %.0f minute(s) late",
+                due.strftime("%H:%M"),
+                (now - due).total_seconds() / 60.0,
+            )
+            catchup = asyncio.create_task(self._catch_up(due))
+
         listener = asyncio.create_task(self.ha.listen_actions(queue, stop=stop))
         # The review surface. Deliberately a sibling task rather than a
         # precondition: if uvicorn cannot bind, the scheduler and the
@@ -2439,6 +2528,8 @@ class Autopilot:
                     continue
                 await self.handle_action(ev)
         finally:
+            if catchup is not None:
+                catchup.cancel()
             listener.cancel()
             web_task.cancel()
             sched.shutdown(wait=False)
