@@ -102,6 +102,16 @@ class LineupPlan:
     #: Structured rather than only a note, because the only fix is an add/drop
     #: and ``main.py`` has to be able to act on it rather than parse prose.
     ir_stranded: Tuple[PlayerId, ...] = ()
+    #: Player-games still startable from today to the end of the matchup
+    #: period, each day capped at the number of starting slots -- the same
+    #: count ``shadow_price`` prices the cap against, which is why it is taken
+    #: from there rather than recomputed.
+    #:
+    #: The number that answers "am I going to use my games or waste them",
+    #: which is not answerable from the spend counter alone: 10 of 40 used
+    #: looks alarming on a Wednesday and is fine when 33 are still playable.
+    #: ``0`` when the cap was not priced this run.
+    startable_left: int = 0
 
     @property
     def changed(self) -> bool:
@@ -185,6 +195,7 @@ def plan_lineup(
     cap = budget_mod.matchup_cap(settings)
     used: Optional[float] = None
     gb = None
+    startable_left = 0
 
     if cap is None:
         notes.append("league has no games-played cap")
@@ -212,6 +223,7 @@ def plan_lineup(
         )
         lam = budget_mod.shadow_price(candidates, gb)
         utilization = budget_mod.utilization_ratio(candidates, gb)
+        startable_left = len(candidates)
         notes.append(
             "cap %.0f, used %.0f, %d day(s) left in matchup period %d, "
             "%d startable player-game(s), lambda %.2f, utilization %.2f"
@@ -407,6 +419,7 @@ def plan_lineup(
             feasible=False,
             cap=cap,
             games_used=used,
+            startable_left=startable_left,
         )
 
     target: Dict[PlayerId, SlotId] = dict(fixed)
@@ -457,6 +470,7 @@ def plan_lineup(
             feasible=False,
             cap=cap,
             games_used=used,
+            startable_left=startable_left,
             # Carried even here. An infeasible lineup is the one case where the
             # add/drop layer most needs to know a drop would unblock it.
             ir_stranded=stranded,
@@ -477,6 +491,7 @@ def plan_lineup(
         ir_stranded=stranded,
         cap=cap,
         games_used=used,
+        startable_left=startable_left,
     )
 
 

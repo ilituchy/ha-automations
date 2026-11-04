@@ -163,7 +163,8 @@ CREATE TABLE IF NOT EXISTS scoreboards (
     my_games_used   INTEGER,
     opp_games_used  INTEGER,
     my_games_today  INTEGER,
-    games_cap       INTEGER
+    games_cap       INTEGER,
+    my_startable_left INTEGER
 );
 
 -- What the model believed, one row per player per run.
@@ -284,6 +285,7 @@ class Store:
         wanted = {
             "runs": [("league_id", "INTEGER")],
             "journal": [("league_id", "INTEGER")],
+            "scoreboards": [("my_startable_left", "INTEGER")],
         }
         for table, columns in wanted.items():
             have = {
@@ -411,6 +413,7 @@ class Store:
         "my_team_id", "my_name", "my_abbrev", "my_logo", "my_points",
         "opp_team_id", "opp_name", "opp_abbrev", "opp_logo", "opp_points",
         "my_games_used", "opp_games_used", "my_games_today", "games_cap",
+        "my_startable_left",
     )
 
     def record_scoreboard(self, league_id: int, **fields: Any) -> None:

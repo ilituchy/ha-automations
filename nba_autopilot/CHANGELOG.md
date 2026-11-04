@@ -117,6 +117,25 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **The scoreboard's games line read backwards.** It printed `used + today`
+  under the words *"N games after today"* — a count of what will have been
+  **spent**, wearing the grammar of what is **left**. *"20 games left? im going
+  to be way under the limit?? is this right"*. It was not: ten of forty spent
+  with thirty-three still playable, so the cap binds and three good games have
+  to sit — the opposite of the worry the label created.
+
+  The panel now names both halves, because which of them is smaller is the
+  entire question: `30 left · 33 playable`. Left is budget, playable is the
+  games the roster can still start before Sunday with each day capped at its
+  starting slots. More playable than left is the ordinary case. **Fewer
+  playable than left** means the allowance goes to waste, which is the one
+  worth acting on, and it says `only 12 playable of 30 left` in red.
+
+  `LineupPlan.startable_left` carries the second number out of the cap pricing
+  that already computes it, through a new nullable `scoreboards` column. Rows
+  written before it existed fall back to the old sum, said the right way round:
+  `16 of 30 used after today`.
+
 - **Being in today's starting lineup no longer protects a player from being
   dropped.** *"its 9 fucking am when this runs"* — the block was justified as
   "his game may already be under way, and a drop that empties a started slot

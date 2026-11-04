@@ -546,6 +546,9 @@ def _board(**over):
         "opp_logo": "https://g.espncdn.com/y.svg", "opp_points": 513.5,
         "my_games_used": 12, "opp_games_used": 14,
         "my_games_today": 4, "games_cap": 30,
+        # Absent by default, as it is on every row written before the column
+        # existed, so the fallback stays the path most of these tests take.
+        "my_startable_left": None,
     }
     row.update(over)
     return row
@@ -625,8 +628,39 @@ class TestScoreboard(unittest.TestCase):
         self.assertIn("Level",
                       web._board(_board(opp_points=403.0), None))
 
-    def test_games_after_today_is_the_sum_and_is_worded_as_a_projection(self):
-        self.assertIn("<b>16</b> games after today", web._board(_board(), None))
+    def test_without_a_playable_count_it_says_used_not_left(self):
+        """The fallback, for a row written before the column existed.
+
+        Still the old sum, but no longer wearing the grammar of a remainder:
+        "16 games after today" was a count of what would have been *spent*,
+        and it reads as sixteen remaining to anybody who has not read the
+        source. It was asked about the first week it was seen.
+        """
+        out = web._board(_board(), None)
+        self.assertIn("<b>16</b> of 30 used after today", out)
+        self.assertNotIn("games after today", out)
+
+    def test_the_budget_and_the_opportunity_are_both_named(self):
+        """Which of the two is smaller is the whole question, so showing one
+        of them answers nothing. 12 of 30 used leaves 18, and with 25 still
+        playable the cap binds and seven good games will sit."""
+        out = web._board(_board(my_startable_left=25), None)
+        self.assertIn("<b>18</b> left", out)
+        self.assertIn("<b>25</b> playable", out)
+
+    def test_budget_that_will_go_to_waste_is_the_one_that_gets_alarm(self):
+        """More playable than budget means good players sit, which is normal.
+        Less means the allowance is wasted, which is worth a colour."""
+        out = web._board(_board(my_startable_left=11), None)
+        self.assertIn("<b class=trail>only 11</b> playable of <b>18</b> left",
+                      out)
+        plain = web._board(_board(my_startable_left=25), None)
+        self.assertNotIn("trail>only", plain)
+
+    def test_an_uncapped_league_shows_neither_half(self):
+        """There is no budget to be left of, so there is no question to put."""
+        out = web._board(_board(games_cap=None, my_startable_left=25), None)
+        self.assertNotIn("playable", out)
 
     def test_a_quiet_night_says_so_rather_than_repeating_the_count(self):
         self.assertIn("no games left today",
@@ -753,7 +787,7 @@ class TestLiveScoreboard(unittest.TestCase):
         # its denominator and its projection.
         out = web._board(board, None)
         self.assertIn("13 of 30 games", out)
-        self.assertIn("<b>17</b> games after today", out)
+        self.assertIn("<b>17</b> of 30 used after today", out)
 
     def test_a_dead_cookie_costs_a_stale_score_not_the_page(self):
         p = self.page(

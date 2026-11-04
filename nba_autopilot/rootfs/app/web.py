@@ -2619,18 +2619,19 @@ def _board(b: Mapping[str, Any], tz: Any) -> str:
 
     Four questions in one panel, which are the four that were asked: what is
     the score, who is it against, how much of the week's games allowance has
-    been spent, and what will it be once tonight is played.
+    been spent, and whether what is left will be spent or wasted.
 
-    "After tonight" is the sum of a reading and a schedule lookup -- games
-    already counted, plus the starters whose NBA teams play today. It is
-    therefore a projection and is worded as one. It also assumes the lineup
-    stands, which is fair: the run that wrote the number also wrote the lineup.
+    That last one needs two numbers and used to be shown with one. See the
+    note at the footer: a spend counter alone cannot answer it, because ten of
+    forty used is alarming on a Wednesday and fine when thirty-three are still
+    playable.
     """
     mine = _num(b.get("my_points"))
     theirs = _num(b.get("opp_points"))
     cap = _num(b.get("games_cap"))
     used = _num(b.get("my_games_used"))
     today = _num(b.get("my_games_today"))
+    startable = _num(b.get("my_startable_left"))
 
     def row(name: Any, logo: Any, pts: Optional[float],
             games: Optional[float], leading: bool) -> str:
@@ -2689,11 +2690,33 @@ def _board(b: Mapping[str, Any], tz: Any) -> str:
             foot.append("<b class='%s'>%s by %.0f</b>"
                         % ("lead" if ahead else "trail",
                            "Ahead" if ahead else "Behind", gap))
-    if used is not None and today is not None:
-        # "after today" rather than "once today is played": the longer phrase
-        # wrapped the footer onto a second line in a panel this narrow, and said
-        # nothing the short one does not.
-        foot.append("<b>%.0f</b> games after today" % (used + today)
+    # The budget, forwards. This used to print ``used + today`` under the words
+    # "N games after today", which is a count of what will have been *spent*
+    # wearing the grammar of what is *left* -- and "20 games after today" reads
+    # as twenty remaining to anyone who has not read the source. It was asked
+    # about the first week it was seen: *"20 games left? im going to be way
+    # under the limit?? is this right"*. The answer was no, the opposite: ten
+    # of forty spent with thirty-three still playable, so the cap binds and
+    # three will have to sit.
+    #
+    # So both halves are named. "Left" is budget, "playable" is opportunity,
+    # and which is the smaller is the whole question -- more playable than
+    # budget means some good players sit, less means budget goes to waste, and
+    # only the second is worth alarm.
+    if used is not None and cap is not None and startable:
+        budget = max(cap - used, 0.0)
+        if startable < budget:
+            foot.append("<b class=trail>only %.0f</b> playable of "
+                        "<b>%.0f</b> left" % (startable, budget))
+        else:
+            foot.append("<b>%.0f</b> left &middot; <b>%.0f</b> playable"
+                        % (budget, startable))
+    elif used is not None and today is not None:
+        # No startable reading -- a row written before the column existed, or a
+        # run that could not price the cap. The old number, said the right way
+        # round rather than dropped.
+        foot.append("<b>%.0f</b> of %s used after today"
+                    % (used + today, "%.0f" % cap if cap else "the cap")
                     if today else "no games left today")
     if foot:
         out.append("<div class=bfoot>%s</div>" % " &middot; ".join(foot))

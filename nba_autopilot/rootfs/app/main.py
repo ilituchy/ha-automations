@@ -1904,6 +1904,15 @@ class Autopilot:
                 my_games_today=_starts_today(work, roster,
                                              settings.current_scoring_period),
                 games_cap=None if cap is None else int(cap),
+                # What is still *playable*, which is the half of the budget
+                # question the spend counter cannot answer: ten of forty used
+                # looks alarming on a Wednesday and is fine when thirty-three
+                # are still startable.
+                my_startable_left=(
+                    int(work.plan.startable_left)
+                    if work.plan is not None and work.plan.startable_left
+                    else None
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("could not cache the scoreboard: %s", exc)

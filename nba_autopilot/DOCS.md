@@ -505,6 +505,33 @@ something like `person.ian`.
 
 ## The status page
 
+Each league's panel ends with the week's games budget, and it takes **two**
+numbers because one cannot answer the question:
+
+```
+Ahead by 149 · 30 left · 33 playable
+```
+
+**Left** is budget — your cap minus what you have already spent. **Playable**
+is opportunity — the games your roster can still start between now and Sunday,
+each day capped at the number of starting slots, because a night when twenty
+of your players have games still only has eleven seats.
+
+Which number is smaller is the whole thing. More playable than left means the
+cap binds and the app will sit your cheapest players on the busiest nights —
+normal, and nothing to do about it. **Fewer playable than left** means part of
+your allowance will go unused, which is the one worth acting on, so it says so
+in red:
+
+```
+Ahead by 20 · only 12 playable of 30 left
+```
+
+A spend counter on its own cannot tell you which you are in. Ten of forty used
+looks alarming on a Wednesday and is perfectly healthy when thirty-three are
+still playable — and the row above already tells you the spend, so the footer
+is for what happens next.
+
 Tapping **Approve** or **Reject** posts the decision and the page reloads
 itself, so the card leaves the queue on its own — there is nothing to refresh
 by hand. What takes the time is the work behind it: the write goes to ESPN, and
