@@ -2503,7 +2503,8 @@ class Autopilot:
         # by the scheduler, so it is replayed here. Bound to a name because a
         # bare `create_task` result is collectable mid-flight.
         now = datetime.now(self.tz)
-        due = self.missed_run(now, self.store.last_run_started())
+        last = self.store.last_run_started()
+        due = self.missed_run(now, last)
         catchup: "Optional[asyncio.Task[None]]" = None
         if due is not None:
             log.warning(
@@ -2513,6 +2514,17 @@ class Autopilot:
                 (now - due).total_seconds() / 60.0,
             )
             catchup = asyncio.create_task(self._catch_up(due))
+        else:
+            # Logged even when there is nothing to do, deliberately. A check
+            # that is silent when it passes is a check you cannot tell apart
+            # from one that was never deployed -- which is the failure
+            # docs/DEPLOY.md is about. It also answers "did it run today?"
+            # from the log alone, without opening the database.
+            log.info(
+                "startup catch-up check: last run %s, nothing missed",
+                "never" if last is None
+                else last.astimezone(self.tz).strftime("%Y-%m-%d %H:%M"),
+            )
 
         listener = asyncio.create_task(self.ha.listen_actions(queue, stop=stop))
         # The review surface. Deliberately a sibling task rather than a
