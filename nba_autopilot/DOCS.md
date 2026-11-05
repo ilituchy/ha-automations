@@ -682,6 +682,55 @@ For each one:
 4. Anything else becomes a notification with **Approve** / **Reject** buttons,
    naming the league, and is listed on the status page until it is decided.
 
+### Tip-off lineup sweeps
+
+The 09:00 run cannot see news that breaks after it, and the earliest tip-off is
+seven hours later. On 2026-11-04 ESPN's feed called Trey Murphy III `PROBABLE`
+at 09:00 and `OUT` the next morning; he spent the evening in Dynassty's `F`
+slot scoring nothing while Bobby Portis (24.5) and Ziaire Williams (23.5), both
+`F`-eligible with games, sat on the bench. That is **24.5 points** in a matchup
+currently decided by fewer.
+
+So the app now looks again. After the daily run (and at startup) it reads
+today's tip-off times for the NBA teams you have a player on, and schedules a
+**lineup-only** re-check 45 minutes before each distinct tip. Tips within 20
+minutes of each other share one sweep, so a full slate costs a handful of
+passes rather than one per game.
+
+A sweep re-reads the roster and the injury feed, re-runs the same lineup
+optimizer through the same games-cap pricing, and writes only if the answer
+changed. It never looks at the waiver pool, never calls the reviewer, and never
+asks you to approve anything — so it is cheap, it cannot spam you, and
+re-running it is always safe. ESPN's own lock keeps it off anyone whose game
+has already started.
+
+**You hear from it only when it moves someone:**
+
+```
+Autopilot: lineup changed before tip-off
+Dynassty:
+Trey Murphy III: F -> BE
+Bobby Portis: BE -> F
+```
+
+Most sweeps change nothing and say nothing. Sweep runs appear in the database
+with `runs.kind = 'sweep'`, which also keeps them from being mistaken for the
+day's run by the startup catch-up below.
+
+Measured before it was built. Across every completed scoring period of 2026-27,
+counting days a starter recorded zero while his NBA team played:
+
+| league | days with a DNP in a starting slot | days a legal sub existed | recoverable |
+|---|---|---|---|
+| Chairman's | 3 | 0 | 0.0 |
+| Dynassty | 3 | 2 | 45.0 |
+
+Chairman's scores zero on that table because its scratches were unfillable —
+on 2026-11-04 the only other `F`-eligible players were already starting and the
+two bench players with games were guards. Whether a scratch is recoverable at
+all is a question only the optimizer can answer, which is why a sweep re-plans
+rather than patching the empty slot.
+
 ### If the app was not running when a run time came round
 
 The scheduler keeps its jobs in memory, so a fire that lands while the add-on

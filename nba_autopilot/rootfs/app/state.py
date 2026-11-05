@@ -59,6 +59,10 @@ CREATE TABLE IF NOT EXISTS runs (
     finished_at       TEXT,
     scoring_period    INTEGER,
     shadow_mode       INTEGER NOT NULL DEFAULT 1,
+    -- 'daily' for a scheduled or caught-up full run, 'sweep' for a
+    -- tip-off lineup re-check. NULL on rows written before the column
+    -- existed, which were all daily runs.
+    kind              TEXT,
     sources_used      TEXT NOT NULL DEFAULT '{}',
     sources_missing   TEXT NOT NULL DEFAULT '{}',
     shadow_prices     TEXT NOT NULL DEFAULT '{}',
@@ -283,7 +287,7 @@ class Store:
         is what makes replaying them unconditionally safe.
         """
         wanted = {
-            "runs": [("league_id", "INTEGER")],
+            "runs": [("league_id", "INTEGER"), ("kind", "TEXT")],
             "journal": [("league_id", "INTEGER")],
             "scoreboards": [("my_startable_left", "INTEGER")],
         }
@@ -311,17 +315,26 @@ class Store:
         scoring_period: int,
         shadow_mode: bool,
         league_id: Optional[int] = None,
+        kind: str = "daily",
     ) -> None:
+        """Open a run row. ``kind`` separates a full run from a lineup sweep.
+
+        A sweep is a real run -- it writes to ESPN and must be auditable the
+        same way -- but it is not the day's run, and conflating the two would
+        let an afternoon sweep convince the startup catch-up that the morning
+        run had happened. See :meth:`last_run_started`.
+        """
         with self._lock, self.db:
             self.db.execute(
                 "INSERT INTO runs (run_id, league_id, started_at, scoring_period, "
-                "shadow_mode) VALUES (?,?,?,?,?)",
+                "shadow_mode, kind) VALUES (?,?,?,?,?,?)",
                 (
                     run_id,
                     None if league_id is None else int(league_id),
                     _now(),
                     int(scoring_period),
                     1 if shadow_mode else 0,
+                    str(kind),
                 ),
             )
 
@@ -370,7 +383,12 @@ class Store:
         """
         with self._lock:
             row = self.db.execute(
-                "SELECT started_at FROM runs ORDER BY started_at DESC LIMIT 1"
+                # A lineup sweep is excluded on purpose: it is not the day's
+                # run and must not be mistaken for one. NULL is a row from
+                # before the column existed, and every one of those was daily.
+                "SELECT started_at FROM runs "
+                "WHERE kind IS NULL OR kind = 'daily' "
+                "ORDER BY started_at DESC LIMIT 1"
             ).fetchone()
         if row is None or not row["started_at"]:
             return None

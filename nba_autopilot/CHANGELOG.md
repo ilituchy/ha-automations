@@ -6,6 +6,36 @@ All notable changes to this app are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Tip-off lineup sweeps.** The 09:00 run is blind to everything that happens
+  in the seven hours before the earliest tip. `sweep.py` schedules a
+  lineup-only re-check 45 minutes before each distinct tip-off on today's
+  slate, restricted to games involving NBA teams we have a player on, with
+  tips inside 20 minutes of each other sharing a sweep.
+
+  Measured first. Across every completed scoring period of 2026-27, counting
+  days a player in a starting slot recorded zero while his NBA team played:
+  Chairman's had 3 such days and **0** where a legal substitute existed;
+  Dynassty had 3 and **2**, worth **45.0 points**. On 2026-11-04 Trey Murphy
+  III held Dynassty's `F` slot at zero while Bobby Portis (24.5) and Ziaire
+  Williams (23.5) sat on the bench, both `F`-eligible with games. ESPN said
+  `PROBABLE` at 09:00 and `OUT` the next morning. The same scratch cost
+  Chairman's nothing, because its only other `F`-eligible men were already
+  starting and its two bench players with games were guards — which is why a
+  sweep re-runs the optimizer instead of patching the slot.
+
+  Deliberately lineup-only: no pool read, no reviewer call, no approval
+  notification left unanswered while the game tips. Both recoverable incidents
+  this season were solvable from the bench, re-seating is reversible where an
+  acquisition is not, and it makes a sweep safe to repeat. `lineup_locked`
+  already keeps it off anyone whose game has started, and the games cap is
+  priced by the same solver the morning run uses.
+
+  Notifies only when it actually moves someone. `runs.kind` distinguishes a
+  sweep from the day's run, so an afternoon sweep cannot convince the startup
+  catch-up that the 09:00 run happened.
+
 ### Fixed
 
 - **A run time that passes while the app is stopped is no longer lost.**

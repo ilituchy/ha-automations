@@ -28,6 +28,7 @@ from typing import (
     Mapping,
     Optional,
     Sequence,
+    Set,
     Tuple,
 )
 from zoneinfo import ZoneInfo
@@ -36,6 +37,7 @@ import config as appconfig
 import discover as discovery
 import judge as judge_mod
 import pipeline
+import sweep as sweep_mod
 import usage as usage_mod
 from espn import bio as bio_mod
 from espn import ids
@@ -421,6 +423,10 @@ class Autopilot:
         # :meth:`season_calendar`.
         self._calendar: Any = _UNSET
         self._schedule: Optional[Dict[int, Dict[int, int]]] = None
+        #: The running scheduler, so one-shot sweep jobs can be added and
+        #: replaced while the daemon runs. ``None`` outside ``serve`` -- a
+        #: ``--once`` run has no scheduler and installs no sweeps.
+        self._sched: Any = None
         #: The same payload kept whole, for the status page. See
         #: :meth:`pro_games`.
         self._pro_games: Optional[Mapping[int, Mapping[int, Any]]] = None
@@ -2360,6 +2366,177 @@ class Autopilot:
 
     # -- daemon ------------------------------------------------------------
 
+    # -- the tip-off lineup sweep ------------------------------------------
+
+    def _todays_games(self) -> List[Any]:
+        """Today's NBA games, with tip-off instants. Empty on any failure.
+
+        A sweep schedule is an optimization, never a precondition: if the
+        public scoreboard is unreachable the app must still behave exactly as
+        it did before this existed, which is to say the 09:00 run and nothing
+        else.
+        """
+        try:
+            from sources.nba_schedule import NbaSchedule
+
+            # days_ahead=1 fetches the lead-in day and today; the lead-in is
+            # kept out of `games` by the source itself.
+            res = NbaSchedule(days_ahead=1).fetch()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not read today's tip-off times: %s", exc)
+            return []
+        if res is None:
+            log.warning("could not read today's tip-off times: no result")
+            return []
+        payload = getattr(res, "payload", None) or {}
+        return list(payload.get("games") or [])
+
+    def _rostered_pro_teams(self) -> Set[int]:
+        """The NBA teams we have a player on, across every league.
+
+        A game between two teams we do not roster cannot change any lineup, so
+        it earns no sweep. Read from the rosters rather than assumed, because
+        a swap yesterday may have moved us onto a team we had nobody on.
+        """
+        teams: Set[int] = set()
+        for lg in self.leagues:
+            try:
+                for e in lg.read.roster():
+                    if int(e.current_slot) != ids.IR_SLOT:
+                        teams.add(int(e.pro_team_id))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("could not read %s's roster for sweep planning: %s",
+                            lg.name, exc)
+        return teams
+
+    def install_sweeps(self) -> List[datetime]:
+        """Put today's lineup sweeps on the scheduler. Returns the times.
+
+        Called at startup and again after each daily run, which is what keeps
+        the schedule current as the day's slate and our roster change. Jobs
+        from a previous call are removed first, so this is idempotent and a
+        second call never doubles the work.
+        """
+        sched = self._sched
+        if sched is None:
+            return []
+        from apscheduler.triggers.date import DateTrigger
+
+        for job in list(sched.get_jobs()):
+            if str(job.name or "").startswith("sweep@"):
+                job.remove()
+
+        now = datetime.now(self.tz)
+        times = sweep_mod.sweep_times(
+            self._todays_games(), self._rostered_pro_teams(), now,
+        )
+        for at in times:
+            sched.add_job(
+                self.sweep,
+                DateTrigger(run_date=at, timezone=self.tz),
+                name="sweep@%s" % at.strftime("%H:%M"),
+                # A one-shot that fires while the loop is busy must still run;
+                # the whole point is that it lands before a tip-off, and five
+                # minutes late is far better than not at all.
+                misfire_grace_time=600,
+            )
+        log.info("%s", sweep_mod.describe(times, now=now))
+        return times
+
+    async def sweep(self) -> None:
+        """One tip-off lineup re-check. See ``sweep_once`` for what it does."""
+        await asyncio.to_thread(self.sweep_once)
+
+    def sweep_once(self) -> None:
+        """Re-seat every league's lineup, if anything has changed since 09:00.
+
+        Deliberately *lineup only*. The measured loss -- 45 points across two
+        incidents this season, both in Dynassty -- was recoverable from the
+        bench in every case, so the expensive half of a run buys nothing here:
+        no pool read, no reviewer call, no approval notification sitting
+        unanswered while the game tips. It also makes a sweep safe to repeat,
+        because re-seating is reversible and an acquisition is not.
+        """
+        for lg in self.leagues:
+            try:
+                self.sweep_league(lg)
+            except EspnError as exc:
+                log.error("sweep: league %s failed: %s", lg.name, exc)
+            except Exception:  # noqa: BLE001 - one league must not kill the rest
+                log.exception("sweep: league %s raised", lg.name)
+
+    def sweep_league(self, lg: "League") -> bool:
+        """Re-plan one league's lineup. Returns whether anything moved."""
+        settings, _note = self.settings_now(lg)
+        roster = lg.read.roster()
+        work = self.plan_from_roster(lg, settings, roster)
+        plan = work.plan
+        if plan is None:
+            log.info("sweep: %s: no usable projections; lineup untouched",
+                     lg.name)
+            return False
+        if not plan.feasible:
+            # Silent to the user by design. The morning run already notifies
+            # on an infeasible plan, and a sweep that cannot improve things is
+            # the same non-event as a sweep that finds nothing to do.
+            log.warning("sweep: %s: computed lineup failed validation; "
+                        "lineup untouched", lg.name)
+            return False
+        if not plan.changed:
+            log.info("sweep: %s: lineup still optimal", lg.name)
+            return False
+
+        run_id = _ulid()
+        self.store.start_run(
+            run_id,
+            settings.current_scoring_period,
+            self.cfg.shadow_mode,
+            league_id=lg.ref.league_id,
+            kind="sweep",
+        )
+        log.info("=== sweep %s | %s | scoring period %d ===", run_id,
+                 settings.name, settings.current_scoring_period)
+        for line in pipeline.summarize(plan, roster).splitlines():
+            log.info("  %s", line)
+
+        written = self._apply_lineup(run_id, lg, plan, roster, settings)
+        self._finish(
+            run_id, {"espn": "ok"}, {},
+            {ids.TEAM_TOTAL_LIMIT_SLOT: plan.lam} if plan.cap else {},
+            {}, ["tip-off sweep"],
+        )
+        if written:
+            self._notify_sweep(lg, plan, roster)
+        return written
+
+    def _notify_sweep(
+        self, lg: "League", plan: "pipeline.LineupPlan", roster: Any
+    ) -> None:
+        """Tell the owner only when the lineup actually moved.
+
+        Most sweeps change nothing and say nothing; a day with a full slate
+        would otherwise be five pushes saying "still fine". What reaches the
+        phone is the thing he would want to have been told at 09:00 and could
+        not have been.
+        """
+        def where(slot: Any) -> str:
+            return "?" if slot is None else ids.slot_name(int(slot))
+
+        lines = ["%s: %s -> %s" % (mv.player_name, where(mv.from_slot),
+                                   where(mv.to_slot))
+                 for mv in plan.moves]
+        if not lines:
+            return
+        try:
+            self.ha.notify(
+                title="Autopilot: lineup changed before tip-off",
+                message="%s:\n%s" % (lg.name, "\n".join(lines)),
+                tag="autopilot-sweep",
+                actions=(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error("could not deliver sweep notification: %s", exc)
+
     def missed_run(
         self,
         now: datetime,
@@ -2443,6 +2620,14 @@ class Autopilot:
         rather than from a thread that is pretending to be in one.
         """
         await asyncio.to_thread(self.run_once)
+        # Today's slate and our roster are both only known now -- the run may
+        # itself have moved us onto a team playing tonight -- so the sweep
+        # schedule is rebuilt here rather than guessed at startup and left.
+        try:
+            await asyncio.to_thread(self.install_sweeps)
+        except Exception:  # noqa: BLE001
+            log.exception("could not schedule today's lineup sweeps; the "
+                          "daily run is unaffected")
 
     async def _serve_web(self) -> None:
         """The ingress status page, isolated so its failure is survivable.
@@ -2475,6 +2660,9 @@ class Autopilot:
 
         queue: "asyncio.Queue[ActionEvent]" = asyncio.Queue()
         sched = AsyncIOScheduler(timezone=self.tz)
+        # Held so `install_sweeps` can add and replace one-shot jobs on it as
+        # the day goes on.
+        self._sched = sched
 
         for t in self.cfg.run_times:
             hour, minute = t.split(":")
@@ -2525,6 +2713,16 @@ class Autopilot:
                 "never" if last is None
                 else last.astimezone(self.tz).strftime("%Y-%m-%d %H:%M"),
             )
+
+        # Boot may be hours after the morning run -- a reboot, a deploy -- and
+        # the sweeps that run installed are gone with the process. Rebuilt
+        # here so a restart at 14:00 still covers tonight's tip-offs. Isolated
+        # because an unreachable scoreboard must cost the daemon nothing.
+        if due is None:
+            try:
+                self.install_sweeps()
+            except Exception:  # noqa: BLE001
+                log.exception("could not schedule today's lineup sweeps")
 
         listener = asyncio.create_task(self.ha.listen_actions(queue, stop=stop))
         # The review surface. Deliberately a sibling task rather than a
