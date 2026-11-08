@@ -368,18 +368,18 @@ def plan_lineup(
         for s, n in settings.lineup_slot_counts.items()
         if int(n) > 0 and int(s) != ids.IR_SLOT
     }
-    exhausted = lam == float("inf")
+    # No special case for an exhausted cap. There used to be one: it gave every
+    # playable player a reduced cost of -1.0 while players with no game kept
+    # 0.0, so the assignment preferred the men who were not playing and the
+    # lineup scored a guaranteed zero. ``shadow_price`` now prices an exhausted
+    # budget at 0 rather than +inf -- a spent game cannot be won back by
+    # benching someone -- so this loop is the only path and ``lam`` is always
+    # finite. See "Why an exhausted budget prices at zero" in solve/budget.py.
     rc: Dict[PlayerId, float] = {}
     for e in movable:
         proj = projections.get(e.player_id)
         if not plays_today.get(e.player_id) or proj is None:
             rc[e.player_id] = 0.0
-        elif exhausted:
-            # No budget left: every game played from here is one we are not
-            # allowed to spend, so a player with a game today is strictly worse
-            # than one without. A finite penalty rather than -inf, because the
-            # assignment routine needs finite arithmetic.
-            rc[e.player_id] = -1.0
         else:
             rc[e.player_id] = float(proj.p_play) * (
                 values.get(e.player_id, 0.0) - lam

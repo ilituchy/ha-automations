@@ -8,6 +8,18 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **Removed the three branches that implemented the exhausted-cap bug.** The
+  shadow price was only half of it. `pipeline` gave every playable player a
+  reduced cost of `-1.0` while players with no game kept `0.0`, so the
+  assignment actively preferred the men who were not playing; `addrop` valued
+  every acquisition at zero and refused to propose one. All three rested on
+  games past the cap being worthless. They are not: across 36 team-weeks in
+  both leagues, reconstructed from ESPN's own historical lineups, the official
+  matchup total equals the plain sum of the starters' scores in every single
+  case -- including nine team-weeks that finished over the cap. A new test
+  asserts `shadow_price` never returns infinity for any input, which is what
+  makes removing the branches safe.
+
 - **An exhausted games cap benched players who were playing.** Once usage
   reached the cap the shadow price went to `+inf`, which dropped every
   candidate from the assignment and backfilled the starting slots with players

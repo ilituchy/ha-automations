@@ -462,13 +462,13 @@ def week_surplus(
     ``p_play * max(v - max(lambda, theta_d), 0)`` summed over his game days.
     See the module docstring for where each term comes from.
 
-    An exhausted cap arrives here as ``lam = inf``, which makes every term
-    zero: with no games left to spend, nobody we could acquire can be started,
-    so nobody we could acquire is worth anything. That is the correct answer and
-    not a degenerate one.
+    ``lam`` is always finite. An exhausted cap used to arrive here as ``inf``
+    and short-circuit this to zero, on the reasoning that with no games left to
+    spend nobody we could acquire can be started. That reasoning does not hold:
+    ESPN keeps scoring games played past the cap, so an exhausted cap prices at
+    0 and an acquisition is worth what his games are worth. See "Why an
+    exhausted budget prices at zero" in :mod:`solve.budget`.
     """
-    if lam == float("inf"):
-        return 0.0
     total = 0.0
     for day in game_days:
         hurdle = max(float(lam), float(prices.get(int(day), 0.0)))
@@ -766,12 +766,6 @@ def plan_addrop(
             "league uses FAAB (budget %s) and this layer has no bidding "
             "policy, so it proposes nothing rather than bidding 0"
             % settings.faab_budget
-        )
-        return nothing()
-    if lam == float("inf"):
-        notes.append(
-            "games-played budget exhausted, so an acquisition could not be "
-            "started this week"
         )
         return nothing()
 

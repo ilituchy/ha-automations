@@ -46,7 +46,7 @@ from models import (  # noqa: E402
     RosterEntry,
     StatLimit,
 )
-from solve import addrop  # noqa: E402
+from solve import addrop, budget  # noqa: E402
 
 #: Three starting slots and no bench, so a three-player roster is exactly
 #: **full**. That matters more than it looks: ``espn/write.py`` allows an
@@ -462,15 +462,24 @@ class TestGamesDriveIt(unittest.TestCase):
         self.assertTrue(case.run(lam=0.0).proposed)
         self.assertFalse(case.run(lam=20.20).proposed)
 
-    def test_an_exhausted_budget_proposes_nothing(self):
+    def test_an_exhausted_budget_still_values_a_clear_upgrade(self):
+        """An exhausted cap no longer refuses every acquisition.
+
+        It used to: ``lam`` arrived as ``+inf`` and ``plan_addrop`` returned
+        early with "budget exhausted". That rested on games past the cap being
+        worthless, which they are not -- ESPN keeps scoring them. An exhausted
+        budget now prices at 0, so a 60-point upgrade over a 1-point player is
+        proposed on its merits.
+        """
         case = _Case(
             roster=[player(1, team=1)],
             pool=[player(90, name="Great", team=1)],
             values={1: 1.0, 90: 60.0},
         )
-        plan = case.run(lam=float("inf"))
-        self.assertFalse(plan.proposed)
-        self.assertIn("budget exhausted", " ".join(plan.notes))
+        plan = case.run(lam=budget.shadow_price(
+            [(60.0, 1.0)], budget.GamesBudget(cap=34.0, used=35.0)))
+        self.assertTrue(plan.proposed)
+        self.assertNotIn("budget exhausted", " ".join(plan.notes))
 
 
 class TestChurnFloor(unittest.TestCase):

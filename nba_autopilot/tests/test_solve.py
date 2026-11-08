@@ -415,6 +415,39 @@ class TestBudget(unittest.TestCase):
             shadow_price(cands, GamesBudget(cap=5.0, used=0.0)), 0.0
         )
 
+    def test_shadow_price_is_never_infinite(self):
+        """The invariant three call sites used to branch on.
+
+        ``pipeline`` gave playable players a reduced cost of -1.0 when lambda
+        was infinite, and ``addrop`` refused every acquisition. Those branches
+        are gone, which is only safe while this holds. Swept over empty,
+        slack, exactly-level and blown budgets, with and without fractional
+        costs, plus the uncapped case.
+        """
+        caps = [0.0, 1.0, 11.0, 34.0, 44.0]
+        useds = [0.0, 1.0, 10.9, 34.0, 35.0, 44.0, 95.0]
+        candsets = [
+            [],
+            [(0.0, 0.0)],
+            [(9.0, 1.0)],
+            [(40.8, 1.0), (32.9, 1.0), (30.3, 1.0)],
+            [(40.8, 0.5), (32.9, 0.91), (30.3, 0.0)],
+            [(-5.0, 1.0), (0.0, 1.0)],
+        ]
+        for cap in caps:
+            for used in useds:
+                for cands in candsets:
+                    lam = shadow_price(cands, GamesBudget(cap=cap, used=used))
+                    self.assertFalse(
+                        lam == float("inf"),
+                        "infinite lambda at cap=%s used=%s cands=%r"
+                        % (cap, used, cands),
+                    )
+                    self.assertFalse(
+                        lam != lam, "NaN lambda at cap=%s used=%s" % (cap, used))
+        for cands in candsets:
+            self.assertEqual(shadow_price(cands, None), 0.0)
+
     def test_exhausted_budget_prices_at_zero_not_infinity(self):
         """A spent game cannot be won back by benching someone.
 
