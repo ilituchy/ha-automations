@@ -123,8 +123,34 @@ weekly means a mistake is bounded to one matchup instead of compounding over a
 season. Both boundary cases still fall out of the formula:
 
 * slack budget (``rho >= 1``): ``lambda = 0``. Start everybody.
-* exhausted (``remaining <= 0``): ``+inf``, so every reduced cost is negative
-  and the assignment leaves the lineup empty.
+* exhausted (``remaining <= 0``): ``lambda = 0`` as well -- see below.
+
+Why an exhausted budget prices at zero, not infinity
+----------------------------------------------------
+
+This used to return ``+inf`` once ``remaining <= 0``, which dropped every
+candidate from the assignment and left the lineup filled with players who had
+no game. That is wrong, and it is wrong under *either* reading of what ESPN
+does with a game played past the cap:
+
+* if the over-cap game still scores, benching a playable player throws away
+  his points outright;
+* if ESPN discards it, benching and starting both yield zero, so the two are
+  worth exactly the same.
+
+Starting therefore weakly dominates benching once the cap is already blown --
+strictly better under the first reading, equal under the second -- and there is
+no reading under which ``+inf`` wins. The measured evidence favours the first:
+across both leagues ESPN's official ``totalPoints`` equals the plain sum of
+every starter's score, including the starts past the cap, with a Dynassty week
+of 44 games against a cap of 38 counting in full.
+
+Note what this does *not* claim. Pricing at zero only says the overspend is
+sunk; it says nothing about which games to spend while the budget is still
+live. Rationing still happens on the interpolated-threshold path above, where
+``remaining > 0``. Choosing *which* days to spend a scarce cap on -- acute in
+the two NBA Cup weeks, where the cap falls to 23 and 11 -- is a separate
+problem this module does not attempt.
 """
 
 from __future__ import annotations
@@ -292,21 +318,25 @@ def remaining_budget(
     defaulting to an empty dict -- "no cap" and "a cap of zero" must not be the
     same value anywhere in this codebase.
 
-    Logs loudly if usage has already passed the cap. That is the cheap
-    self-falsifying check on the per-matchup reading: if the cap were in fact
-    season-long, observed usage would sail past the weekly number in week two
-    and keep going, and this is where that shows up.
+    Logs if usage has already passed the cap. This is expected from time to
+    time rather than a contradiction: the cap binds a whole matchup period, and
+    nothing stops ESPN accepting a lineup that crosses it mid-week. It stays at
+    warning level because a *large* or *early* overshoot is still the signal
+    that the per-matchup reading is wrong -- a season-long cap would be sailed
+    past in week two and never come back.
     """
     if cap is None:
         return None
     used = float(games_used_this_matchup)
     if used > cap:
-        log.error(
-            "league %d has played %.1f games this matchup period against a "
-            "cap read as %.1f. Either the cap is not per-matchup-period (see "
-            "the note in solve/budget.py) or games_used is counting the whole "
-            "season. The optimizer will treat the budget as exhausted.",
-            settings.league_id, used, cap,
+        log.warning(
+            "league %s has played %.1f games this matchup period against a "
+            "cap of %.1f, so the cap is already blown. Remaining starts are "
+            "priced at zero rather than refused -- benching a playable player "
+            "cannot win back a game already spent. A large or early overshoot "
+            "would instead mean the cap is being read wrong; see the note in "
+            "solve/budget.py.",
+            getattr(settings, "league_id", "?"), used, cap,
         )
     return GamesBudget(cap=cap, used=used)
 
@@ -331,12 +361,18 @@ def shadow_price(
         budget: from :func:`remaining_budget`. ``None`` means uncapped.
 
     Returns:
-        ``lambda``. ``0.0`` when the budget is slack, ``+inf`` when exhausted.
+        ``lambda``. ``0.0`` when the budget is slack, and ``0.0`` again when it
+        is exhausted -- the overspend is sunk, and starting weakly dominates
+        benching from there. See "Why an exhausted budget prices at zero" in
+        the module docstring for the argument and the measurement behind it.
     """
     if budget is None:
         return 0.0
     if budget.exhausted:
-        return float("inf")
+        # Not +inf. Benching a playable player cannot recover a game already
+        # spent; it only forfeits his points in the branch where ESPN still
+        # counts them.
+        return 0.0
 
     ordered = sorted(candidates, key=lambda vc: vc[0], reverse=True)
     spent = 0.0

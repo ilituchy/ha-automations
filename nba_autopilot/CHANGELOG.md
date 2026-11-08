@@ -8,6 +8,19 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **An exhausted games cap benched players who were playing.** Once usage
+  reached the cap the shadow price went to `+inf`, which dropped every
+  candidate from the assignment and backfilled the starting slots with players
+  who had no game that day -- a guaranteed zero. It is now priced at `0`.
+  Starting weakly dominates benching once the cap is blown: strictly better if
+  ESPN still scores the over-cap game (which measurement supports -- official
+  `totalPoints` equals the plain sum of starters, including a 44-game week
+  against a cap of 38), and exactly equal if ESPN discards it. There is no
+  reading under which `+inf` wins. This was latent until the cap fix below
+  started reporting the real, lower caps; it then fired live in both leagues,
+  benching Walker Kessler, Trey Murphy III and Daniel Gafford for three
+  players who were not playing.
+
 - **The games-played cap varies by week, and was being read as a constant.**
   ESPN's `lineupSlotStatLimits.limitValue` is a rate *per game day*, not a
   weekly total, and ESPN assigns no scoring period to a date with no NBA

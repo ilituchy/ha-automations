@@ -379,15 +379,26 @@ class TestCapFor(unittest.TestCase):
             matchup_cap(settings(lineup_slot_stat_limits=other), game_days=7)
 
     def test_overrun_is_reported_not_silently_clamped(self):
-        """The self-falsifying check on the per-matchup reading."""
+        """An overshoot is surfaced, and the real numbers reach the journal."""
         st = settings(lineup_slot_stat_limits=gp_cap(40.0))
-        with self.assertLogs("solve.budget", level="ERROR") as logs:
+        with self.assertLogs("solve.budget", level="WARNING") as logs:
             budget = remaining_budget(st, 95.0, cap=matchup_cap(st, game_days=7))
         self.assertIn("95.0", "".join(logs.output))
         self.assertTrue(budget.exhausted)
         # Exhausted, but the real numbers survive into the journal rather than
         # being clamped to the cap -- the overrun is the evidence.
         self.assertAlmostEqual(budget.used, 95.0)
+
+    def test_a_blown_cap_does_not_raise(self):
+        """league_id may legitimately be absent on a degraded settings object.
+
+        The log line used ``%d`` here once, which turned a missing id into an
+        AttributeError swallowed far downstream as "could not read the cap".
+        """
+        st = settings(lineup_slot_stat_limits=gp_cap(40.0), league_id=None)
+        with self.assertLogs("solve.budget", level="WARNING"):
+            budget = remaining_budget(st, 95.0, cap=34.0)
+        self.assertTrue(budget.exhausted)
 
 
 class TestBudget(unittest.TestCase):
@@ -404,11 +415,35 @@ class TestBudget(unittest.TestCase):
             shadow_price(cands, GamesBudget(cap=5.0, used=0.0)), 0.0
         )
 
-    def test_exhausted_budget_is_infinite(self):
+    def test_exhausted_budget_prices_at_zero_not_infinity(self):
+        """A spent game cannot be won back by benching someone.
+
+        Pricing an exhausted budget at ``+inf`` dropped every candidate from
+        the assignment, so the lineup filled up with players who had no game
+        and scored a guaranteed zero. Starting weakly dominates: strictly
+        better if ESPN still counts the over-cap game, equal if it discards it.
+        """
         self.assertEqual(
-            shadow_price([(9.0, 1.0)], GamesBudget(cap=5.0, used=5.0)),
-            float("inf"),
+            shadow_price([(9.0, 1.0)], GamesBudget(cap=5.0, used=5.0)), 0.0
         )
+
+    def test_a_blown_cap_also_prices_at_zero(self):
+        """Over the cap, not merely level with it -- the live 35/34 case."""
+        self.assertEqual(
+            shadow_price([(9.0, 1.0)], GamesBudget(cap=34.0, used=35.0)), 0.0
+        )
+
+    def test_an_exhausted_budget_still_starts_the_playable_player(self):
+        """The end-to-end shape of the bug, through the weights.
+
+        With lambda 0 the playable player keeps a positive reduced cost and so
+        stays eligible for his slots. Under the old +inf he was dropped and the
+        slot went to someone who was not playing at all.
+        """
+        lam = shadow_price([(40.8, 1.0)], GamesBudget(cap=34.0, used=35.0))
+        w = reduced_cost_weights({7: 40.8}, {7: [12]}, lam)
+        self.assertIn((7, 12), w)
+        self.assertGreater(w[(7, 12)], 0.0)
 
     def test_fractional_costs_stretch_the_budget(self):
         """Half-likely players consume half a game, so more of them fit.

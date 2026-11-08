@@ -682,6 +682,24 @@ For each one:
 4. Anything else becomes a notification with **Approve** / **Reject** buttons,
    naming the league, and is listed on the status page until it is decided.
 
+### Going over the cap does not stop the lineup
+
+Nothing prevents ESPN accepting a lineup that crosses the cap mid-week, so
+being over it is a normal state, not a contradiction. When it happens the app
+prices further starts at **zero** and keeps fielding the best available
+lineup, rather than refusing to start anyone.
+
+That is deliberate. A game already spent cannot be won back by benching
+someone. If ESPN still counts the over-cap game, benching a playable player
+simply throws his points away; if ESPN discards it, benching and starting are
+worth the same. Starting is therefore never worse and usually better. The
+evidence points at the first case: ESPN's official total for a week matches the
+plain sum of every starter's score, including starts past the cap.
+
+What this does *not* do is choose which days to spend a scarce cap on. That
+rationing happens while the budget is still live, and it will matter most in
+the two NBA Cup weeks, where the cap falls to 23 and 11.
+
 ### The weekly games cap is not a fixed number
 
 ESPN sends the cap as a **rate per game day**, not a weekly total, and it
