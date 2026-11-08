@@ -59,11 +59,22 @@ TEAM_TOTAL_LIMIT_SLOT: SlotId = 15
 #: repeating decimals rather than the round numbers on the settings page.
 #: Multiply by this to recover the per-matchup cap: ``40/7 * 7 = 40``.
 #:
-#: It is a **fixed divisor, not the length of any particular matchup period.**
-#: Matchup periods are Monday-Sunday weeks, so a season that opens on a Tuesday
-#: has a six-day first week -- and its cap is still 40, because the cap is per
-#: matchup period. Reading this constant as "days in this week" and recomputing
-#: from it would shrink the opening week's budget by a seventh.
+#: It is the **encoding divisor only** -- how ESPN writes the rate down -- and
+#: it is *not* the multiplier that recovers a week's cap. ``limitValue`` is a
+#: rate per game day, so the cap is ``round(limitValue * game days in the
+#: matchup period)``; see :func:`solve.budget.matchup_cap`.
+#:
+#: This comment previously asserted the opposite: that the cap "is still 40"
+#: for a six-day opening week. That was wrong, it was never tested against
+#: what ESPN enforces, and it cost two weeks of over-spent budget -- including
+#: the opening week it named as the example. ESPN assigns no scoring period at
+#: all to a date with no NBA games, and the 2026-27 season opened on a Tuesday
+#: (34/38, not 40/44) and had election day dark in matchup period 3 (34/38
+#: again, confirmed by ESPN's own app printing ``39/38 GP``).
+#:
+#: Nothing in the run path multiplies by this any more. It survives because it
+#: is still the right number for *constructing* a ``limitValue`` from a known
+#: full-week cap, which is what the test fixtures do.
 SCORING_PERIODS_PER_MATCHUP: int = 7
 
 #: Timezone to resolve a tipoff instant into the US game date ESPN groups by.

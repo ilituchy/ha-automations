@@ -2206,10 +2206,13 @@ class FakeCalendar:
 
     trustworthy = True
 
-    def __init__(self, size=7, weeks=6, first=date(2026, 10, 20)):
+    def __init__(self, size=7, weeks=6, first=date(2026, 10, 20), dark=()):
         self.size = size
         self.weeks = weeks
         self.first = first
+        #: Scoring periods with no NBA games, which ESPN omits entirely and
+        #: which therefore do not count toward the week's games cap.
+        self.dark = frozenset(dark)
 
     def matchup_period_of(self, period):
         return (int(period) - 1) // self.size + 1
@@ -2219,6 +2222,15 @@ class FakeCalendar:
             return []
         lo = (int(week) - 1) * self.size + 1
         return list(range(lo, lo + self.size))
+
+    def game_periods_in_matchup(self, week):
+        """Every day is a game day here unless a test says otherwise.
+
+        Present because the games cap is derived from this count -- a week
+        containing a dark day has a smaller cap -- so a fake without it makes
+        the page quietly drop its denominator.
+        """
+        return [p for p in self.periods_in_matchup(week) if p not in self.dark]
 
     def matchup_period_bounds(self, week):
         days = self.periods_in_matchup(week)
@@ -2232,6 +2244,8 @@ class FakeSettings:
     def __init__(self, sp, mp):
         self.current_scoring_period = sp
         self.current_matchup_period = mp
+        # Fake, and this repo is public.
+        self.league_id = 111111111
         self.lineup_slot_counts = dict(SLOTS)
         self.lineup_slot_stat_limits = None
 

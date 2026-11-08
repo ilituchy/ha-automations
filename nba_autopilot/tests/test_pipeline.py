@@ -462,6 +462,10 @@ class TestPlanLineup(unittest.TestCase):
 
         The three benched players must be the three worst, and nobody may be
         left unassigned -- the whole reason the weights are shifted positive.
+
+        Matchup period 2 on purpose: the 2026-27 season opened on a Tuesday,
+        so period 1 of this fixture is a six-day week whose cap is 34 rather
+        than 40. Getting that wrong is the bug this file now also tests for.
         """
         roster = [player(i) for i in range(13)]
         projections = {i: projection(i, 30.0 - i) for i in range(13)}
@@ -472,12 +476,50 @@ class TestPlanLineup(unittest.TestCase):
         plan = self.plan(
             roster, projections,
             sett=settings(lineup_slot_stat_limits=gp_cap(40)),
-            sched={1: {1: 1}}, used=used, cal=cal,
+            sched={1: {7: 1}}, used=used, cal=cal, period=7, matchup=2,
         )
         self.assertTrue(plan.feasible, plan.notes)
+        self.assertAlmostEqual(plan.cap, 40.0)
         self.assertGreater(plan.lam, 0.0)
         benched = {p for p, s in plan.target.items() if s == ids.BENCH_SLOT}
         self.assertEqual(benched, {10, 11, 12})
+
+    def test_the_cap_shrinks_in_a_week_with_a_dark_day(self):
+        """The live defect: `limitValue` is a rate per game day, not a total.
+
+        Matchup period 3 of 2026-27 ran 2026-11-02..08 and contained election
+        day, which has no NBA games and to which ESPN assigns no scoring
+        period. ESPN enforced 38 on the 11-starter league and 34 on the
+        10-starter one while this module priced 44 and 40.
+        """
+        roster = [player(i) for i in range(13)]
+        projections = {i: projection(i, 30.0 - i) for i in range(13)}
+        # Period 15 is 2026-11-03 on this grid -- the dark day itself.
+        cal = calendar_like_2027(skip=(15,))
+        used = usage_mod.GamesUsed(
+            games=0.0, source=usage_mod.SOURCE_BOTH, trustworthy=True
+        )
+        plan = self.plan(
+            roster, projections,
+            sett=settings(lineup_slot_stat_limits=gp_cap(40)),
+            sched={1: {14: 1}}, used=used, cal=cal, period=14, matchup=3,
+        )
+        self.assertAlmostEqual(plan.cap, 34.0)
+
+    def test_a_week_with_no_dark_day_keeps_the_full_cap(self):
+        """The control: the shrink must come from the dark day, not the fix."""
+        roster = [player(i) for i in range(13)]
+        projections = {i: projection(i, 30.0 - i) for i in range(13)}
+        used = usage_mod.GamesUsed(
+            games=0.0, source=usage_mod.SOURCE_BOTH, trustworthy=True
+        )
+        plan = self.plan(
+            roster, projections,
+            sett=settings(lineup_slot_stat_limits=gp_cap(40)),
+            sched={1: {14: 1}}, used=used, cal=calendar_like_2027(),
+            period=14, matchup=3,
+        )
+        self.assertAlmostEqual(plan.cap, 40.0)
 
     def test_uncapped_league_prices_nothing(self):
         roster = [player(i) for i in range(13)]

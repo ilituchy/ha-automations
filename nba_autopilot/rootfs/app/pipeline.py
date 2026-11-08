@@ -192,13 +192,21 @@ def plan_lineup(
 
     lam = 0.0
     utilization = float("inf")
-    cap = budget_mod.matchup_cap(settings)
+    # Derived from this matchup period's game days, every run. A week with a
+    # dark day has a smaller cap -- 2026-11-02..08 contained election day and
+    # ESPN enforced 38 where a fixed seven-day reading says 44.
+    cap = budget_mod.cap_for(settings, calendar, matchup_period)
     used: Optional[float] = None
     gb = None
     startable_left = 0
 
-    if cap is None:
+    if cap is None and (calendar is not None and calendar.trustworthy):
         notes.append("league has no games-played cap")
+    elif cap is None:
+        notes.append(
+            "games-played cap NOT priced: no trustworthy season calendar, so "
+            "neither the cap nor the remaining-games horizon can be derived"
+        )
     elif calendar is None or not calendar.trustworthy:
         notes.append(
             "games-played cap NOT priced: no trustworthy season calendar, so "
@@ -211,7 +219,7 @@ def plan_lineup(
         )
     else:
         used = games_used.games
-        gb = budget_mod.remaining_budget(settings, used)
+        gb = budget_mod.remaining_budget(settings, used, cap=cap)
         horizon = calendar.remaining_periods(matchup_period, scoring_period)
         candidates = _cap_candidates(
             roster, values, projections, horizon, schedule,

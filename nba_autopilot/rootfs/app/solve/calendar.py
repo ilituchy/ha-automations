@@ -46,12 +46,15 @@ log = logging.getLogger(__name__)
 #: (0 == Monday). Probed, not assumed -- see the module docstring.
 MATCHUP_START_WEEKDAY: int = 0
 
-#: Days in a matchup period. Distinct from
-#: :data:`espn.ids.SCORING_PERIODS_PER_MATCHUP`, which happens to be the same
-#: number but means something else entirely: that one is the fixed divisor ESPN
-#: applies to the cap, and it stays 7 even for a six-day opening week. This one
-#: is the stride of the week grid. They are kept separate so that if ESPN ever
-#: changes either, changing one does not silently move the other.
+#: Days in a matchup period -- the stride of the week grid, and nothing else.
+#:
+#: Distinct from :data:`espn.ids.SCORING_PERIODS_PER_MATCHUP`, which happens to
+#: be the same number and means something else: that one is how ESPN encodes a
+#: per-game-day rate. Neither is the size of a week's budget. The budget comes
+#: from :meth:`SeasonCalendar.game_periods_in_matchup`, which is this stride
+#: minus the days ESPN gave no scoring period to because the NBA had no games.
+#: They are kept separate so that if ESPN ever changes either, changing one
+#: does not silently move the other.
 DAYS_PER_MATCHUP: int = 7
 
 

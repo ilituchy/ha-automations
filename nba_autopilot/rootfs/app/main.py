@@ -1893,7 +1893,7 @@ class Autopilot:
             return
         try:
             try:
-                cap = budget_mod.matchup_cap(settings)
+                cap = budget_mod.cap_for(settings, work.cal, work.matchup_period)
             except Exception:  # noqa: BLE001
                 # A per-slot cap, which budget.py refuses to model. The score
                 # is still worth showing; it just loses its denominator.

@@ -682,6 +682,38 @@ For each one:
 4. Anything else becomes a notification with **Approve** / **Reject** buttons,
    naming the league, and is listed on the status page until it is decided.
 
+### The weekly games cap is not a fixed number
+
+ESPN sends the cap as a **rate per game day**, not a weekly total, and it
+assigns no scoring period at all to a date with no NBA games. So the real cap
+for a matchup period is:
+
+```
+cap = round(limitValue x game days in that matchup period)
+```
+
+The app reads this fresh from ESPN every run. It is *not* a constant, and
+assuming it was cost real points: matchup period 3 of 2026-27 (Nov 2-8)
+contained election day, so the cap was **38**, not 44 — while the app planned
+against 44 and the team finished the week at 39/38, over the limit.
+
+Across the first eight matchup periods of 2026-27:
+
+| weeks | game days | 10-starter cap | 11-starter cap |
+|---|---|---|---|
+| Oct 26 - Nov 1, Nov 9 - 22 | 7 | 40 | 44 |
+| Oct 20 - 25, Nov 2 - 8, Nov 23 - 29 | 6 | 34 | 38 |
+| Nov 30 - Dec 6 | 4 | 23 | 25 |
+| Dec 7 - 13 | 2 | 11 | 13 |
+
+Those last two are the **NBA Cup knockout stage**, which ESPN excludes from
+fantasy scoring — no scoring period for Dec 4, 5, 8 or 11, with the grid
+resuming on the 12th. During those weeks your budget genuinely collapses, and
+a planner that believed 44 would spend most of it on games that do not count.
+
+The status page and the scoreboard panel both print this week's real cap, so
+`30 left` means 30 against *this* week's number.
+
 ### Tip-off lineup sweeps
 
 The 09:00 run cannot see news that breaks after it, and the earliest tip-off is

@@ -724,7 +724,10 @@ class StatusPage:
         # the two screens cannot disagree about how many games a week allows.
         try:
             from solve import budget as budget_mod
-            cap = budget_mod.matchup_cap(settings)
+            # Per-week, because a week containing a dark day has a smaller cap
+            # than a full one. `want_week` rather than today's week, so looking
+            # back at an earlier week shows the cap that week was played under.
+            cap = budget_mod.cap_for(settings, self._calendar(), want_week)
         except Exception as exc:  # noqa: BLE001
             log.warning("could not read the games cap: %s", exc)
             cap = None

@@ -40,6 +40,7 @@ from solve import projections  # noqa: E402
 from solve.budget import (  # noqa: E402
     GamesBudget,
     PooledCapUnsupported,
+    cap_for,
     matchup_cap,
     reduced_cost_weights,
     remaining_budget,
@@ -249,19 +250,114 @@ def gp_cap(per_matchup):
     }
 
 
+class _Cal:
+    """Just enough SeasonCalendar for `cap_for`."""
+
+    def __init__(self, game_days, *, trustworthy=True, raises=False):
+        self.trustworthy = trustworthy
+        self._n = game_days
+        self._raises = raises
+
+    def game_periods_in_matchup(self, mp):
+        if self._raises:
+            raise RuntimeError("calendar is confused")
+        return list(range(self._n))
+
+
 class TestMatchupCap(unittest.TestCase):
     def test_no_cap_is_not_a_zero_cap(self):
-        self.assertIsNone(matchup_cap(settings()))
-        self.assertIsNone(matchup_cap(settings(lineup_slot_stat_limits={})))
-        self.assertIsNone(remaining_budget(settings(), 0.0))
+        self.assertIsNone(matchup_cap(settings(), game_days=7))
+        self.assertIsNone(
+            matchup_cap(settings(lineup_slot_stat_limits={}), game_days=7))
+        self.assertIsNone(remaining_budget(settings(), 0.0, cap=None))
         self.assertEqual(shadow_price([(10.0, 1.0)], None), 0.0)
 
-    def test_the_wire_fraction_becomes_a_round_cap(self):
-        """40/7 per scoring period is 40 per matchup period, not 5.71."""
+    def test_a_full_week_is_the_round_number(self):
+        """40/7 per game day over seven game days is 40, not 5.71."""
         both_observed = {10: 40.0, 11: 44.0}
         for starters, expected in both_observed.items():
-            cap = matchup_cap(settings(lineup_slot_stat_limits=gp_cap(expected)))
+            cap = matchup_cap(settings(lineup_slot_stat_limits=gp_cap(expected)),
+                              game_days=7)
             self.assertAlmostEqual(cap, expected, msg="%d starters" % starters)
+
+    def test_a_dark_day_shrinks_the_cap(self):
+        """The bug this replaced: `limitValue` is a rate, not a weekly total.
+
+        Matchup period 3 of 2026-27 ran 2026-11-02..08 and contained election
+        day, which has no NBA games and which ESPN gives no scoring period.
+        ESPN enforced 38 on the 11-starter league while this module priced 44;
+        its own app printed `39/38 GP`.
+        """
+        self.assertAlmostEqual(
+            matchup_cap(settings(lineup_slot_stat_limits=gp_cap(44.0)),
+                        game_days=6), 38.0)
+        self.assertAlmostEqual(
+            matchup_cap(settings(lineup_slot_stat_limits=gp_cap(40.0)),
+                        game_days=6), 34.0)
+
+    def test_every_observed_week_is_reproduced(self):
+        """All six live brackets, from `limitExceeded` across both leagues.
+
+        `(full-week cap, game days) -> enforced cap`, where the enforced value
+        is bracketed by the highest unflagged and lowest flagged team total.
+        No other rounding fits all six: ceil breaks the 10-starter rows and
+        floor breaks the 11-starter ones.
+        """
+        observed = {
+            (40.0, 6): 34.0,   # Chairman's mp1 and mp3
+            (40.0, 7): 40.0,   # Chairman's mp2
+            (44.0, 6): 38.0,   # Dynassty mp1 and mp3, confirmed in ESPN's app
+            (44.0, 7): 44.0,   # Dynassty mp2
+        }
+        for (full, days), want in observed.items():
+            got = matchup_cap(settings(lineup_slot_stat_limits=gp_cap(full)),
+                              game_days=days)
+            self.assertAlmostEqual(got, want, msg="%.0f over %d days" % (full, days))
+
+    def test_rounding_is_to_nearest_not_truncating(self):
+        """44/7*6 is 37.71 and ESPN says 38; 40/7*6 is 34.29 and it says 34."""
+        self.assertAlmostEqual(
+            matchup_cap(settings(lineup_slot_stat_limits=gp_cap(44.0)),
+                        game_days=6), 38.0)
+        self.assertNotAlmostEqual(
+            matchup_cap(settings(lineup_slot_stat_limits=gp_cap(44.0)),
+                        game_days=6), 37.0)
+
+    def test_a_week_with_no_game_days_is_uncapped_not_zero_capped(self):
+        """A zero cap reads as exhausted and would bench the whole roster."""
+        with self.assertLogs("solve.budget", level="WARNING"):
+            self.assertIsNone(
+                matchup_cap(settings(lineup_slot_stat_limits=gp_cap(44.0)),
+                            game_days=0))
+
+    def test_game_days_has_no_default(self):
+        """A default of seven is the original bug wearing a keyword."""
+        with self.assertRaises(TypeError):
+            matchup_cap(settings(lineup_slot_stat_limits=gp_cap(44.0)))
+
+
+class TestCapFor(unittest.TestCase):
+    def test_it_counts_game_days_off_the_calendar(self):
+        st = settings(lineup_slot_stat_limits=gp_cap(44.0))
+        self.assertAlmostEqual(cap_for(st, _Cal(6), 3), 38.0)
+        self.assertAlmostEqual(cap_for(st, _Cal(7), 2), 44.0)
+
+    def test_no_calendar_means_do_not_price_the_cap(self):
+        st = settings(lineup_slot_stat_limits=gp_cap(44.0))
+        self.assertIsNone(cap_for(st, None, 3))
+
+    def test_an_untrustworthy_calendar_means_do_not_price_the_cap(self):
+        """Wrong in an unknown direction is worse than absent."""
+        st = settings(lineup_slot_stat_limits=gp_cap(44.0))
+        self.assertIsNone(cap_for(st, _Cal(6, trustworthy=False), 3))
+
+    def test_a_calendar_that_raises_does_not_take_the_run_down(self):
+        st = settings(lineup_slot_stat_limits=gp_cap(44.0))
+        with self.assertLogs("solve.budget", level="WARNING"):
+            self.assertIsNone(cap_for(st, _Cal(6, raises=True), 3))
+
+    def test_an_uncapped_league_stays_uncapped(self):
+        self.assertIsNone(cap_for(settings(), _Cal(6), 3))
 
     def test_a_per_slot_cap_is_refused_not_guessed(self):
         """An unobserved shape must fail loudly; see PooledCapUnsupported."""
@@ -269,7 +365,7 @@ class TestMatchupCap(unittest.TestCase):
             0: StatLimit(slot_id=0, stat_id=ids.GP_STAT, limit_value=4.0)
         }
         with self.assertRaises(PooledCapUnsupported):
-            matchup_cap(settings(lineup_slot_stat_limits=per_slot))
+            matchup_cap(settings(lineup_slot_stat_limits=per_slot), game_days=7)
 
     def test_a_cap_on_another_stat_is_refused(self):
         other = {
@@ -280,13 +376,13 @@ class TestMatchupCap(unittest.TestCase):
             )
         }
         with self.assertRaises(PooledCapUnsupported):
-            matchup_cap(settings(lineup_slot_stat_limits=other))
+            matchup_cap(settings(lineup_slot_stat_limits=other), game_days=7)
 
     def test_overrun_is_reported_not_silently_clamped(self):
         """The self-falsifying check on the per-matchup reading."""
         st = settings(lineup_slot_stat_limits=gp_cap(40.0))
         with self.assertLogs("solve.budget", level="ERROR") as logs:
-            budget = remaining_budget(st, 95.0)
+            budget = remaining_budget(st, 95.0, cap=matchup_cap(st, game_days=7))
         self.assertIn("95.0", "".join(logs.output))
         self.assertTrue(budget.exhausted)
         # Exhausted, but the real numbers survive into the journal rather than

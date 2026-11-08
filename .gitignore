@@ -114,3 +114,12 @@ secrets.yaml
 tmp/
 scratch/
 *.log
+
+# ---------------------------------------------------------------------------
+# Local-only house context (NEVER commit: this repo is public)
+# ---------------------------------------------------------------------------
+# LAN addresses, MAC addresses and the WiFi SSID. An SSID/BSSID pair is indexed
+# by public WiFi-geolocation databases, so publishing these is equivalent to
+# publishing a home address. Same reasoning as the ~/.ha_url note in
+# tools/hactl.py.
+house/

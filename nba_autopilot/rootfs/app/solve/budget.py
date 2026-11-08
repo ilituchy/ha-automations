@@ -17,11 +17,52 @@ single entry, keyed at slot 15 -- a slot that appears nowhere in their
 ``lineupSlotCounts`` -- and both send it divided by seven, along
 ``matchupLimitPerScoringPeriod: true``:
 
-    10 starting slots -> limitValue 40/7   ->  40 games per matchup period
-    11 starting slots -> limitValue 44/7   ->  44 games per matchup period
+    10 starting slots -> limitValue 40/7
+    11 starting slots -> limitValue 44/7
 
 So it is one **pooled, team-wide, per-matchup-period** budget that renews each
-week. The scaling with starter count is what rules out the per-slot reading: a
+week.
+
+``limitValue`` is a **rate per game day, not a weekly total.** This module read
+it as ``limitValue * 7`` until 2026-11-08, on the written assumption that "the
+cap is per matchup period, so it stays 40 even for a six-day opening week".
+That assumption was never tested and it is false. ESPN assigns no scoring
+period to a date with no NBA games, and the cap is the rate times the game days
+the period actually contains, rounded:
+
+    cap = round(limitValue * game days in the matchup period)
+
+Checked against ``cumulativeScore.statBySlot["15"].limitExceeded`` for every
+team in both leagues across the first three matchup periods -- six brackets,
+six agreements, and no other formula fits all six:
+
+    ===  =========  ==========  ==============  =============  ============
+    mp   game days  prediction  highest unflag  lowest flagged  league
+    ===  =========  ==========  ==============  =============  ============
+    1    6          34          33              34             Chairman's
+    2    7          40          38              40             Chairman's
+    3    6          34          33              35             Chairman's
+    1    6          38          37              38             Dynassty
+    2    7          44          38              44             Dynassty
+    3    6          38          36              39             Dynassty
+    ===  =========  ==========  ==============  =============  ============
+
+and confirmed independently by ESPN's own app, which printed ``39/38 GP`` for
+the Dynassty team in matchup period 3 while this module was pricing 44.
+
+A week's game-day count is not a rounding detail. Over 2026-27's first eight
+matchup periods it runs 6, 7, 6, 7, 7, 6, **4**, **2** -- the last two being
+the NBA Cup knockout stage, which ESPN excludes from fantasy entirely (no
+scoring period for 2026-12-04, 05, 08 or 11, with the grid resuming on the
+12th). Those weeks cap the 11-starter league at 25 and 13 rather than 44, and
+a planner that believes 44 will sail past the real limit and have the overrun
+discarded.
+
+Two whole weeks were therefore planned against a budget six games too large,
+including the opening week, which is the exact case the old comment cited as
+proof it did not matter. The flag trips when the counter *reaches* the cap --
+at that point no further start is allowed -- which is why a prediction sits
+above every unflagged value and at or below every flagged one. The scaling with starter count is what rules out the per-slot reading: a
 cap attached to one slot would not track another league's roster shape.
 
 That is a strictly simpler problem than the per-slot season one, and a more
@@ -90,7 +131,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from espn import ids
 from models import LeagueSettings, StatLimit
@@ -104,6 +145,7 @@ __all__ = [
     "GamesBudget",
     "PooledCapUnsupported",
     "matchup_cap",
+    "cap_for",
     "remaining_budget",
     "shadow_price",
     "utilization_ratio",
@@ -143,11 +185,20 @@ class GamesBudget:
         return self.remaining <= 0.0
 
 
-def matchup_cap(settings: LeagueSettings) -> Optional[float]:
-    """Per-matchup-period games-played cap, or ``None`` if uncapped.
+def matchup_cap(
+    settings: LeagueSettings, *, game_days: int
+) -> Optional[float]:
+    """Games-played cap for a matchup period, or ``None`` if uncapped.
 
-    Recovers the round number from ESPN's per-scoring-period fraction by
-    multiplying by :data:`espn.ids.SCORING_PERIODS_PER_MATCHUP`.
+    ``game_days`` is how many scoring periods that matchup period actually
+    contains -- ``len(SeasonCalendar.game_periods_in_matchup(mp))``. It is a
+    **required** argument rather than one defaulting to seven, because a
+    default here is how this was wrong for three weeks: a caller that forgot
+    to pass it would silently get a full-week cap in a short week, which is
+    the original bug wearing a keyword.
+
+    Most callers want :func:`cap_for`, which derives ``game_days`` from a
+    calendar and handles the cases where it cannot be known.
 
     Raises:
         PooledCapUnsupported: if the limits are keyed at real lineup slots
@@ -177,14 +228,63 @@ def matchup_cap(settings: LeagueSettings) -> Optional[float]:
             "knows how to price a games-played budget"
             % (settings.league_id, limit.stat_id, ids.stat_name(limit.stat_id))
         )
-    return limit.limit_value * ids.SCORING_PERIODS_PER_MATCHUP
+    days = int(game_days)
+    if days <= 0:
+        # No game days means no cap to price rather than a cap of zero, which
+        # would read as "exhausted" and bench everybody.
+        # getattr: this is a log line on a degraded path, and an incomplete
+        # settings object must not turn "no cap" into a raised exception that
+        # a caller's except-clause then reports as something else entirely.
+        log.warning("league %s: matchup period has no game days; "
+                    "treating the cap as unknown",
+                    getattr(settings, "league_id", "?"))
+        return None
+    # Rounded, not truncated: 6.285714 * 6 is 37.71 and ESPN enforces 38,
+    # while 5.714286 * 6 is 34.29 and ESPN enforces 34. Only round-to-nearest
+    # fits both, and flooring would under-spend every short week by a game.
+    return float(round(limit.limit_value * days))
+
+
+def cap_for(
+    settings: LeagueSettings,
+    calendar: Optional[Any],
+    matchup_period: int,
+) -> Optional[float]:
+    """The cap for one matchup period, from the live calendar.
+
+    ``None`` -- meaning "do not price the cap" -- when the league is uncapped,
+    when there is no calendar, or when the calendar is not trustworthy. That
+    last case already disables cap pricing everywhere else; a cap derived from
+    a calendar we do not believe would be worse than no cap, because it is
+    wrong in an unknown direction rather than merely absent.
+
+    ESPN republishes the period grid as the season firms up -- on 2026-11-08 it
+    had assigned no scoring period to 2026-12-04 or 2026-12-05 even though both
+    have games -- so this is read fresh every run rather than cached.
+    """
+    if calendar is None or not getattr(calendar, "trustworthy", False):
+        return None
+    try:
+        days = len(calendar.game_periods_in_matchup(int(matchup_period)))
+    except Exception:  # noqa: BLE001
+        log.warning("league %s: could not count game days in matchup period %s",
+                    getattr(settings, "league_id", "?"), matchup_period)
+        return None
+    return matchup_cap(settings, game_days=days)
 
 
 def remaining_budget(
     settings: LeagueSettings,
     games_used_this_matchup: float,
+    *,
+    cap: Optional[float],
 ) -> Optional[GamesBudget]:
     """The budget, or ``None`` when the league has no cap.
+
+    ``cap`` comes from :func:`cap_for`. Passed in rather than recomputed here
+    so there is exactly one place that knows how a cap is derived, and so this
+    function cannot be called without the caller having decided what week it
+    is talking about.
 
     ``None`` propagates: no cap means :func:`shadow_price` returns zero and the
     optimizer reduces to plain daily maximization. This is why
@@ -197,7 +297,6 @@ def remaining_budget(
     season-long, observed usage would sail past the weekly number in week two
     and keep going, and this is where that shows up.
     """
-    cap = matchup_cap(settings)
     if cap is None:
         return None
     used = float(games_used_this_matchup)

@@ -6,6 +6,38 @@ All notable changes to this app are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **The games-played cap varies by week, and was being read as a constant.**
+  ESPN's `lineupSlotStatLimits.limitValue` is a rate *per game day*, not a
+  weekly total, and ESPN assigns no scoring period to a date with no NBA
+  games. The cap is `round(limitValue * game days in the matchup period)`.
+  `solve/budget.py` multiplied by a fixed seven instead, on a written
+  assumption that the cap "is still 40 even for a six-day opening week" —
+  which was never tested against what ESPN enforces, and is false.
+
+  Matchup period 3 (2026-11-02..08) contained election day. The real cap was
+  **38** for the 11-starter league; the app priced **44**, and the team
+  finished the week at **39/38 GP**, over the limit, with ESPN's own app
+  showing it. The opening week was the same mistake: six game days, cap 34/38,
+  priced 40/44.
+
+  Verified against `cumulativeScore.statBySlot["15"].limitExceeded` for every
+  team in both leagues across all three completed matchup periods — six
+  brackets of (highest unflagged, lowest flagged), six agreements. No other
+  rounding fits all six: ceiling breaks the 10-starter rows, flooring breaks
+  the 11-starter ones.
+
+  This is not a small correction going forward. The first eight matchup
+  periods of 2026-27 have 6, 7, 6, 7, 7, 6, **4** and **2** game days — the
+  last two being the NBA Cup knockout stage, which ESPN excludes from fantasy
+  entirely. Those weeks cap the 11-starter league at 25 and 13.
+
+  `matchup_cap` now takes a required `game_days` keyword with no default, and
+  `cap_for(settings, calendar, matchup_period)` derives it from the live
+  calendar. `remaining_budget` takes the cap rather than recomputing it, so
+  exactly one place knows how a cap is derived.
+
 ### Added
 
 - **Tip-off lineup sweeps.** The 09:00 run is blind to everything that happens
