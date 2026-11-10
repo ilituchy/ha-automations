@@ -700,6 +700,40 @@ Do not "fix" this by re-reading the roster after a write and comparing: ESPN's
 read API lagged a confirmed write by more than a minute in testing, so that
 check reports failures that did not happen.
 
+### ESPN can refuse a lineup for a slot that is not full
+
+On 10 November ESPN refused the morning lineup in one league three times with
+`Too many players in the SG slot (maximum 1)`. Exactly one player was going
+into SG, and SG was empty beforehand -- both on ESPN's own reading of the
+roster. Probing the live API afterwards ruled out every candidate
+explanation: item order does not matter (a fill posted before its vacate is
+accepted), a two-way swap inside one transaction is accepted, bringing a
+player off IR into a slot whose occupant leaves in the same transaction is
+accepted, a refused IR move reports itself as an IR error rather than a slot
+limit, and a write aimed at a period ESPN is not currently on is refused with
+a different message entirely.
+
+So the app no longer tries to predict ESPN's counting. When a lineup write
+comes back with a slot-limit refusal, it re-sends the **same target** as a
+short series of transactions ordered so that every move goes into a slot that
+is *already empty*. A slot that is empty before a transaction cannot be
+over-full after one move into it, whatever ESPN counts and in whatever order.
+A rotation -- A wants B's slot and B wants A's, with nowhere to stage through
+-- has no safe serialization, so it is sent whole; ESPN accepts those.
+
+The cost is several requests instead of one, and a part-applied lineup if a
+later step is refused too, which is reported loudly and named move by move.
+Both are better than the old behaviour, which was to abandon the whole day's
+optimization and leave yesterday's lineup standing.
+
+Two related things changed with it. Every lineup write now logs its items,
+by name and slot, *before* it is sent -- a refused transaction leaves no
+record on ESPN's side at all, so without that line the only evidence of a
+failure is the slot ESPN objected to. And the roster read now names the
+scoring period the app is about to write to, instead of letting ESPN pick:
+ESPN's read and write sides do not change period at the same moment, and
+during that window an unqualified read describes yesterday's lineup.
+
 ### Going over the cap does not stop the lineup
 
 Nothing prevents ESPN accepting a lineup that crosses the cap mid-week, so

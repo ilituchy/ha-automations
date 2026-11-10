@@ -1694,9 +1694,26 @@ class Autopilot:
         sources_used: Dict[str, str] = {"espn": "ok"}
         sources_missing: Dict[str, str] = {}
 
-        roster = lg.read.roster()
-        log.info("roster: %d players, %d locked", len(roster),
-                 sum(1 for p in roster if p.lineup_locked))
+        # Named explicitly, and named as the period we are about to *write*.
+        # ESPN's read and write sides do not roll over to a new scoring period
+        # at the same moment: on 2026-11-10 at 09:00 the settings read still
+        # said period 21 while the write endpoint had already moved to 22 (a
+        # ROSTER transaction aimed at a non-current period is refused outright
+        # with "Transaction type can only be executed in the current scoring
+        # period", and ours was not). An unqualified read during that window
+        # returns the *previous* period's lineup, so every
+        # ``fromLineupSlotId`` we then send describes yesterday -- including,
+        # that morning, a player ESPN had already moved to IR on the queued
+        # FUTURE_TO_IR from the day before. Ask for the period we mean.
+        roster = lg.read.roster(
+            scoring_period=settings.current_scoring_period)
+        # The period is on this line because the read is now qualified by it,
+        # and because a run that read the wrong period's roster is exactly the
+        # failure this is here to make visible. It doubles as the deploy
+        # canary: see docs/DEPLOY.md.
+        log.info("roster: %d players, %d locked (scoring period %d)",
+                 len(roster), sum(1 for p in roster if p.lineup_locked),
+                 settings.current_scoring_period)
 
         work = self.plan_from_roster(lg, settings, roster)
         notes.extend(work.notes)
@@ -2099,7 +2116,9 @@ class Autopilot:
 
         try:
             settings, _ = self.settings_now(lg)
-            roster = lg.read.roster()
+            # See the note in the morning run: the period is named on purpose.
+            roster = lg.read.roster(
+                scoring_period=settings.current_scoring_period)
             work = self.plan_from_roster(lg, settings, roster)
         except Exception as exc:  # noqa: BLE001 - the swap already succeeded
             log.exception("could not re-read %s after %s", lg.name, swap)
@@ -2468,7 +2487,9 @@ class Autopilot:
     def sweep_league(self, lg: "League") -> bool:
         """Re-plan one league's lineup. Returns whether anything moved."""
         settings, _note = self.settings_now(lg)
-        roster = lg.read.roster()
+        # See the note in the morning run: the period is named on purpose.
+        roster = lg.read.roster(
+            scoring_period=settings.current_scoring_period)
         work = self.plan_from_roster(lg, settings, roster)
         plan = work.plan
         if plan is None:

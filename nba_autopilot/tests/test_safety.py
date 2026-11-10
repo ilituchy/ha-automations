@@ -60,7 +60,7 @@ class FakeRead:
         #: mode itself is tested explicitly in TestAcquisitionMode.
         self._pool = dict(pool or {})
 
-    def roster(self, team_id=None):
+    def roster(self, team_id=None, scoring_period=None):
         return list(self._roster)
 
     def player_in_pool(self, player_id):

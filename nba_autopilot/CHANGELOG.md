@@ -8,6 +8,36 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **A slot-limit refusal no longer costs the day's lineup.** On 2026-11-10
+  ESPN refused the morning write in Chairman's three times with `Too many
+  players in the SG slot (maximum 1)` -- for a target holding exactly one
+  player in SG, against a roster whose SG was empty. Probing the live API
+  afterwards eliminated every candidate cause: item order is irrelevant, an
+  in-transaction swap is accepted, an off-IR move into a slot vacated in the
+  same transaction is accepted, a refused IR move reports itself as an IR
+  error, and a write to a non-current scoring period is refused with its own
+  distinct message. Rather than guess, `set_lineup` now responds to a
+  slot-limit refusal by re-sending the same target as a short series of
+  transactions ordered so each move lands in a slot that is *already* empty
+  -- which cannot overflow under any counting rule or item order. A rotation
+  with nowhere to stage through has no safe serialization and is sent whole,
+  which ESPN accepts. A step that fails too raises with the moves that landed
+  and the ones that did not, named.
+
+- **A lineup write now logs its items before sending them.** A refused
+  transaction leaves nothing behind on ESPN's side -- no row, no echoed
+  items -- so the only evidence of the 2026-11-10 failures was the slot ESPN
+  named. Every write now logs each move by player name and slot first.
+
+- **The roster read names the period the write will use.** ESPN's read and
+  write sides do not roll over to a new scoring period together: at 09:00 on
+  2026-11-10 the settings read still said period 21 while the write endpoint
+  had already moved to 22. An unqualified roster read during that window
+  returns the *previous* period's lineup, so every `fromLineupSlotId` sent
+  describes yesterday -- that morning including a player ESPN had already
+  moved to IR overnight on a queued `FUTURE_TO_IR`. The three reads that feed
+  a lineup write now pass the corrected period explicitly.
+
 - **One ineligible IR move took a whole league's lineup write with it.** The
   roster entry's `injuryStatus` is a different field from the player's: the
   player's carries the medical status, the entry's carries the transaction

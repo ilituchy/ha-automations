@@ -246,7 +246,7 @@ class _Read:
         self._maybe_fail("league_settings")
         return self.fresh_settings if self.fresh_settings is not None else settings()
 
-    def roster(self):
+    def roster(self, team_id=None, scoring_period=None):
         self._maybe_fail("roster")
         return list(self.fresh_roster)
 
@@ -610,7 +610,7 @@ class TestTheRosterAddDropSeesIsThePostWriteOne(unittest.TestCase):
     "roster is full (13/13 active spots) and no drop was paired with this add".
     """
 
-    def roster(self):
+    def roster(self, team_id=None, scoring_period=None):
         # Two starting slots and a bench, with the third man parked on IR: two
         # of three active spots used, so there is room for a free pickup.
         return [player(1), player(2, name="Weak"),
@@ -1413,7 +1413,7 @@ class TestGamesStartingToday(unittest.TestCase):
             games_used=None, notes=(), sources_used={}, sources_missing={},
         )
 
-    def roster(self):
+    def roster(self, team_id=None, scoring_period=None):
         # Players 1 and 2 are on pro team 1, which plays on period 4; player 3
         # is on team 2, which does not.
         return [player(1), player(2), player(3, team=2)]

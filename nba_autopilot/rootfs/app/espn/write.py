@@ -69,6 +69,119 @@ class WriteResult:
     messages: Sequence[str] = field(default_factory=tuple)
 
 
+SLOT_LIMIT_MARKERS = ("TRAN_ROSTER_SLOT_LIMIT_EXCEEDED", "Too many players in the")
+
+
+def _is_slot_limit_rejection(exc: Exception) -> bool:
+    """Did ESPN refuse this because a slot came out over capacity?
+
+    Matched on the message because that is all ESPN gives us: the status is a
+    bare 409 shared with every other refusal, and ``details[].type`` only
+    reaches us inside the formatted string. Both the machine-readable type and
+    the English are checked, so a change to either still trips it.
+    """
+    text = str(exc)
+    return any(m in text for m in SLOT_LIMIT_MARKERS)
+
+
+def plan_lineup_steps(
+    current: Mapping[PlayerId, SlotId],
+    target: Mapping[PlayerId, SlotId],
+    capacity: Mapping[SlotId, int],
+) -> List[List[PlayerId]]:
+    """Split a lineup change into transactions that cannot over-fill a slot.
+
+    Returns a list of batches of player ids, to be written in order. The
+    guarantee each batch carries is narrow and deliberately strong:
+
+        **every player in a batch moves into a slot that already has room,
+        counting only the roster as it stands before that batch.**
+
+    No batch relies on another member of the same batch vacating the slot
+    first. That is what makes a batch safe under any order ESPN chooses to
+    evaluate its items in, and it is the whole point -- see
+    ``_set_lineup_stepwise`` for why we stopped trying to predict the rule.
+
+    Cycles are the one case where no such batch exists: A wants B's slot and B
+    wants A's, with nowhere slack to stage through. Those are emitted whole, as
+    one transaction, because a rotation has no safe serialization and ESPN does
+    accept the straight swap -- verified live on 2026-11-10.
+
+    ``capacity`` is ESPN's ``lineupSlotCounts``. A slot missing from it is
+    treated as unbounded, which is the right reading for a bench ESPN reports
+    as unlimited; a slot present is held to its count, which is conservative
+    when ESPN would in fact allow more.
+    """
+    state = {int(pid): int(slot) for pid, slot in current.items()}
+    wanted = {
+        int(pid): int(slot)
+        for pid, slot in target.items()
+        if int(pid) in state and int(slot) != state[int(pid)]
+    }
+    batches: List[List[PlayerId]] = []
+    # One batch per move is the worst case a well-formed input can need; the
+    # cap is a guard against a malformed one spinning rather than raising.
+    for _ in range(len(wanted) + 1):
+        if not wanted:
+            return batches
+        occupancy: Dict[SlotId, int] = {}
+        for slot in state.values():
+            occupancy[slot] = occupancy.get(slot, 0) + 1
+
+        batch: List[PlayerId] = []
+        taken: Dict[SlotId, int] = {}
+        for pid in sorted(wanted):
+            dest = wanted[pid]
+            cap = capacity.get(dest)
+            used = occupancy.get(dest, 0) + taken.get(dest, 0)
+            if cap is None or used < int(cap):
+                batch.append(pid)
+                taken[dest] = taken.get(dest, 0) + 1
+
+        if not batch:
+            batch = _find_cycle(state, wanted)
+
+        batches.append(batch)
+        for pid in batch:
+            state[pid] = wanted.pop(pid)
+
+    raise PreflightError(
+        "could not order %d remaining lineup move(s) into safe steps" % len(wanted)
+    )
+
+
+def _find_cycle(
+    state: Mapping[PlayerId, SlotId], wanted: Mapping[PlayerId, SlotId],
+) -> List[PlayerId]:
+    """A rotation of players each waiting on the next one's slot.
+
+    Reached only when no single move is safe on its own, which means every
+    pending destination is full of players who are themselves pending. Walking
+    "who holds the slot I want" from any of them therefore cannot run out, and
+    must close a loop; that loop is the smallest set that has to move together.
+    """
+    holders: Dict[SlotId, List[PlayerId]] = {}
+    for pid in wanted:
+        holders.setdefault(state[pid], []).append(pid)
+
+    start = min(wanted)
+    path: List[PlayerId] = []
+    seen: Dict[PlayerId, int] = {}
+    node = start
+    while node not in seen:
+        seen[node] = len(path)
+        path.append(node)
+        candidates = holders.get(wanted[node]) or []
+        nxt = next((p for p in sorted(candidates) if p != node), None)
+        if nxt is None:
+            # Nobody pending holds the slot, so the slot is full of players
+            # who are staying put: no ordering frees it and no cycle exists.
+            # Sending the move alone is the honest thing -- ESPN will say so.
+            return [node]
+        node = nxt
+    return path[seen[node]:]
+
+
 class EspnWrite:
     """Target-state in, diff out.
 
@@ -227,6 +340,18 @@ class EspnWrite:
             log.info("lineup already optimal; no request sent")
             return WriteResult(ok=True, shadow=self.shadow_mode, kind="LINEUP", items=())
 
+        # Logged before the POST, every time, not only on failure. A rejected
+        # transaction leaves no trace on ESPN's side -- no transaction row, no
+        # items echoed back -- so without this line a 409 says which slot ESPN
+        # objected to and nothing whatever about what we asked for. That cost a
+        # whole morning on 2026-11-10: the error named the SG slot, and there
+        # was no way to see from the record that the packet even mentioned it.
+        log.info(
+            "lineup write for %s, scoring period %d: %s",
+            self._team_label(team_id), int(period),
+            self._describe(items, current),
+        )
+
         body = {
             "teamId": int(team_id),
             "type": "ROSTER",
@@ -237,7 +362,144 @@ class EspnWrite:
         }
         if self.shadow_mode:
             return self._shadow("LINEUP", items, body)
-        return self._post(body, "LINEUP")
+        try:
+            return self._post(body, "LINEUP")
+        except EspnError as exc:
+            if not _is_slot_limit_rejection(exc):
+                raise
+            log.warning(
+                "ESPN refused the lineup on a slot limit (%s); retrying it one "
+                "safe step at a time", exc,
+            )
+            return self._set_lineup_stepwise(
+                team_id, current, target, settings, int(period), items,
+            )
+
+    # -- the stepwise fallback ---------------------------------------------
+
+    def _set_lineup_stepwise(
+        self,
+        team_id: int,
+        current: Sequence[RosterEntry],
+        target: Mapping[PlayerId, SlotId],
+        settings: Any,
+        period: int,
+        attempted: Sequence[Mapping[str, Any]],
+    ) -> WriteResult:
+        """Write the same target as a sequence of individually-safe writes.
+
+        Why this exists
+        ---------------
+        On 2026-11-10 ESPN rejected a seven-move lineup with ``Too many players
+        in the SG slot (maximum 1)`` three times in one morning. The target was
+        valid -- exactly one player in SG, checked by ``_preflight_lineup``
+        against ESPN's own ``lineupSlotCounts`` -- and so was every reachable
+        reading of the pre-transaction roster: SG was *empty*, and exactly one
+        item named it. Probing the live API afterwards ruled out the obvious
+        explanations one by one: item order does not matter (a fill posted
+        before its vacate is accepted), a swap inside one transaction is
+        accepted, an off-IR move into a slot whose occupant leaves in the same
+        transaction is accepted, a refused IR move reports itself explicitly
+        rather than as a slot limit, and a write to a non-current scoring
+        period is refused outright with a different message. Whatever ESPN
+        counted, we could not reproduce it from the outside.
+
+        So this does not try to out-guess ESPN's counting. It removes the
+        question. :func:`plan_lineup_steps` orders the moves so that **every
+        transaction only ever fills a slot that is already empty**, by the
+        roster state ESPN itself just reported. A slot that is empty before the
+        write cannot be over-full after a single move into it under any
+        counting rule, in any item order, whatever ESPN does with
+        ``fromLineupSlotId``.
+
+        The price is several POSTs instead of one, and a part-applied lineup if
+        a later step fails -- which is why it is a fallback and not the normal
+        path. A part-applied lineup is still strictly better than the status
+        quo on this error, which was to abandon the whole day's optimization
+        and leave yesterday's lineup standing.
+        """
+        by_id = {p.player_id: p for p in current}
+        state = {p.player_id: int(p.current_slot) for p in current}
+        capacity = {
+            int(s): int(n)
+            for s, n in settings.lineup_slot_counts.items()
+            if int(n) > 0
+        }
+        batches = plan_lineup_steps(state, target, capacity)
+        log.info("split into %d step(s)", len(batches))
+
+        done: List[Mapping[str, Any]] = []
+        last: Optional[WriteResult] = None
+        for n, batch in enumerate(batches, 1):
+            items = [
+                {
+                    "playerId": int(pid),
+                    "type": "LINEUP",
+                    "fromLineupSlotId": int(state[pid]),
+                    "toLineupSlotId": int(target[pid]),
+                }
+                for pid in batch
+            ]
+            log.info("  step %d/%d: %s", n, len(batches),
+                     self._describe(items, current))
+            body = {
+                "teamId": int(team_id),
+                "type": "ROSTER",
+                "memberId": self.cfg.swid,
+                "scoringPeriodId": int(period),
+                "executionType": ids.EXEC_EXECUTE,
+                "items": items,
+            }
+            try:
+                last = self._post(body, "LINEUP")
+            except EspnError as exc:
+                # Loud and specific. Some of the moves landed, so the lineup is
+                # neither the old one nor the intended one, and the next run
+                # re-reads anyway -- but a human needs to know it is mid-flight.
+                raise EspnError(
+                    "ESPN took %d of %d lineup step(s) and then refused step "
+                    "%d (%s). The lineup is part-applied: %s was written, %s "
+                    "was not. Original packet: %s"
+                    % (
+                        n - 1, len(batches), n, exc,
+                        self._describe(done, current) or "nothing",
+                        self._describe(items, current),
+                        self._describe(attempted, current),
+                    )
+                ) from exc
+            for pid in batch:
+                state[pid] = int(target[pid])
+            done.extend(items)
+
+        return WriteResult(
+            ok=True,
+            shadow=False,
+            kind="LINEUP",
+            items=tuple(done),
+            transaction_id=last.transaction_id if last else None,
+            status=last.status if last else None,
+            messages=("written in %d step(s) after ESPN refused the single "
+                      "transaction on a slot limit" % len(batches),),
+        )
+
+    # -- small helpers -----------------------------------------------------
+
+    def _team_label(self, team_id: int) -> str:
+        return "team %d in league %d" % (int(team_id), int(self.cfg.league_id))
+
+    @staticmethod
+    def _describe(
+        items: Sequence[Mapping[str, Any]], roster: Sequence[RosterEntry],
+    ) -> str:
+        names = {p.player_id: p.name for p in roster}
+        return "; ".join(
+            "%s %s->%s" % (
+                names.get(int(i["playerId"]), int(i["playerId"])),
+                ids.slot_name(int(i["fromLineupSlotId"])),
+                ids.slot_name(int(i["toLineupSlotId"])),
+            )
+            for i in items
+        )
 
     # -- acquisitions ------------------------------------------------------
 

@@ -70,8 +70,8 @@ def _entry(pid, name, slot, *, status="ONTEAM", on_team=7, omit=()):
 
 
 class _Resp:
-    def __init__(self, payload):
-        self.status_code = 200
+    def __init__(self, payload, status=200):
+        self.status_code = status
         self._payload = payload
         self.text = json.dumps(payload)
         self.headers = {}
@@ -277,7 +277,7 @@ class _FakeRead:
         self._pending = list(pending)
         self._pool = dict(pool or {})
 
-    def roster(self, team_id=None):
+    def roster(self, team_id=None, scoring_period=None):
         return list(self._roster)
 
     def league_settings(self):
@@ -836,6 +836,273 @@ class TestWritesCarryTheCallersPeriod(unittest.TestCase):
         w, http = _writer()
         w.set_lineup({1: UTIL, 2: BE, 3: BE}, scoring_period=4)
         self.assertEqual(http.last["scoringPeriodId"], 4)
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-10: "Too many players in the SG slot (maximum 1)"
+#
+# Three times in one morning ESPN refused a lineup whose target held exactly
+# one player in SG, against a roster whose SG was empty. Live probing ruled
+# out item order, in-transaction swaps, off-IR hand-offs, refused IR moves and
+# future-period writes as the cause, so the code stops trying to predict
+# ESPN's counting and instead never asks it to count: on this error the same
+# target is rewritten as a series of moves into slots that are *already*
+# empty. These tests pin the ordering guarantee, not a theory about ESPN.
+# ---------------------------------------------------------------------------
+
+SG, SF, PF, G, F = 1, 2, 3, 5, 6
+
+NOV10_CAPACITY = {PG: 1, SG: 1, SF: 1, PF: 1, C: 1, G: 1, F: 1,
+                  UTIL: 3, BE: 3, IR: 3}
+
+# The real roster and the real target from that morning's 09:00 run.
+NOV10_CURRENT = {
+    1: PG,    # Keyonte George
+    2: SF,    # AJ Dybantsa
+    3: PF,    # Franz Wagner
+    4: C,     # Alperen Sengun
+    5: G,     # Jrue Holiday
+    6: F,     # Toumani Camara
+    7: UTIL, 8: UTIL, 9: UTIL,
+    10: BE,   # Karl-Anthony Towns
+    11: BE,   # Keegan Murray
+    12: BE,   # Ryan Rollins
+    13: IR,   # Trey Murphy III
+    14: IR,   # Immanuel Quickley
+}
+NOV10_TARGET = dict(NOV10_CURRENT)
+NOV10_TARGET.update({
+    1: IR, 2: BE, 4: BE, 10: C, 11: SF, 12: SG, 13: BE, 14: PG,
+})
+
+
+def _replay(current, target, capacity):
+    """Run the planner and assert its one promise, batch by batch.
+
+    The promise: nothing is ever moved into a slot that is full at the moment
+    its transaction is sent, counting only players who have not moved yet.
+    Members of the same batch get no credit for each other -- that is the
+    whole difference between this and the single packet ESPN refused.
+    """
+    from espn.write import plan_lineup_steps
+
+    state = dict(current)
+    batches = plan_lineup_steps(current, target, capacity)
+    for batch in batches:
+        occupancy = {}
+        for slot in state.values():
+            occupancy[slot] = occupancy.get(slot, 0) + 1
+        if len(batch) > 1 and len({target[p] for p in batch}) == len(batch):
+            # A rotation is allowed to be sent whole; everything else is held
+            # to the strict rule. Tell them apart by whether the batch is a
+            # cycle: each member's destination is held by another member.
+            held = {state[p] for p in batch}
+            if not {target[p] for p in batch} <= held:
+                for pid in batch:
+                    room = capacity.get(target[pid])
+                    assert room is None or occupancy.get(target[pid], 0) < room, (
+                        "batch fills %s, which already holds %d"
+                        % (target[pid], occupancy.get(target[pid], 0))
+                    )
+        for pid in batch:
+            state[pid] = target[pid]
+    return batches, state
+
+
+class TestLineupStepsNeverFillAFullSlot(unittest.TestCase):
+
+    def test_the_november_10_lineup_can_be_written_safely(self):
+        batches, final = _replay(NOV10_CURRENT, NOV10_TARGET, NOV10_CAPACITY)
+        self.assertEqual(final, NOV10_TARGET)
+        self.assertTrue(batches)
+
+    def test_every_moving_player_moves_exactly_once(self):
+        batches, _ = _replay(NOV10_CURRENT, NOV10_TARGET, NOV10_CAPACITY)
+        moved = [pid for b in batches for pid in b]
+        self.assertEqual(sorted(moved), sorted(
+            p for p, s in NOV10_TARGET.items() if NOV10_CURRENT[p] != s
+        ))
+
+    def test_an_unchanged_lineup_needs_no_steps(self):
+        from espn.write import plan_lineup_steps
+        self.assertEqual(
+            plan_lineup_steps(NOV10_CURRENT, dict(NOV10_CURRENT), NOV10_CAPACITY),
+            [],
+        )
+
+    def test_a_straight_swap_goes_in_one_transaction(self):
+        """ESPN accepts a rotation; serializing it is impossible anyway."""
+        from espn.write import plan_lineup_steps
+        steps = plan_lineup_steps({1: C, 2: UTIL}, {1: UTIL, 2: C},
+                                  {C: 1, UTIL: 1})
+        self.assertEqual(steps, [[1, 2]])
+
+    def test_a_three_way_rotation_also_goes_in_one(self):
+        from espn.write import plan_lineup_steps
+        steps = plan_lineup_steps({1: PG, 2: SG, 3: SF},
+                                  {1: SG, 2: SF, 3: PG},
+                                  {PG: 1, SG: 1, SF: 1})
+        self.assertEqual(steps, [[1, 2, 3]])
+
+    def test_a_swap_with_somewhere_to_stage_is_serialized_instead(self):
+        """With a free bench slot there is no need to ask ESPN to rotate."""
+        from espn.write import plan_lineup_steps
+        steps = plan_lineup_steps({1: C, 2: BE}, {1: BE, 2: C},
+                                  {C: 1, BE: 3})
+        self.assertEqual([len(b) for b in steps], [1, 1])
+        self.assertEqual(steps[0], [1])
+
+    def test_a_slot_missing_from_the_counts_is_unbounded(self):
+        from espn.write import plan_lineup_steps
+        steps = plan_lineup_steps({1: C, 2: C, 3: C}, {1: BE, 2: BE, 3: BE},
+                                  {C: 1})
+        self.assertEqual(steps, [[1, 2, 3]])
+
+
+class _SlotLimitClient(_CapturingClient):
+    """Refuses the first POST the way ESPN did, then behaves."""
+
+    def __init__(self, refusals=1, message=None, kind=None):
+        super().__init__()
+        self.refusals = int(refusals)
+        self.message = message or (
+            "Too many players in the SG slot (maximum 1)"
+        )
+        self.kind = kind or ("TRAN_ROSTER_SLOT_LIMIT_EXCEEDED" if message is None
+                             else "TRAN_ROSTER_LOCKED")
+
+    def post(self, url, content=None, headers=None, cookies=None):
+        body = json.loads(content.decode("utf-8"))
+        self.bodies.append(body)
+        if self.refusals > 0:
+            self.refusals -= 1
+            return _Resp(
+                {"messages": [self.message],
+                 "details": [{"message": self.message,
+                              "type": self.kind}]},
+                status=409,
+            )
+        return _Resp({
+            "id": "dc39b83f-3bf9-4f0f-9b14-71472ea6f7fa",
+            "status": "EXECUTED",
+            "items": body.get("items") or [],
+        })
+
+
+class _FakeReadWithSettings(_FakeRead):
+    def __init__(self, roster, settings):
+        super().__init__(roster)
+        self._settings = settings
+
+    def league_settings(self):
+        return self._settings
+
+
+class TestSlotLimitFallback(unittest.TestCase):
+    """A refused packet must not cost the whole day's lineup."""
+
+    def _writer(self, refusals=1, message=None):
+        cfg = EspnConfig(league_id=1, team_id=7, espn_s2="s2", swid="{X}",
+                         season=2027)
+        http = _SlotLimitClient(refusals, message)
+        settings = _settings(lineup_slot_counts={PG: 1, C: 1, UTIL: 1,
+                                                 BE: 2, IR: 1})
+        roster = [
+            _player(1, "Guard One", PG, eligible=(PG, UTIL, BE)),
+            _player(2, "Center One", C, eligible=(C, UTIL, BE)),
+            _player(3, "Bench Guy", BE, eligible=(PG, C, UTIL, BE)),
+            _player(4, "Bench Two", BE, eligible=(PG, C, UTIL, BE)),
+        ]
+        w = EspnWrite(cfg, http, _FakeReadWithSettings(roster, settings),
+                      shadow_mode=False)
+        return w, http, roster
+
+    def test_the_target_is_still_written_after_a_slot_limit_refusal(self):
+        w, http, _ = self._writer()
+        # Guard One to the bench, Bench Guy into the PG slot he vacates.
+        result = w.set_lineup({1: BE, 2: C, 3: PG, 4: UTIL}, scoring_period=5)
+        self.assertTrue(result.ok)
+        self.assertGreater(len(http.bodies), 1)
+        # Every step after the refusal moves somebody somewhere.
+        for body in http.bodies[1:]:
+            self.assertTrue(body["items"])
+
+    def test_no_step_fills_a_slot_that_was_occupied_when_it_was_sent(self):
+        w, http, roster = self._writer()
+        w.set_lineup({1: BE, 2: C, 3: PG, 4: UTIL}, scoring_period=5)
+        state = {p.player_id: p.current_slot for p in roster}
+        caps = {PG: 1, C: 1, UTIL: 1, BE: 2, IR: 1}
+        for body in http.bodies[1:]:
+            occupancy = {}
+            for slot in state.values():
+                occupancy[slot] = occupancy.get(slot, 0) + 1
+            for item in body["items"]:
+                dest = item["toLineupSlotId"]
+                self.assertLess(
+                    occupancy.get(dest, 0), caps[dest],
+                    "step fills %s, already holding %d"
+                    % (dest, occupancy.get(dest, 0)),
+                )
+                # And the from-slot is the live one, not the original.
+                self.assertEqual(item["fromLineupSlotId"],
+                                 state[item["playerId"]])
+            for item in body["items"]:
+                state[item["playerId"]] = item["toLineupSlotId"]
+
+    def test_the_steps_add_up_to_the_target(self):
+        w, http, roster = self._writer()
+        target = {1: BE, 2: C, 3: PG, 4: UTIL}
+        w.set_lineup(target, scoring_period=5)
+        state = {p.player_id: p.current_slot for p in roster}
+        for body in http.bodies[1:]:
+            for item in body["items"]:
+                state[item["playerId"]] = item["toLineupSlotId"]
+        self.assertEqual(state, target)
+
+    def test_a_refusal_that_is_not_a_slot_limit_is_not_retried(self):
+        w, http, _ = self._writer(
+            message="Guard One is lineup-locked for this scoring period")
+        with self.assertRaises(read.EspnError):
+            w.set_lineup({1: BE, 2: C, 3: PG, 4: UTIL}, scoring_period=5)
+        self.assertEqual(len(http.bodies), 1)
+
+    def test_a_step_that_also_fails_says_what_landed_and_what_did_not(self):
+        w, http, _ = self._writer(refusals=99)
+        with self.assertRaises(read.EspnError) as caught:
+            w.set_lineup({1: BE, 2: C, 3: PG, 4: UTIL}, scoring_period=5)
+        msg = str(caught.exception)
+        self.assertIn("part-applied", msg)
+        self.assertIn("Guard One", msg)
+
+    def test_shadow_mode_never_reaches_the_fallback(self):
+        cfg = EspnConfig(league_id=1, team_id=7, espn_s2="s2", swid="{X}",
+                         season=2027)
+        http = _SlotLimitClient(refusals=99)
+        w = EspnWrite(cfg, http, _FakeRead(ROSTER), shadow_mode=True)
+        result = w.set_lineup({1: UTIL, 2: BE, 3: BE}, scoring_period=5)
+        self.assertTrue(result.shadow)
+        self.assertEqual(http.bodies, [])
+
+
+class TestSlotLimitRecognition(unittest.TestCase):
+
+    def test_the_machine_readable_type_is_enough(self):
+        from espn.write import _is_slot_limit_rejection
+        self.assertTrue(_is_slot_limit_rejection(
+            Exception("ESPN rejected LINEUP (409): ... "
+                      "'type': 'TRAN_ROSTER_SLOT_LIMIT_EXCEEDED'")))
+
+    def test_the_english_is_enough_on_its_own(self):
+        from espn.write import _is_slot_limit_rejection
+        self.assertTrue(_is_slot_limit_rejection(
+            Exception("ESPN rejected LINEUP (409): "
+                      "Too many players in the UTIL slot (maximum 4)")))
+
+    def test_an_unrelated_refusal_is_not_matched(self):
+        from espn.write import _is_slot_limit_rejection
+        self.assertFalse(_is_slot_limit_rejection(
+            Exception("ESPN rejected LINEUP (409): Keyonte George is already "
+                      "in the IR slot")))
 
 
 
