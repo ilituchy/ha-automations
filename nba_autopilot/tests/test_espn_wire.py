@@ -37,7 +37,7 @@ sys.path.insert(
 )
 
 import main as main_mod  # noqa: E402
-from espn import ids  # noqa: E402
+from espn import ids, read  # noqa: E402
 from espn.read import EspnConfig, EspnRead  # noqa: E402
 from espn.write import EspnWrite, PreflightError  # noqa: E402
 from models import LeagueSettings, RosterEntry  # noqa: E402
@@ -838,8 +838,6 @@ class TestWritesCarryTheCallersPeriod(unittest.TestCase):
         self.assertEqual(http.last["scoringPeriodId"], 4)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 # ---------------------------------------------------------------------------
@@ -1176,3 +1174,70 @@ class TestMatchupByPeriodWire(unittest.TestCase):
     def test_an_unparseable_day_is_skipped_and_the_rest_survive(self):
         score = self._read({"1": 45.0, "oops": "nope"})
         self.assertEqual(score.my_by_period, {1: 45.0})
+
+
+class TestEntryInjuryStatusGatesIR(unittest.TestCase):
+    """The roster entry's ``injuryStatus`` is not the player's.
+
+    Regression for 2026-11-09. ``player.injuryStatus`` said OUT and slot 13 was
+    offered, so the optimizer planned ``UTIL -> IR`` to free a seat. The
+    *entry* said ``FUTURE_TO_IR``: ESPN had queued him for IR in a later period
+    and discarded the move with an HTTP 200, so the seat never opened and the
+    paired fill overflowed UTIL. ESPN rejected the whole transaction.
+    """
+
+    @staticmethod
+    def _entry(entry_status, *, slot=11, player_status="OUT"):
+        return {
+            "playerId": 4433627,
+            "lineupSlotId": slot,
+            "injuryStatus": entry_status,
+            "playerPoolEntry": {
+                "id": 4433627,
+                "player": {
+                    "id": 4433627,
+                    "fullName": "Test Player",
+                    "injuryStatus": player_status,
+                    "injured": True,
+                    "proTeamId": 26,
+                    "eligibleSlots": [0, 1, 5, 7, 8, 11, 12, 13],
+                },
+            },
+        }
+
+    def test_future_to_ir_is_not_ir_eligible(self):
+        e = read._parse_entry(self._entry("FUTURE_TO_IR"))
+        self.assertEqual(e.injury_status, "OUT")
+        self.assertIn(13, e.eligible_slots)
+        self.assertFalse(
+            e.ir_eligible,
+            "an entry queued FUTURE_TO_IR must not be offered to the IR "
+            "planner -- ESPN discards the move without reporting an error",
+        )
+
+    def test_normal_entry_that_is_out_stays_ir_eligible(self):
+        """The leave-him-parked path must not regress.
+
+        Players already on IR read NORMAL here -- verified live against Trey
+        Murphy III and Jaren Jackson Jr., both OUT and both on IR.
+        """
+        e = read._parse_entry(self._entry("NORMAL", slot=13))
+        self.assertTrue(e.ir_eligible)
+
+    def test_a_missing_entry_status_is_treated_as_normal(self):
+        raw = self._entry("NORMAL")
+        del raw["injuryStatus"]
+        self.assertTrue(read._parse_entry(raw).ir_eligible)
+
+    def test_any_other_pending_ir_state_is_also_refused(self):
+        for state in ("TO_IR", "FROM_IR", "RETURNING_FROM_IR", "future_to_ir"):
+            with self.subTest(state=state):
+                self.assertFalse(read._parse_entry(self._entry(state)).ir_eligible)
+
+    def test_a_healthy_player_is_never_ir_eligible_regardless(self):
+        e = read._parse_entry(self._entry("NORMAL", player_status="ACTIVE"))
+        self.assertFalse(e.ir_eligible)
+
+
+if __name__ == "__main__":
+    unittest.main()

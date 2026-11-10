@@ -682,6 +682,24 @@ For each one:
 4. Anything else becomes a notification with **Approve** / **Reject** buttons,
    naming the league, and is listed on the status page until it is decided.
 
+### ESPN can accept a lineup move and silently not make it
+
+A transaction can come back `200` with one of its items quietly dropped. The
+case that taught us this: a player ESPN has queued for IR in a later period
+carries `injuryStatus: FUTURE_TO_IR` on his **roster entry** (not on the
+player record, where the status is the medical one). Moving him to IR is
+accepted and discarded at the period we write to, and refused with a 409 at
+the period ESPN reports as current.
+
+That matters beyond the one move. If the discarded item was supposed to free a
+starting slot, the move that fills the slot overflows it and ESPN rejects the
+**entire** transaction, so one bad item costs the day's whole lineup. The app
+now refuses to plan an IR move unless the entry reads `NORMAL`.
+
+Do not "fix" this by re-reading the roster after a write and comparing: ESPN's
+read API lagged a confirmed write by more than a minute in testing, so that
+check reports failures that did not happen.
+
 ### Going over the cap does not stop the lineup
 
 Nothing prevents ESPN accepting a lineup that crosses the cap mid-week, so

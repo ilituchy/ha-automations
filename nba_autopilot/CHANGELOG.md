@@ -8,6 +8,28 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **One ineligible IR move took a whole league's lineup write with it.** The
+  roster entry's `injuryStatus` is a different field from the player's: the
+  player's carries the medical status, the entry's carries the transaction
+  state. Only the player's was read. On 2026-11-09 Keyonte George read as
+  `OUT` with slot 13 offered, so `ir_eligible` came out true and the optimizer
+  planned `UTIL -> IR` to free a seat for Zach Edey. His entry said
+  `FUTURE_TO_IR` -- ESPN had queued him for IR in a later period and would not
+  take him now, and said so only by **returning HTTP 200 and discarding the
+  move**. The UTIL seat never opened, the paired `BE -> UTIL` overflowed it,
+  and ESPN rejected the transaction with `TRAN_ROSTER_SLOT_LIMIT_EXCEEDED`.
+  `ir_eligible` now also requires the entry to read `NORMAL`, which players
+  already on IR do. A player we must not move to IR is treated as an ordinary
+  player and, being Out, gets benched -- the outcome we wanted, and one ESPN
+  accepts.
+
+  The same silent discard hit the other league without any error at all: the
+  transaction returned 200, the app recorded success, and an Out player stayed
+  in the PG slot. Worth noting for anyone tempted to add naive post-write
+  verification: ESPN's read API lagged a successful write by over a minute in
+  testing, so comparing the roster straight after a write produces false
+  alarms.
+
 - **Removed the three branches that implemented the exhausted-cap bug.** The
   shadow price was only half of it. `pipeline` gave every playable player a
   reduced cost of `-1.0` while players with no game kept `0.0`, so the

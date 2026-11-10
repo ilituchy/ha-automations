@@ -1155,11 +1155,43 @@ def _parse_entry(raw: Mapping[str, Any]) -> RosterEntry:
     # IR eligibility is NOT just "slot 13 is in eligibleSlots" -- ESPN lists the
     # IR slot broadly, so deriving it that way marks the whole roster eligible
     # and makes the write-layer IR check dead code. ESPN's actual rule is its
-    # own and the rejection code for an ineligible IR move has not been observed,
-    # so we require the stricter conjunction: ESPN offers the slot *and* the
-    # player is actually Out. Conservative on purpose -- the cost of being wrong
-    # here is a rejected transaction that takes the day's whole lineup with it.
-    ir_ok = ids.IR_SLOT in eligible and status == "OUT"
+    # own, so we require a conjunction rather than trusting the slot list.
+    #
+    # The third term is the *roster entry's* ``injuryStatus``, which is a
+    # different field from the player's and carries the transaction state
+    # rather than the medical one. The two disagree, and that cost a lineup.
+    #
+    # On 2026-11-09 Keyonte George read as ``player.injuryStatus == "OUT"`` with
+    # slot 13 offered, so the first two terms held and the optimizer planned
+    # ``UTIL -> IR`` to free a UTIL seat for Zach Edey. His *entry* carried
+    # ``injuryStatus == "FUTURE_TO_IR"`` -- ESPN had already queued him for IR
+    # in a later period and would not take him now. It did not say so: the move
+    # came back **HTTP 200 and was silently discarded** at the period we write
+    # to, and 409 at the period ESPN reports as current. Either way the UTIL
+    # seat never opened, so the paired ``BE -> UTIL`` overflowed the slot and
+    # ESPN rejected the whole transaction with
+    # ``TRAN_ROSTER_SLOT_LIMIT_EXCEEDED``. One ineligible IR move took the
+    # entire write with it, exactly as the paragraph above feared.
+    #
+    # Players already sitting on IR read ``NORMAL`` here (verified live against
+    # Trey Murphy III and Jaren Jackson Jr., both OUT and both on IR), so
+    # requiring ``NORMAL`` does not disturb the leave-him-parked path. A player
+    # we must not move to IR is simply treated as an ordinary player: being OUT,
+    # he gets benched, which is the outcome we wanted anyway and one ESPN
+    # accepts.
+    entry_injury = str(raw.get("injuryStatus") or "NORMAL").upper()
+    ir_ok = (
+        ids.IR_SLOT in eligible
+        and status == "OUT"
+        and entry_injury == "NORMAL"
+    )
+    if ids.IR_SLOT in eligible and status == "OUT" and entry_injury != "NORMAL":
+        log.info(
+            "%s is Out and IR-eligible by slot, but ESPN's roster entry says "
+            "%s -- treating him as not IR-movable; ESPN discards such a move "
+            "without reporting an error",
+            player.get("fullName") or pid, entry_injury,
+        )
 
     # The market readings. Present in both payload shapes -- verified live
     # 2026-10-21 against ``mRoster`` and ``kona_player_info`` both -- and read
