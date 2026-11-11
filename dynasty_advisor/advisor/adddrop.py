@@ -133,7 +133,12 @@ def recommend(
         if not set(book.positions(pid)) & STARTABLE:
             continue  # K/DEF are unvalued by the feed; never auto-suggest dropping them
         now = fast_lineup_value(active - {pid}, book.positions, book.values.now, slots) - base
-        drops.append(cand(pid, now))
+        c = cand(pid, now)
+        # Cost of losing him: his value PLUS the lineup value that goes with
+        # him. ``now`` is <= 0 here, so it is subtracted. (Adding it made the
+        # most important starters look cheapest -- caught on the HA page.)
+        c.score = w_dyn * c.asset.dyn - w_now * now
+        drops.append(c)
     drops.sort(key=lambda c: c.score)
     rep.drops = drops[:n]
 

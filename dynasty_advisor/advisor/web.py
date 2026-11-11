@@ -40,7 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
-from . import notify
+from . import notify, page
 from .run import RunError, run_once
 from .trades import STRATEGIES
 
@@ -251,103 +251,76 @@ def md_to_html(md: str) -> str:
 # Page
 # ---------------------------------------------------------------------------
 
-CSS = """
-:root { color-scheme: light dark;
-  --bg:#f3f4f7; --card:#fff; --fg:#17191e; --dim:#5f6774; --line:#e2e5ea;
-  --accent:#1f6feb; --accent-fg:#fff; --warn-bg:#fff4d6; --warn-fg:#6b4e00;
-  --err-bg:#fde7e7; --err-fg:#8a1c1c; --chip:#eef1f5; }
-@media (prefers-color-scheme: dark) { :root {
-  --bg:#111317; --card:#1b1e24; --fg:#e7e9ee; --dim:#9aa2b1; --line:#2b3038;
-  --accent:#4c8dff; --accent-fg:#0b0d10; --warn-bg:#3a3014; --warn-fg:#f3d68a;
-  --err-bg:#3d1c1c; --err-fg:#f5b0b0; --chip:#262a32; } }
-* { box-sizing: border-box; }
-body { margin:0; background:var(--bg); color:var(--fg);
-  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-main { max-width: 920px; margin: 0 auto; padding: 16px; }
-.card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px; margin-bottom:14px; }
-.top { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; }
-.top h1 { font-size:20px; margin:0; }
-.dim { color:var(--dim); font-size:13px; }
-form.run { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
-label input { vertical-align:-2px; margin-right:4px; }
-select, button { font: inherit; border-radius:8px; padding:8px 12px; border:1px solid var(--line);
-  background:var(--chip); color:var(--fg); }
-button { background:var(--accent); color:var(--accent-fg); border:none; font-weight:600; cursor:pointer; }
-button[disabled] { opacity:.6; cursor:default; }
-.spin { display:inline-block; width:12px; height:12px; margin-right:7px; vertical-align:-2px; border-radius:50%;
-  border:2px solid currentColor; border-right-color:transparent; animation: spin .7s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .spin { display:none; } }
-.err { background:var(--err-bg); color:var(--err-fg); border-color:transparent; }
-.report h1 { display:none; }
-.report h2 { font-size:17px; margin:22px 0 8px; padding-top:12px; border-top:1px solid var(--line); }
-.report h2:first-of-type { border-top:none; padding-top:0; margin-top:4px; }
-.report h3 { font-size:15px; margin:16px 0 6px; }
-.report ul { padding-left:20px; margin:6px 0; }
-.report li { margin:3px 0; }
-blockquote { margin:8px 0; padding:10px 12px; border-radius:8px; background:var(--warn-bg); color:var(--warn-fg); }
-.scroll { overflow-x:auto; margin:8px 0; }
-table { border-collapse:collapse; font-size:13px; width:100%; }
-th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
-th { color:var(--dim); font-weight:600; }
-hr { border:none; border-top:1px solid var(--line); margin:16px 0; }
-.history a { color:var(--accent); text-decoration:none; margin-right:12px; white-space:nowrap; font-size:13px; }
-.history a.cur { color:var(--fg); font-weight:600; }
-"""
+def _load_view(name: str) -> Optional[Dict]:
+    try:
+        with open(os.path.join(DATA, "reports", name[:-3] + ".json")) as f:
+            v = json.load(f)
+        return v if isinstance(v, dict) and v.get("version") == 1 else None
+    except (OSError, ValueError):
+        return None
 
 
 def render_page(selected: Optional[str]) -> str:
     opts = load_options()
     reports = list_reports()
     name = selected if selected in reports else (reports[0] if reports else None)
-    body = ""
+    body, sub = "", "Sleeper dynasty trade & roster advisor"
     if name:
-        try:
-            with open(os.path.join(DATA, "reports", name)) as f:
-                body = md_to_html(f.read())
-        except OSError:
-            body = "<p>Could not read that report.</p>"
+        view = _load_view(name)
+        if view is not None:
+            body = page.render_view(view)
+            sub = "%s · week %s · %s" % (view.get("league"), view.get("week"), report_label(name))
+        else:  # reports from before structured output: render the Markdown
+            try:
+                with open(os.path.join(DATA, "reports", name)) as f:
+                    body = "<div class='card trade legacy'>%s</div>" % md_to_html(f.read())
+                sub = report_label(name)
+            except OSError:
+                body = "<div class=card>Could not read that report.</div>"
     r = RUNNER
     refresh = "<meta http-equiv=refresh content=3>" if r.running else ""
     default = opts.get("strategy") or "auto"
     select = "".join(
         "<option value='%s'%s>%s — %s</option>" % (
-            _e(s), " selected" if s == default else "", _e(s), _e(STRATEGY_HELP.get(s, "")))
+            _e(s), " selected" if s == default else "", _e(s.title()), _e(STRATEGY_HELP.get(s, "")))
         for s in STRATEGY_CHOICES)
     if r.running:
         button = "<button disabled><span class=spin></span>Running… %ds</button>" % int(time.time() - (r.started or time.time()))
     else:
         button = "<button type=submit>Run now</button>"
-    status = ""
+    status = []
     if r.running:
-        status = "<div class=dim>Pulling your league, four seasons of trades and today's values. Usually under a minute.</div>"
+        status.append("Pulling your league, four seasons of trades and today's values — usually under a minute.")
     elif r.summary and r.finished:
-        status = "<div class=dim>Last run %s · %s%s</div>" % (
-            _e(_clock(datetime.fromtimestamp(r.finished))), _e(r.summary), " · " + _e(r.notified) if r.notified else "")
+        status.append("Last run %s · %s%s" % (_clock(datetime.fromtimestamp(r.finished)), r.summary,
+                                              " · " + r.notified if r.notified else ""))
     sched = notify.parse_schedule(opts.get("schedule") or [])
     svc = (opts.get("notify_service") or "").strip()
-    status += "<div class=dim>%s</div>" % _e(
-        ("Scheduled: %s%s" % (notify.describe(sched), " · notifies %s" % svc if svc else " · no phone notifications set"))
-        if sched else "No scheduled runs (add some in the app's Configuration tab).")
-    check = ("<label class=dim><input type=checkbox name=notify value=1%s> notify my phone</label>" % (" disabled" if r.running else "")
+    status.append(("Scheduled %s%s" % (notify.describe(sched), " → %s" % svc if svc else " (no phone notifications)"))
+                  if sched else "No scheduled runs")
+    check = ("<label class=check><input type=checkbox name=notify value=1%s> Notify my phone</label>" % (" disabled" if r.running else "")
              if svc else "")
-    err = "<div class='card err'>%s</div>" % _e(r.error) if r.error and not r.running else ""
+    err = ""
+    if r.error and not r.running:
+        err += "<div class='banner err'><span aria-hidden=true>⚠︎</span><div>%s</div></div>" % _e(r.error)
     if not opts.get("username"):
-        err += "<div class='card err'>No Sleeper username set. Open Settings → Apps → Dynasty Advisor → Configuration.</div>"
+        err += "<div class='banner err'><span aria-hidden=true>⚠︎</span><div>No Sleeper username set. Open Settings → Apps → Dynasty Advisor → Configuration.</div></div>"
     hist = ""
-    if reports:
-        hist = "<div class='card history'><div class=dim style='margin-bottom:6px'>Past runs</div>%s</div>" % "".join(
+    if len(reports) > 1:
+        hist = "<section><div class=sec-head><h2>Past runs</h2></div><div class=history>%s</div></section>" % "".join(
             "<a href='?r=%s'%s>%s</a>" % (_e(n), " class=cur" if n == name else "", _e(report_label(n))) for n in reports)
-    report = ("<div class='card report'><div class=dim>%s</div>%s</div>" % (_e(report_label(name)), body)
-              if name else "<div class=card><p>No reports yet. Press <strong>Run now</strong>.</p></div>")
-    return """<!doctype html><html><head><meta charset=utf-8>
+    if not name:
+        body = "<div class='card trade'><p>No reports yet. Press <b>Run now</b>.</p></div>"
+    return """<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width, initial-scale=1">
 <meta name=referrer content=no-referrer>%s<title>Dynasty Advisor</title><style>%s</style></head>
 <body><main>
-<div class=card><div class=top><h1>Dynasty Advisor</h1>
-<form class=run method=post action=run><select name=strategy%s>%s</select>%s%s</form></div>%s</div>
+<header class=head><div class=brand><h1>Dynasty Advisor</h1><div class=sub>%s</div></div>
+<form class=run method=post action=run><select name=strategy aria-label=Strategy%s>%s</select>%s%s</form></header>
+<div class=status>%s</div>
 %s%s%s
-</main></body></html>""" % (refresh, CSS, " disabled" if r.running else "", select, check, button, status, err, report, hist)
+</main></body></html>""" % (refresh, page.CSS, _e(sub), " disabled" if r.running else "", select, check, button,
+                            "".join("<span>%s</span>" % _e(x) for x in status), err, body, hist)
 
 
 class Handler(BaseHTTPRequestHandler):

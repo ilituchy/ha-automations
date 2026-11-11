@@ -249,3 +249,124 @@ def summarize(league: League, ideas: List[TradeIdea], ad: AddDropReport) -> Tupl
     else:
         title = "Nothing worth doing this week"
     return "Dynasty Advisor: " + title, "\n".join(lines) or "Open the report for details.", deadline_week
+
+
+# ---------------------------------------------------------------------------
+# Structured view of a run, for the Home Assistant page. Same facts as the
+# Markdown, as data, so the page can lay them out properly.
+# ---------------------------------------------------------------------------
+
+
+def _asset_view(a: Asset) -> dict:
+    via = None
+    label = a.label
+    if " via " in label:
+        label, via = label.split(" via ", 1)
+    return {"name": label, "kind": a.kind, "pos": a.position, "age": round(a.age) if a.age else None,
+            "value": round(a.dyn), "via": via}
+
+
+def _pkg_view(pk: Package) -> dict:
+    return {"give": [_asset_view(a) for a in pk.give], "get": [_asset_view(a) for a in pk.get],
+            "market": round(pk.market), "lineup": round(pk.my_now), "roster_change": pk.roster_change}
+
+
+def _notes(idea: TradeIdea) -> List[str]:
+    t, m, pk = idea.partner, idea.manager, idea.opening
+    notes = []
+    vets = [a.label for a in pk.get if a.is_vet]
+    if t.mode in ("seller", "bubble") and vets:
+        notes.append("%s %s the kind of veteran a rebuilding team moves" % (
+            " and ".join(vets), "is" if len(vets) == 1 else "are"))
+    if t.mode == "contender":
+        if pk.their_now >= 0:
+            notes.append("Strengthens their lineup by {:,.0f} — the kind of upgrade a contender buys".format(pk.their_now))
+        else:
+            notes.append("Weakens their lineup by {:,.0f} now, for long-term value — a contender may balk".format(-pk.their_now))
+    needs = [pos for pos, gap in sorted(t.needs.items(), key=lambda kv: -kv[1]) if gap > 0][:2]
+    fills = [a.label for a in pk.give if a.position in needs]
+    if fills:
+        notes.append("They're thin at %s — %s fills it" % ("/".join(needs), " and ".join(fills)))
+    if m and m.never_accepts:
+        notes.append("%s has proposed %d trades and never accepted one" % (m.name, m.proposed))
+    elif m and m.tendency():
+        notes.append("Tendency: %s" % m.tendency())
+    return notes
+
+
+def build_view(league: League, me: int, strategy: str, teams: Dict[int, TeamProfile],
+               managers: Dict[str, ManagerProfile], ideas: List[TradeIdea], ad: AddDropReport,
+               book: AssetBook, values_unchanged_days: int) -> dict:
+    my = league.teams[me]
+    mine = teams[me]
+    dl = league.trade_deadline
+    if not dl:
+        deadline = None
+    elif league.week > dl:
+        deadline = {"week": dl, "state": "closed"}
+    else:
+        deadline = {"week": dl, "state": "this week" if league.week >= dl - 1 else "week %d" % dl,
+                    "weeks_left": dl - league.week}
+    warnings = []
+    if league.pick_check:
+        warnings.append("Pick ownership self-check failed against the completed draft (%d mismatches); pick lists may be wrong." % len(league.pick_check))
+    if values_unchanged_days >= 3:
+        warnings.append("FantasyCalc values unchanged for %d days — the feed may be stale." % values_unchanged_days)
+    names = {rid: t.team.display_name for rid, t in teams.items()}
+    cur = {t.owner_id for t in league.teams.values()}
+    max_now = max((p.now_value for p in teams.values()), default=1) or 1
+    budget = league.settings.get("waiver_budget")
+    return {
+        "version": 1,
+        "league": league.name,
+        "season": league.season,
+        "week": league.week,
+        "generated": datetime.now().strftime("%Y-%m-%dT%H:%M"),
+        "strategy": strategy,
+        "me": {"name": my.display_name, "record": my.record, "finish": mine.finish_rank, "mode": mine.mode,
+               "teams": len(teams), "faab_left": ad.faab_left, "faab_budget": int(budget) if budget else None},
+        "deadline": deadline,
+        "warnings": warnings,
+        "trades": [{
+            "partner": i.partner.team.display_name,
+            "mode": i.partner.mode,
+            "context": i.partner.mode_reason,
+            "chance": i.chance,
+            "accepted": i.manager.accepted if i.manager else None,
+            "proposed": i.manager.proposed if i.manager else None,
+            "since": i.manager.seasons[0] if i.manager and i.manager.seasons else None,
+            "opening": _pkg_view(i.opening),
+            "ceiling": None if {a.key for a in i.ceiling.give} == {a.key for a in i.opening.give}
+            and {a.key for a in i.ceiling.get} == {a.key for a in i.opening.get} else _pkg_view(i.ceiling),
+            "notes": _notes(i),
+        } for i in ideas],
+        "moves": {
+            "active": ad.active_count, "active_max": ad.active_max,
+            "reserve_open": max(0, ad.reserve_open), "open_spots": ad.open_spots,
+            "ir": [{"name": a.label, "pos": a.position, "status": (book.index.get(a.key) or {}).get("injury_status")}
+                   for a in ad.ir_moves],
+            "actions": [{"add": dict(_asset_view(a.asset), team=a.nfl_team, depth=a.depth, injury=a.injury,
+                                     starts=a.now_delta > 0),
+                         "drop": _asset_view(d.asset) if d else None} for a, d, _g in ad.swaps],
+            "free_agents": [dict(_asset_view(c.asset), team=c.nfl_team, now=round(c.asset.now),
+                                 starts=round(c.now_delta) if c.now_delta > 0 else 0, trending=c.trending,
+                                 depth=c.depth, injury=c.injury) for c in ad.adds],
+            "trending_unvalued": [dict(_asset_view(c.asset), team=c.nfl_team, depth=c.depth) for c in ad.trending_unvalued],
+            "cheapest": [dict(_asset_view(c.asset), starter=c.asset.key in ad.starters) for c in ad.drops[:5]],
+        },
+        "teams": [{
+            "rank": p.finish_rank, "name": p.team.display_name, "me": p.team.roster_id == me,
+            "record": p.team.record, "pf": round(p.team.fpts), "lineup": round(p.now_value),
+            "lineup_share": round(p.now_value / max_now, 3), "mode": p.mode,
+            "thin": max(p.needs.items(), key=lambda kv: kv[1])[0] if max(p.needs.values()) > 0 else None,
+        } for p in sorted(teams.values(), key=lambda p: p.finish_rank)],
+        "managers": [{
+            "name": m.name, "accepted": m.accepted, "proposed": m.proposed, "softness": m.softness,
+            "edge": None if m.never_accepts else round(100 * m.edge), "tendency": m.tendency(),
+            "me": m.user_id == my.owner_id,
+        } for m in sorted((m for m in managers.values() if m.user_id in cur), key=lambda m: -m.softness)],
+        "picks": [dict(_asset_view(book.pick(p, names)), season=p.season, round=p.round)
+                  for p in league.picks_of(me)],
+        "replacement": round(book.replacement),
+        "attribution": ATTRIBUTION,
+    }

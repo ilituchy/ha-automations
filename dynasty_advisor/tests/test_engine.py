@@ -117,3 +117,16 @@ class TestTrades(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAddDrop(unittest.TestCase):
+    def test_starters_are_not_cheapest_to_lose(self):
+        from advisor.adddrop import recommend
+        league, _v, index, teams, book = build()
+        for strategy in ("contend", "balanced", "rebuild"):
+            rep = recommend(league, book, 1, [], strategy)
+            cheapest = rep.drops[0].asset.key
+            # q1 (6000, starting QB) and w1 (7000, starting WR) must never lead the list.
+            self.assertNotIn(cheapest, {"q1", "w1", "w2"}, strategy)
+            costs = [c.score for c in rep.drops]
+            self.assertEqual(costs, sorted(costs))

@@ -1,7 +1,7 @@
 ---
 slug: dynasty_advisor
 name: Dynasty Advisor
-version: "0.2.0"
+version: "0.3.0"
 description: >-
   Trade targets and add/drop recommendations for a Sleeper dynasty football
   league. Read-only: it recommends, you make the moves in Sleeper.

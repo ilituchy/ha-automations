@@ -14,7 +14,9 @@ from .history import load_trades, walk_chain
 from .http import CachedHttp
 from .league import load_league
 from .profiles import build_manager_profiles
-from .report import journal, render, summarize
+import json
+
+from .report import build_view, journal, render, summarize
 from .sleeper import Sleeper
 from .teams import build_team_profiles
 from .trades import STRATEGIES, TradeSearch
@@ -106,6 +108,11 @@ def run_once(
     with open(out + ".tmp", "w") as f:
         f.write(md)
     os.replace(out + ".tmp", out)
+    view = build_view(league, me, strategy, teams, managers, ideas, ad, book, values.unchanged_days)
+    vpath = out[:-3] + ".json"
+    with open(vpath + ".tmp", "w") as f:
+        json.dump(view, f, separators=(",", ":"))
+    os.replace(vpath + ".tmp", vpath)
     jpath = journal(data_dir, league, strategy, ideas, ad, book)
     title, message, urgent = summarize(league, ideas, ad)
     return RunResult(out, jpath, md, strategy, http.calls, time.time() - t0, search.evaluated,
