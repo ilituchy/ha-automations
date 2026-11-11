@@ -40,6 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
+from . import notify
 from .run import RunError, run_once
 from .trades import STRATEGIES
 
@@ -85,19 +86,35 @@ class Runner:
         self.error: Optional[str] = None
         self.last: Optional[str] = None
         self.summary: Optional[str] = None
+        self.notified: Optional[str] = None
 
-    def start(self, strategy: str) -> bool:
+    def start(self, strategy: str, *, send: bool = False, why: str = "manual") -> bool:
         with self.lock:
             if self.running:
+                log.info("run requested (%s) while one is in progress; ignored", why)
                 return False
             self.running = True
             self.started = time.time()
             self.error = None
-        threading.Thread(target=self._run, args=(strategy,), daemon=True).start()
+        threading.Thread(target=self._run, args=(strategy, send, why), daemon=True).start()
         return True
 
-    def _run(self, strategy: str) -> None:
+    def _notify(self, opts: Dict, title: str, message: str, urgent: bool = False) -> None:
+        service = (opts.get("notify_service") or "").strip()
+        if not service:
+            log.info("no notify_service configured; not notifying")
+            return
+        try:
+            notify.send(service, title, message, urgent=urgent)
+            self.notified = "Sent to %s" % service
+        except Exception as e:  # noqa: BLE001 -- the report still exists; say so on the page
+            self.notified = None
+            self.error = (self.error + " · " if self.error else "") + "Notification failed: %s" % e
+            log.error("notification failed: %s", e)
+
+    def _run(self, strategy: str, send: bool, why: str) -> None:
         opts = load_options()
+        self.notified = None
         try:
             username = (opts.get("username") or "").strip()
             if not username:
@@ -108,13 +125,19 @@ class Runner:
             self.last = os.path.basename(res.report_path)
             self.summary = "%s strategy · %d API calls · %d trade packages checked · %.0fs" % (
                 res.strategy, res.calls, res.evaluated, res.seconds)
-            log.info("run done: %s (%s)", self.last, self.summary)
+            log.info("run done (%s): %s (%s)", why, self.last, self.summary)
+            if send:
+                self._notify(opts, res.title, res.message, res.urgent)
         except RunError as e:
             self.error = str(e)
             log.warning("run refused: %s", e)
+            if send:
+                self._notify(opts, "Dynasty Advisor: run didn't happen", str(e))
         except Exception as e:  # noqa: BLE001 -- surfaced on the page, full trace in the log
             self.error = "Run failed: %s: %s" % (type(e).__name__, e)
             log.error("run failed:\n%s", traceback.format_exc())
+            if send:
+                self._notify(opts, "Dynasty Advisor: run failed", self.error)
         finally:
             with self.lock:
                 self.running = False
@@ -246,6 +269,7 @@ main { max-width: 920px; margin: 0 auto; padding: 16px; }
 .top h1 { font-size:20px; margin:0; }
 .dim { color:var(--dim); font-size:13px; }
 form.run { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+label input { vertical-align:-2px; margin-right:4px; }
 select, button { font: inherit; border-radius:8px; padding:8px 12px; border:1px solid var(--line);
   background:var(--chip); color:var(--fg); }
 button { background:var(--accent); color:var(--accent-fg); border:none; font-weight:600; cursor:pointer; }
@@ -298,7 +322,15 @@ def render_page(selected: Optional[str]) -> str:
     if r.running:
         status = "<div class=dim>Pulling your league, four seasons of trades and today's values. Usually under a minute.</div>"
     elif r.summary and r.finished:
-        status = "<div class=dim>Last run %s · %s</div>" % (_e(_clock(datetime.fromtimestamp(r.finished))), _e(r.summary))
+        status = "<div class=dim>Last run %s · %s%s</div>" % (
+            _e(_clock(datetime.fromtimestamp(r.finished))), _e(r.summary), " · " + _e(r.notified) if r.notified else "")
+    sched = notify.parse_schedule(opts.get("schedule") or [])
+    svc = (opts.get("notify_service") or "").strip()
+    status += "<div class=dim>%s</div>" % _e(
+        ("Scheduled: %s%s" % (notify.describe(sched), " · notifies %s" % svc if svc else " · no phone notifications set"))
+        if sched else "No scheduled runs (add some in the app's Configuration tab).")
+    check = ("<label class=dim><input type=checkbox name=notify value=1%s> notify my phone</label>" % (" disabled" if r.running else "")
+             if svc else "")
     err = "<div class='card err'>%s</div>" % _e(r.error) if r.error and not r.running else ""
     if not opts.get("username"):
         err += "<div class='card err'>No Sleeper username set. Open Settings → Apps → Dynasty Advisor → Configuration.</div>"
@@ -313,9 +345,9 @@ def render_page(selected: Optional[str]) -> str:
 <meta name=referrer content=no-referrer>%s<title>Dynasty Advisor</title><style>%s</style></head>
 <body><main>
 <div class=card><div class=top><h1>Dynasty Advisor</h1>
-<form class=run method=post action=run><select name=strategy%s>%s</select>%s</form></div>%s</div>
+<form class=run method=post action=run><select name=strategy%s>%s</select>%s%s</form></div>%s</div>
 %s%s%s
-</main></body></html>""" % (refresh, CSS, " disabled" if r.running else "", select, button, status, err, report, hist)
+</main></body></html>""" % (refresh, CSS, " disabled" if r.running else "", select, check, button, status, err, report, hist)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -362,7 +394,7 @@ class Handler(BaseHTTPRequestHandler):
         strategy = (form.get("strategy") or ["auto"])[0]
         if strategy not in STRATEGY_CHOICES:
             strategy = "auto"
-        RUNNER.start(strategy)
+        RUNNER.start(strategy, send=(form.get("notify") or [""])[0] == "1", why="manual")
         self.send_response(303)
         self.send_header("Location", "./")  # relative: stays inside the ingress prefix
         self.send_header("Content-Length", "0")
@@ -376,6 +408,15 @@ def main() -> None:
     host = os.environ.get("ADVISOR_HOST", "0.0.0.0" if INGRESS_ONLY else "127.0.0.1")
     os.makedirs(DATA, exist_ok=True)
     log.info("dynasty advisor page on %s:%d (ingress only: %s, data: %s)", host, port, INGRESS_ONLY, DATA)
+    if os.environ.get("ADVISOR_SCHEDULE", "1") == "1":
+        def fire(key: str) -> None:
+            opts = load_options()
+            strategy = opts.get("strategy") or "auto"
+            RUNNER.start(strategy if strategy in STRATEGY_CHOICES else "auto", send=True, why="scheduled " + key)
+        sched = notify.Scheduler(os.path.join(DATA, "schedule_state.json"),
+                                 lambda: load_options().get("schedule") or [], fire)
+        log.info("schedule: %s", notify.describe(notify.parse_schedule(load_options().get("schedule") or [])) or "none")
+        sched.start()
     ThreadingHTTPServer((host, port), Handler).serve_forever()
 
 

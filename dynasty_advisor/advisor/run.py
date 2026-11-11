@@ -14,7 +14,7 @@ from .history import load_trades, walk_chain
 from .http import CachedHttp
 from .league import load_league
 from .profiles import build_manager_profiles
-from .report import journal, render
+from .report import journal, render, summarize
 from .sleeper import Sleeper
 from .teams import build_team_profiles
 from .trades import STRATEGIES, TradeSearch
@@ -37,6 +37,9 @@ class RunResult:
     calls: int
     seconds: float
     evaluated: int
+    title: str = ""
+    message: str = ""
+    urgent: bool = False
 
 
 def run_once(
@@ -104,4 +107,6 @@ def run_once(
         f.write(md)
     os.replace(out + ".tmp", out)
     jpath = journal(data_dir, league, strategy, ideas, ad, book)
-    return RunResult(out, jpath, md, strategy, http.calls, time.time() - t0, search.evaluated)
+    title, message, urgent = summarize(league, ideas, ad)
+    return RunResult(out, jpath, md, strategy, http.calls, time.time() - t0, search.evaluated,
+                     title, message, urgent)

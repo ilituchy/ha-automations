@@ -10,7 +10,7 @@ import json
 import os
 import time
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .adddrop import AddDropReport, Candidate
 from .assets import Asset, AssetBook
@@ -212,3 +212,40 @@ def journal(data_dir: str, league: League, strategy: str, ideas: List[TradeIdea]
     with open(path, "w") as f:
         json.dump(body, f, indent=1)
     return path
+
+
+def _short(a: Asset) -> str:
+    return a.label.split(" via ")[0]
+
+
+def summarize(league: League, ideas: List[TradeIdea], ad: AddDropReport) -> Tuple[str, str, bool]:
+    """(title, message, urgent) for the phone notification. Short: it is
+    read on a lock screen, and the page has the full reasoning."""
+    dl = league.trade_deadline
+    trades_open = not dl or league.week <= dl
+    deadline_week = bool(dl) and league.week >= dl - 1 and trades_open
+    lines: List[str] = []
+    if trades_open:
+        for i in ideas[:3]:
+            lines.append("%s (%s): give %s for %s" % (
+                i.partner.team.display_name, i.partner.mode,
+                " + ".join(_short(a) for a in i.opening.give),
+                " + ".join(_short(a) for a in i.opening.get)))
+    moves = []
+    if ad.ir_moves and ad.reserve_open > 0:
+        moves.append("IR: " + ", ".join(a.label for a in ad.ir_moves[: ad.reserve_open]))
+    adds = [a.asset.label for a, d, _g in ad.swaps]
+    if adds:
+        moves.append("Add: " + ", ".join(adds[:3]))
+    if moves:
+        lines.append(" · ".join(moves))
+    n = len(ideas) if trades_open else 0
+    if deadline_week:
+        title = "Trade deadline week %d — %d trade idea%s" % (dl, n, "" if n == 1 else "s")
+    elif n:
+        title = "%d trade idea%s%s" % (n, "" if n == 1 else "s", ", plus roster moves" if moves else "")
+    elif moves:
+        title = "Roster moves this week"
+    else:
+        title = "Nothing worth doing this week"
+    return "Dynasty Advisor: " + title, "\n".join(lines) or "Open the report for details.", deadline_week

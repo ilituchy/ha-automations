@@ -4,7 +4,7 @@
 # Supervisor 2026.04.0 BUILD_FROM is only passed when a build file exists.
 FROM ghcr.io/home-assistant/base-python:3.13-alpine3.24-2026.06.1
 
-ARG BUILD_VERSION="0.1.0"
+ARG BUILD_VERSION="0.2.0"
 ARG BUILD_ARCH="amd64"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

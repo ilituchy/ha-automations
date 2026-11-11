@@ -14,5 +14,16 @@ configuration:
     description: >-
       auto follows your team's position (in a playoff spot = win now, out of it
       = rebuild). You can also pick per run on the page.
+  schedule:
+    name: Scheduled runs
+    description: >-
+      When to run automatically and notify your phone, like "tue 18:00" or
+      "daily 09:00", in Home Assistant's timezone. Sleeper waivers clear just
+      after midnight Pacific going into Wednesday, so keep a Tuesday evening run.
+  notify_service:
+    name: Notify service
+    description: >-
+      Your phone's notify service without the "notify." prefix, e.g.
+      mobile_app_iphone. Leave empty to run on schedule without notifying.
   log_level:
     name: Log level

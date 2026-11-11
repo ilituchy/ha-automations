@@ -1,7 +1,7 @@
 ---
 slug: dynasty_advisor
 name: Dynasty Advisor
-version: "0.1.0"
+version: "0.2.0"
 description: >-
   Trade targets and add/drop recommendations for a Sleeper dynasty football
   league. Read-only: it recommends, you make the moves in Sleeper.
@@ -13,6 +13,9 @@ arch:
 
 # The base image ships s6-overlay v3, which is the container's init.
 init: false
+
+# Core API via the Supervisor proxy, for phone notifications only.
+homeassistant_api: true
 
 # The page is served only through the HA sidebar. No `ports:` key, so 8099 is
 # never published on the host; the app also refuses any client that is not the
@@ -32,10 +35,23 @@ options:
   username: ""
   league_id: ""
   strategy: auto
+  # When to run on its own and send the result to your phone, as "<day> HH:MM"
+  # (mon..sun or daily), in Home Assistant's timezone. Waivers in a Sleeper
+  # league clear just after midnight Pacific going into Wednesday, so Tuesday
+  # evening is the last useful moment for pickups.
+  schedule:
+    - "tue 18:00"
+    - "sat 10:00"
+  # A notify service, e.g. mobile_app_iphone (Settings > Companion app shows
+  # your device). Empty = scheduled runs still happen, nothing is sent.
+  notify_service: ""
   log_level: info
 
 schema:
   username: str?
   league_id: str?
   strategy: list(auto|contend|balanced|rebuild)
+  schedule:
+    - match(^\s*(mon|tue|wed|thu|fri|sat|sun|daily)\s+([01]?\d|2[0-3]):[0-5]\d\s*$)
+  notify_service: str?
   log_level: list(debug|info|warning|error)
