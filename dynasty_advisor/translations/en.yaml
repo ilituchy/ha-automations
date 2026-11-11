@@ -1,0 +1,18 @@
+---
+configuration:
+  username:
+    name: Sleeper username
+    description: >-
+      Your Sleeper username (the one in your profile, not your email).
+  league_id:
+    name: League ID
+    description: >-
+      The long number in your league's URL on sleeper.com. Leave empty if you
+      are in exactly one dynasty league and it will be found automatically.
+  strategy:
+    name: Default strategy
+    description: >-
+      auto follows your team's position (in a playoff spot = win now, out of it
+      = rebuild). You can also pick per run on the page.
+  log_level:
+    name: Log level

@@ -1,0 +1,22 @@
+#!/command/with-contenv bashio
+# ==============================================================================
+# Dynasty Advisor -- the ingress page. Runs happen on demand from the page.
+# The Python app reads /data/options.json itself; only the log level is read here.
+# ==============================================================================
+declare log_level
+log_level=$(bashio::config 'log_level' 'info')
+bashio::log.level "${log_level}"
+
+if ! bashio::config.has_value 'username'; then
+    bashio::log.warning "No Sleeper username set yet. Open the app's Configuration tab; the page will say the same."
+fi
+
+export ADVISOR_DATA="/data"
+export ADVISOR_OPTIONS="/data/options.json"
+export ADVISOR_INGRESS_ONLY="1"
+export ADVISOR_PORT="8099"
+export ADVISOR_LOG_LEVEL="${log_level}"
+
+bashio::log.info "Starting Dynasty Advisor..."
+cd /app || bashio::exit.nok "Could not change to /app"
+exec python3 -m advisor.web
