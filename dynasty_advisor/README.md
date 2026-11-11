@@ -47,6 +47,11 @@ Config (kept **outside** this public repo — league ids identify a real team):
 {"username": "<sleeper username>", "league_id": "<league id>", "strategy": "auto"}
 ```
 
+In Home Assistant the app runs as an ingress page (`advisor/web.py`) with a
+**Run now** button, plus scheduled runs that push a summary to your phone
+(`advisor/notify.py`; see DOCS.md). Deploying follows
+`../nba_autopilot/docs/DEPLOY.md`; the canary is the `schedule:` log line.
+
 `strategy`: `auto` (default) follows your team's own mode — contender ->
 `contend`, seller -> `rebuild`, else `balanced`.
 
@@ -86,7 +91,6 @@ starter and 4th-round picks count for roughly nothing.
   loader refuses to run on an empty or tiny response instead of silently
   valuing everyone at zero.
 * K and DEF are unvalued and excluded from trades and add/drop.
-* No LLM reviewer yet (porting doc §4: a model that can only veto). Planned
-  before ideas are pushed as notifications.
+* No LLM reviewer yet (porting doc §4: a model that can only veto).
 * `practice_participation` was empty for every player on a Wednesday — not used
   until it is seen populated.
