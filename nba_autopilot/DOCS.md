@@ -747,6 +747,31 @@ A refusal with no fallback -- a fill ESPN simply will not do -- is abandoned,
 and the moves that depended on it are reported as unreachable rather than sent
 and rejected.
 
+**Both IR directions do this, and the flag that reveals it only appears
+afterwards.** The roster *entry* carries a transaction status separate from the
+player's medical one:
+
+| entry `injuryStatus` | what ESPN silently refuses |
+| --- | --- |
+| `FUTURE_TO_IR` | moving him **onto** IR |
+| `FUTURE_FROM_IR` | moving him **off** IR |
+| `NORMAL` | nothing -- moves are honored |
+
+ESPN sets the flag *in response to* the discarded request: it queues the move
+for a later scoring period instead of performing it now. So the flag blocks
+every attempt after the first and cannot block the first, which is why the
+read-back is needed as well as the flag. The app refuses to plan an IR
+placement for a `FUTURE_TO_IR` entry, and pins a `FUTURE_FROM_IR` player to IR
+as lineup-locked -- ESPN will not move him this period, so the optimizer must
+not build a lineup around a vacancy that will never appear.
+
+The `FUTURE_FROM_IR` case is the more dangerous of the two, because the item it
+drops is a *fill*. On 11 November the rebalance after an IR activation sent
+`George IR->SG; Rollins SG->BE`; ESPN applied the vacate and dropped the fill,
+so **the SG slot stood empty through a game night** and the write reported
+success. A starting slot left empty is not a suboptimal lineup, it is a
+forfeited one, so any refusal that leaves one now raises rather than warns.
+
 Underneath that sits the step planner, which orders the moves so every
 transaction only ever fills a slot that is *already empty* by the roster ESPN
 itself just reported. That was built on 10 November, when the cause was still

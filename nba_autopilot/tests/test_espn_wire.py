@@ -38,7 +38,7 @@ sys.path.insert(
 
 import main as main_mod  # noqa: E402
 from espn import ids, read  # noqa: E402
-from espn.read import EspnConfig, EspnRead  # noqa: E402
+from espn.read import EspnConfig, EspnError, EspnRead  # noqa: E402
 from espn.write import EspnWrite, PreflightError  # noqa: E402
 from models import LeagueSettings, RosterEntry  # noqa: E402
 from solve.calendar import SeasonCalendar  # noqa: E402
@@ -219,11 +219,17 @@ class _CapturingClient:
 
     def __init__(self, status="EXECUTED"):
         self.bodies = []
+        #: Items of every POST this client answered with a success, so a
+        #: paired ``_FakeRead`` can show the roster the write produced. A read
+        #: that cannot do that is a fake the read-back verification in
+        #: ``set_lineup`` can never pass.
+        self.accepted = []
         self._status = status
 
     def post(self, url, content=None, headers=None, cookies=None):
         body = json.loads(content.decode("utf-8"))
         self.bodies.append(body)
+        self.accepted.append(body.get("items") or [])
         return _Resp({
             "id": "dc39b83f-3bf9-4f0f-9b14-71472ea6f7fa",
             "status": self._status,
@@ -274,13 +280,25 @@ def _player(pid, name, slot, eligible=(UTIL, BE), **kw):
 
 
 class _FakeRead:
-    def __init__(self, roster, pending=(), pool=None):
+    def __init__(self, roster, pending=(), pool=None, client=None):
         self._roster = list(roster)
         self._pending = list(pending)
         self._pool = dict(pool or {})
+        #: When set, ``roster()`` reflects the LINEUP items ``client`` accepted,
+        #: so ``set_lineup``'s read-back sees the lineup its own write made.
+        self.client = client
 
     def roster(self, team_id=None, scoring_period=None):
-        return list(self._roster)
+        if self.client is None:
+            return list(self._roster)
+        slots = {p.player_id: p.current_slot for p in self._roster}
+        for items in getattr(self.client, "accepted", ()):
+            for i in items:
+                if i.get("type") != "LINEUP":
+                    continue
+                slots[int(i["playerId"])] = int(i["toLineupSlotId"])
+        return [dataclasses.replace(p, current_slot=slots[p.player_id])
+                for p in self._roster]
 
     def league_settings(self):
         return _settings()
@@ -309,7 +327,8 @@ def _writer(roster=ROSTER, pending=(), pool=None, status="EXECUTED"):
     cfg = EspnConfig(league_id=1, team_id=7, espn_s2="s2", swid="{X}", season=2027)
     http = _CapturingClient(status)
     pool = pool if pool is not None else {50: FREE_AGENT, 51: ON_WAIVERS}
-    w = EspnWrite(cfg, http, _FakeRead(roster, pending, pool), shadow_mode=False)
+    w = EspnWrite(cfg, http, _FakeRead(roster, pending, pool, client=http),
+                  shadow_mode=False)
     return w, http
 
 
@@ -972,7 +991,6 @@ class _SlotLimitClient(_CapturingClient):
         )
         self.kind = kind or ("TRAN_ROSTER_SLOT_LIMIT_EXCEEDED" if message is None
                              else "TRAN_ROSTER_LOCKED")
-        self.accepted = []
 
     def post(self, url, content=None, headers=None, cookies=None):
         body = json.loads(content.decode("utf-8"))
@@ -1087,17 +1105,8 @@ class _FakeReadWithSettings(_FakeRead):
     """Replays whatever ``client`` accepted, so a read-back tells the truth."""
 
     def __init__(self, roster, settings, client=None):
-        super().__init__(roster)
+        super().__init__(roster, client=client)
         self._settings = settings
-        self.client = client
-
-    def roster(self, team_id=None, scoring_period=None):
-        slots = {p.player_id: p.current_slot for p in self._roster}
-        for items in getattr(self.client, "accepted", ()):
-            for i in items:
-                slots[int(i["playerId"])] = int(i["toLineupSlotId"])
-        return [dataclasses.replace(p, current_slot=slots[p.player_id])
-                for p in self._roster]
 
     def league_settings(self):
         return self._settings
@@ -1602,6 +1611,40 @@ class TestEntryInjuryStatusGatesIR(unittest.TestCase):
         del raw["injuryStatus"]
         self.assertTrue(read._parse_entry(raw).ir_eligible)
 
+    # -- the other direction: FUTURE_FROM_IR -------------------------------
+    #
+    # Regression for 2026-11-11. The 2026-11-09 fix above gates moves *to* IR.
+    # The mirror case is a player already on IR whose *activation* ESPN has
+    # queued for a later period: it discards ``IR -> <slot>`` just as quietly.
+    # Live, the rebalance after an IR activation sent
+    # ``George IR->SG; Rollins SG->BE``, ESPN applied only the second, and the
+    # SG slot stood empty through a game night while the write reported 200.
+
+    def test_future_from_ir_pins_the_player_to_ir(self):
+        e = read._parse_entry(self._entry("FUTURE_FROM_IR", slot=13,
+                                          player_status="DAY_TO_DAY"))
+        self.assertEqual(13, e.current_slot)
+        self.assertTrue(
+            e.lineup_locked,
+            "a player ESPN will not activate this period must be pinned, or "
+            "the optimizer plans a lineup around a vacancy that never appears",
+        )
+
+    def test_future_from_ir_off_ir_does_not_pin(self):
+        """The flag only means anything while he is sitting on IR."""
+        e = read._parse_entry(self._entry("FUTURE_FROM_IR", slot=12))
+        self.assertFalse(e.lineup_locked)
+
+    def test_a_normal_player_on_ir_is_not_pinned(self):
+        """Activating off IR is the ordinary case and must stay available."""
+        e = read._parse_entry(self._entry("NORMAL", slot=13))
+        self.assertFalse(e.lineup_locked)
+
+    def test_espns_own_lock_still_pins(self):
+        raw = self._entry("NORMAL", slot=11)
+        raw["playerPoolEntry"]["lineupLocked"] = True
+        self.assertTrue(read._parse_entry(raw).lineup_locked)
+
     def test_any_other_pending_ir_state_is_also_refused(self):
         for state in ("TO_IR", "FROM_IR", "RETURNING_FROM_IR", "future_to_ir"):
             with self.subTest(state=state):
@@ -1717,14 +1760,41 @@ class TestSilentlyRefusedItems(unittest.TestCase):
         self.assertLessEqual(len(to_ir), 2, "the refused IR move was resent")
 
     def test_a_refusal_with_nowhere_to_fall_back_to_stops_cleanly(self):
-        # ESPN swallows George's move into SG instead. There is no second-best
-        # slot to aim at, so the remaining moves are simply unreachable.
-        w, _, world = self._writer(swallow=((self.GEORGE, SG),))
-        result = w.set_lineup(dict(self.TARGET), scoring_period=23)
+        # ESPN swallows George's move to the bench. There is no second-best
+        # slot to aim a bench move at, so the pair is simply unreachable --
+        # and because nobody vacated a starting slot, nothing is left empty.
+        w, _, world = self._writer(swallow=((self.GEORGE, BE),))
+        result = w.set_lineup(
+            {self.MURPHY: SG, self.GEORGE: BE, self.SMITH: UTIL,
+             self.SHEAD: PG},
+            scoring_period=23,
+        )
         self.assertTrue(result.ok)
         self.assertEqual([self.GEORGE],
                          [int(i["playerId"]) for i in result.unhonored])
         slots = {p.player_id: p.current_slot for p in world.entries()}
-        # George stayed where ESPN insists, and nothing doubled up behind him.
+        # George stayed where ESPN insists, and Smith was not sent in behind
+        # him to overflow the slot.
         self.assertEqual(UTIL, slots[self.GEORGE])
-        self.assertNotEqual(slots[self.SMITH], slots[self.GEORGE])
+        self.assertEqual(BE, slots[self.SMITH])
+
+    def test_an_empty_starting_slot_is_never_silent(self):
+        """The 2026-11-11 SG hole: a dropped item left a slot scoring zero.
+
+        ``George IR->SG`` was discarded and the ``Rollins SG->BE`` paired with
+        it was not, so SG stood empty through a game night and the write
+        reported success. Modelled here as a refused fill of SG whose partner
+        vacate went through.
+        """
+        w, _, world = self._writer(swallow=((self.GEORGE, SG),))
+        # George was to take SG while Murphy leaves it for the bench.
+        target = {self.MURPHY: BE, self.GEORGE: SG,
+                  self.SMITH: UTIL, self.SHEAD: PG}
+        with self.assertRaises(EspnError) as caught:
+            w.set_lineup(target, scoring_period=23)
+        self.assertIn("SG", str(caught.exception))
+        self.assertIn("empty", str(caught.exception))
+        self.assertIn("Keyonte George", str(caught.exception))
+        # And it really is empty -- the alarm is not crying wolf.
+        occupied = {p.current_slot for p in world.entries()}
+        self.assertNotIn(SG, occupied)

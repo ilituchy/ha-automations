@@ -409,6 +409,22 @@ class EspnWrite:
             "did not apply %d of %d item(s): %s. The rest stand.",
             len(refused), len(items), self._describe_refusals(refused, current),
         )
+        empty = self._empty_starting_slots(after, settings)
+        if empty:
+            # Never silent. The whole cost of this class of bug was that it
+            # looked like success, and an unfilled starting slot scores zero
+            # for certain. The next sweep re-solves and fills it; the owner
+            # should not have to find out from the box score.
+            raise EspnError(
+                "ESPN silently dropped %d lineup item(s) -- %s -- and that has "
+                "left %s empty. The lineup is live and incomplete; the next "
+                "sweep will re-solve it."
+                % (
+                    len(refused),
+                    self._describe_refusals(refused, current),
+                    ", ".join(sorted(ids.slot_name(s) for s in empty)),
+                )
+            )
         if any(
             int(i["toLineupSlotId"]) == ids.IR_SLOT
             and ids.is_starting_slot(int(i["actualLineupSlotId"]))
@@ -603,6 +619,22 @@ class EspnWrite:
                         goal[pid] = here
             live = after
 
+        empty = self._empty_starting_slots(live, settings)
+        if empty:
+            # Same alarm as the single-shot path, for the same reason: a hole
+            # in the starting lineup scores zero and must not pass as success.
+            raise EspnError(
+                "ESPN silently dropped %d lineup item(s) -- %s -- and that has "
+                "left %s empty. %d move(s) were applied. The lineup is live "
+                "and incomplete; the next sweep will re-solve it."
+                % (
+                    len(refused_all),
+                    self._describe_refusals(refused_all, current) or "nothing",
+                    ", ".join(sorted(ids.slot_name(x) for x in empty)),
+                    len(done),
+                )
+            )
+
         return WriteResult(
             ok=True,
             shadow=False,
@@ -619,6 +651,31 @@ class EspnWrite:
 
     def _team_label(self, team_id: int) -> str:
         return "team %d in league %d" % (int(team_id), int(self.cfg.league_id))
+
+    @staticmethod
+    def _empty_starting_slots(
+        after: Sequence[RosterEntry], settings: Any,
+    ) -> List[SlotId]:
+        """Starting slots left standing empty, which score a guaranteed zero.
+
+        The reason this is checked at all: on 2026-11-11 a refusal ESPN did not
+        report left the SG slot empty on a game night. ``George IR->SG`` was
+        discarded and the ``Rollins SG->BE`` it was paired with was not, so the
+        slot the app had just emptied was never refilled -- and the write
+        reported success. An empty starting slot is not a suboptimal lineup,
+        it is a forfeited one, so it is worth its own alarm.
+        """
+        occupancy: Dict[SlotId, int] = {}
+        for p in after:
+            occupancy[int(p.current_slot)] = occupancy.get(int(p.current_slot), 0) + 1
+        empty = []
+        for slot, cap in settings.lineup_slot_counts.items():
+            slot, cap = int(slot), int(cap)
+            if cap <= 0 or not ids.is_starting_slot(slot):
+                continue
+            if occupancy.get(slot, 0) < cap:
+                empty.extend([slot] * (cap - occupancy.get(slot, 0)))
+        return empty
 
     def _readback(
         self, team_id: int, period: int,

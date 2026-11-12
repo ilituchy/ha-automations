@@ -1193,6 +1193,35 @@ def _parse_entry(raw: Mapping[str, Any]) -> RosterEntry:
             player.get("fullName") or pid, entry_injury,
         )
 
+    # The mirror image of ``FUTURE_TO_IR``, and it bites in the other
+    # direction: ``FUTURE_FROM_IR`` means ESPN has queued the player's
+    # *activation* off IR for a later period and will not do it now. Asking
+    # anyway gets HTTP 200 and nothing else -- the move is discarded exactly as
+    # a ``FUTURE_TO_IR`` placement is.
+    #
+    # Caught live on 2026-11-11, and it is worse than a wasted request. The
+    # rebalance after an IR activation sent ``George IR->SG; Rollins SG->BE``;
+    # ESPN applied the second item and dropped the first, so George stayed on
+    # IR, Rollins went to the bench, and the SG slot stood **empty** through
+    # a game night. The write reported success.
+    #
+    # ``ir_eligible`` is the wrong lever here -- it gates moves *to* IR, and
+    # this player is already there. What is true is simply that ESPN will not
+    # move him this period, which is what ``lineup_locked`` already means to
+    # the optimizer: his slot becomes a hard constraint and nothing is planned
+    # around a vacancy that will not appear.
+    frozen_on_ir = (
+        int(raw.get("lineupSlotId", ids.BENCH_SLOT)) == ids.IR_SLOT
+        and entry_injury == "FUTURE_FROM_IR"
+    )
+    if frozen_on_ir:
+        log.info(
+            "%s is on IR and ESPN's roster entry says FUTURE_FROM_IR -- his "
+            "activation is queued for a later period, so he is pinned to IR "
+            "for this one; ESPN discards the move without reporting an error",
+            player.get("fullName") or pid,
+        )
+
     # The market readings. Present in both payload shapes -- verified live
     # 2026-10-21 against ``mRoster`` and ``kona_player_info`` both -- and read
     # with ``_opt_float``/``_opt_int`` rather than ``or 0`` so that a field ESPN
@@ -1209,7 +1238,11 @@ def _parse_entry(raw: Mapping[str, Any]) -> RosterEntry:
         eligible_slots=eligible,
         pro_team_id=int(player.get("proTeamId") or 0),
         injury_status=status,
-        lineup_locked=bool(raw.get("lineupLocked") or raw.get("playerPoolEntry", {}).get("lineupLocked")),
+        lineup_locked=bool(
+            raw.get("lineupLocked")
+            or raw.get("playerPoolEntry", {}).get("lineupLocked")
+            or frozen_on_ir
+        ),
         ir_eligible=ir_ok,
         # ``pool`` already normalized the two payload shapes above, which is
         # what makes one line enough: on ``mRoster`` this reads

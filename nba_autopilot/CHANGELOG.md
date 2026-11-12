@@ -8,6 +8,23 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **ESPN silently refuses IR moves in both directions, and the app only
+  guarded one.** The 2026-11-09 fix stopped it planning a move *onto* IR for an
+  entry marked `FUTURE_TO_IR`. The mirror case went unguarded: a player already
+  on IR whose activation ESPN has queued for a later period carries
+  `FUTURE_FROM_IR`, and `IR -> <slot>` is discarded just as quietly. Caught
+  live on 2026-11-11 -- the rebalance after an IR activation sent
+  `George IR->SG; Rollins SG->BE`, ESPN applied the vacate and dropped the
+  fill, and the SG slot stood empty through a game night while the write
+  reported 200. Such a player is now pinned to IR as lineup-locked, so the
+  optimizer does not build a lineup around a vacancy that never appears.
+
+  ESPN sets these flags *in response to* the discarded request, so they block
+  the second attempt and never the first -- which is why the roster read-back
+  above is needed as well. And any refusal that leaves a **starting slot
+  empty** now raises instead of warning: an unfilled slot scores zero, and the
+  whole cost of this class of bug was that it looked like success.
+
 - **Found the cause of the `Too many players in the SG slot` refusals: ESPN
   returns 200 for lineup items it silently does not perform.** Caught live on
   2026-11-11. The app sent `Murphy SG->IR`, ESPN answered 200 and recorded the
