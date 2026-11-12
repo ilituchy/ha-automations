@@ -8,6 +8,32 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **Found the cause of the `Too many players in the SG slot` refusals: ESPN
+  returns 200 for lineup items it silently does not perform.** Caught live on
+  2026-11-11. The app sent `Murphy SG->IR`, ESPN answered 200 and recorded the
+  item as `SG -> SG` -- a same-slot no-op -- so Murphy never left SG, and the
+  next write putting George into SG was refused for holding two players in a
+  one-deep slot. ESPN's arithmetic was right throughout; the app was planning
+  against a vacate that had never happened. ESPN's own transaction record is
+  no help either: `Jackson IR->BE; Murphy BE->IR` came back 200 with both
+  items recorded as executed and a roster read seconds later had Murphy back
+  on the bench. And there is no error text to match on -- an ineligible player
+  drew an explicit 409 naming the reason, while this was dropped without a
+  word four times running.
+
+  So `set_lineup` now **reads the roster back after every write** and treats
+  any player who is not in the slot that was asked for as a refusal, reported
+  by name and by where he actually is (`WriteResult.unhonored`). The stepwise
+  retry re-plans from that read-back instead of from what it assumed its last
+  write did, which is what stops the cascade. A refused move *to IR* for a
+  player still in a starting slot is re-aimed at the **bench** -- the solver
+  wanted him off the floor, and the bench is reachable where IR was not, which
+  also frees the slot the rest of the plan is waiting on. A refusal with no
+  fallback is abandoned and the moves depending on it are reported as
+  unreachable, rather than sent to be rejected. `_find_cycle` no longer
+  returns a single doomed move when no ordering can free a slot; the planner
+  says so and the retry stops with what landed.
+
 - **A slot-limit refusal no longer costs the day's lineup.** On 2026-11-10
   ESPN refused the morning write in Chairman's three times with `Too many
   players in the SG slot (maximum 1)` -- for a target holding exactly one

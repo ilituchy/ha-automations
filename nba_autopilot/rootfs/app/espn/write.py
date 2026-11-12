@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 import httpx
@@ -67,6 +67,9 @@ class WriteResult:
     status: Optional[str] = None
     raw: Optional[Mapping[str, Any]] = None
     messages: Sequence[str] = field(default_factory=tuple)
+    #: Items ESPN accepted with a 200 but did not actually apply, each with an
+    #: extra ``actualLineupSlotId``. See ``EspnWrite._unhonored``.
+    unhonored: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
 
 
 SLOT_LIMIT_MARKERS = ("TRAN_ROSTER_SLOT_LIMIT_EXCEEDED", "Too many players in the")
@@ -141,6 +144,17 @@ def plan_lineup_steps(
         if not batch:
             batch = _find_cycle(state, wanted)
 
+        if not batch:
+            raise PreflightError(
+                "no safe order exists for %d remaining lineup move(s): %s"
+                % (
+                    len(wanted),
+                    ", ".join(
+                        "%d -> %s" % (pid, ids.slot_name(slot))
+                        for pid, slot in sorted(wanted.items())
+                    ),
+                )
+            )
         batches.append(batch)
         for pid in batch:
             state[pid] = wanted.pop(pid)
@@ -176,8 +190,16 @@ def _find_cycle(
         if nxt is None:
             # Nobody pending holds the slot, so the slot is full of players
             # who are staying put: no ordering frees it and no cycle exists.
-            # Sending the move alone is the honest thing -- ESPN will say so.
-            return [node]
+            #
+            # This used to send the move on its own and let ESPN object. That
+            # reads as honest but behaves badly: the move is certain to be
+            # refused on the slot limit, and a refusal mid-retry aborts the
+            # whole sequence with a part-applied lineup. It is also exactly
+            # the state a silently dropped item leaves behind -- the vacate
+            # never happened, so the slot is held by someone "staying put" who
+            # was supposed to leave. Returning nothing lets the caller stop,
+            # keep the moves that did land, and say which ones it gave up on.
+            return []
         node = nxt
     return path[seen[node]:]
 
@@ -363,7 +385,7 @@ class EspnWrite:
         if self.shadow_mode:
             return self._shadow("LINEUP", items, body)
         try:
-            return self._post(body, "LINEUP")
+            result = self._post(body, "LINEUP")
         except EspnError as exc:
             if not _is_slot_limit_rejection(exc):
                 raise
@@ -374,6 +396,35 @@ class EspnWrite:
             return self._set_lineup_stepwise(
                 team_id, current, target, settings, int(period), items,
             )
+
+        after = self._readback(team_id, int(period))
+        if after is None:
+            return result
+        refused = self._unhonored(items, after)
+        if not refused:
+            return result
+        log.warning(
+            "ESPN returned 200 for the lineup but a roster read-back shows it "
+            "did not apply %d of %d item(s): %s. The rest stand.",
+            len(refused), len(items), self._describe_refusals(refused, current),
+        )
+        if any(
+            int(i["toLineupSlotId"]) == ids.IR_SLOT
+            and ids.is_starting_slot(int(i["actualLineupSlotId"]))
+            for i in refused
+        ):
+            # Worst case of a silent refusal: a player the solver wanted off
+            # the floor is still on it, holding a slot. Re-plan from the roster
+            # ESPN actually reports rather than leave him starting until the
+            # next sweep, which would propose the same refused move again.
+            log.warning(
+                "a refused IR move has left a player in a scoring slot; "
+                "re-planning from the roster ESPN reports",
+            )
+            return self._set_lineup_stepwise(
+                team_id, after, target, settings, int(period), items,
+            )
+        return replace(result, unhonored=tuple(refused))
 
     # -- the stepwise fallback ---------------------------------------------
 
@@ -395,53 +446,85 @@ class EspnWrite:
         valid -- exactly one player in SG, checked by ``_preflight_lineup``
         against ESPN's own ``lineupSlotCounts`` -- and so was every reachable
         reading of the pre-transaction roster: SG was *empty*, and exactly one
-        item named it. Probing the live API afterwards ruled out the obvious
-        explanations one by one: item order does not matter (a fill posted
-        before its vacate is accepted), a swap inside one transaction is
-        accepted, an off-IR move into a slot whose occupant leaves in the same
-        transaction is accepted, a refused IR move reports itself explicitly
-        rather than as a slot limit, and a write to a non-current scoring
-        period is refused outright with a different message. Whatever ESPN
-        counted, we could not reproduce it from the outside.
+        item named it.
 
-        So this does not try to out-guess ESPN's counting. It removes the
-        question. :func:`plan_lineup_steps` orders the moves so that **every
-        transaction only ever fills a slot that is already empty**, by the
-        roster state ESPN itself just reported. A slot that is empty before the
-        write cannot be over-full after a single move into it under any
-        counting rule, in any item order, whatever ESPN does with
-        ``fromLineupSlotId``.
+        The cause turned up on 2026-11-11 and is not a counting rule at all:
+        **ESPN had silently not performed the item that vacated SG.** It
+        answered 200 and recorded ``Murphy SG->IR`` as ``SG -> SG``, so SG was
+        never empty, and the fill that followed genuinely did put two players
+        in a one-deep slot. See :meth:`_unhonored` for the evidence and for
+        why neither the status code nor ESPN's transaction record can be
+        trusted to detect it.
+
+        This method therefore does two things. :func:`plan_lineup_steps` orders
+        the moves so that **every transaction only ever fills a slot that is
+        already empty**, by the roster state ESPN itself just reported -- which
+        makes each step individually verifiable and cannot overflow a slot
+        under any counting rule or item order. And after each step the roster
+        is **read back**, so the next step is planned against what ESPN
+        actually did rather than what the last 200 implied. Planning step two
+        against a fiction is the whole of the original bug.
+
+        A move ESPN refuses silently is abandoned rather than resent. If it was
+        a move to IR and the player is still in a starting slot, he is aimed at
+        the bench instead: the solver wanted him off the floor, the bench is
+        reachable where IR was not, and it frees the slot the remaining moves
+        are waiting on. If nothing is reachable, the retry stops and says which
+        moves it gave up on.
 
         The price is several POSTs instead of one, and a part-applied lineup if
-        a later step fails -- which is why it is a fallback and not the normal
-        path. A part-applied lineup is still strictly better than the status
-        quo on this error, which was to abandon the whole day's optimization
-        and leave yesterday's lineup standing.
+        a later step is refused outright -- which is why it is a fallback and
+        not the normal path. A part-applied lineup is still strictly better
+        than the status quo on this error, which was to abandon the whole day's
+        optimization and leave yesterday's lineup standing.
         """
-        by_id = {p.player_id: p for p in current}
-        state = {p.player_id: int(p.current_slot) for p in current}
         capacity = {
             int(s): int(n)
             for s, n in settings.lineup_slot_counts.items()
             if int(n) > 0
         }
-        batches = plan_lineup_steps(state, target, capacity)
-        log.info("split into %d step(s)", len(batches))
+        # Mutable, because a move ESPN silently refuses has to be abandoned:
+        # re-planning against a target that still wants it would send the same
+        # doomed item forever.
+        goal = {int(k): int(v) for k, v in target.items()}
 
         done: List[Mapping[str, Any]] = []
+        refused_all: List[Mapping[str, Any]] = []
         last: Optional[WriteResult] = None
-        for n, batch in enumerate(batches, 1):
+        live = list(current)
+        step = 0
+        # One round per move, plus slack. Every round either applies a move or
+        # abandons one, so this cannot spin: the bound is only a backstop.
+        for _ in range(len(attempted) * 2 + 2):
+            state = {p.player_id: int(p.current_slot) for p in live}
+            try:
+                batches = plan_lineup_steps(state, goal, capacity)
+            except PreflightError as exc:
+                # Everything still pending is blocked by a slot ESPN will not
+                # free -- in practice, by an item it silently refused. Stop
+                # with what landed rather than send a move that is certain to
+                # be rejected and abort the sequence.
+                log.warning(
+                    "stopping the stepwise retry: %s. %d move(s) applied.",
+                    exc, len(done),
+                )
+                break
+            if not batches:
+                break
+            batch = batches[0]
+            step += 1
             items = [
                 {
                     "playerId": int(pid),
                     "type": "LINEUP",
                     "fromLineupSlotId": int(state[pid]),
-                    "toLineupSlotId": int(target[pid]),
+                    "toLineupSlotId": int(goal[pid]),
                 }
                 for pid in batch
             ]
-            log.info("  step %d/%d: %s", n, len(batches),
-                     self._describe(items, current))
+            log.info("  step %d (%d move(s) still to make): %s",
+                     step, sum(len(b) for b in batches),
+                     self._describe(items, live))
             body = {
                 "teamId": int(team_id),
                 "type": "ROSTER",
@@ -457,25 +540,74 @@ class EspnWrite:
                 # neither the old one nor the intended one, and the next run
                 # re-reads anyway -- but a human needs to know it is mid-flight.
                 raise EspnError(
-                    "ESPN took %d of %d lineup step(s) and then refused step "
-                    "%d (%s). The lineup is part-applied: %s was written, %s "
+                    "ESPN refused lineup step %d (%s) after applying %d "
+                    "move(s). The lineup is part-applied: %s was written, %s "
                     "was not. Original packet: %s"
                     % (
-                        n - 1, len(batches), n, exc,
+                        step, exc, len(done),
                         self._describe(done, current) or "nothing",
-                        self._describe(items, current),
+                        self._describe(items, live),
                         self._describe(attempted, current),
                     )
                 ) from exc
-            for pid in batch:
-                state[pid] = int(target[pid])
-            done.extend(items)
+
+            # Read the roster back rather than assume the 200 meant anything.
+            # Without this the next step is planned against a fiction, which is
+            # exactly how a silently dropped vacate turned into ``Too many
+            # players in the SG slot``. See :meth:`_unhonored`.
+            after = self._readback(team_id, int(period))
+            if after is None:
+                # Without a read-back there is no honest way to plan the next
+                # step, so stop here rather than guess. What landed, landed;
+                # the next sweep re-reads and finishes the job.
+                done.extend(items)
+                log.warning(
+                    "  step %d: stopping the stepwise retry early because the "
+                    "roster could not be re-read; %d move(s) may still be "
+                    "outstanding", step, sum(len(b) for b in batches) - len(batch),
+                )
+                break
+            refused = self._unhonored(items, after)
+            refused_ids = {int(i["playerId"]) for i in refused}
+            done.extend(i for i in items if int(i["playerId"]) not in refused_ids)
+            if refused:
+                log.warning(
+                    "  step %d: ESPN returned 200 but did not apply %s; "
+                    "abandoning those move(s) and re-planning from the roster "
+                    "ESPN actually reports",
+                    step, self._describe_refusals(refused, live),
+                )
+                refused_all.extend(refused)
+                for i in refused:
+                    pid = int(i["playerId"])
+                    want = int(i["toLineupSlotId"])
+                    here = int(i["actualLineupSlotId"])
+                    if want == ids.IR_SLOT and ids.is_starting_slot(here):
+                        # The solver wanted him on IR, so it did not want him
+                        # starting; ESPN just will not take him. The bench is
+                        # the next-best place and -- unlike IR -- reachable,
+                        # and it frees the slot the rest of the plan is
+                        # waiting on. This is what unstuck the real lineup on
+                        # 2026-11-11: SG->IR was refused four times, SG->BE
+                        # went through first try and let the other two moves
+                        # land behind it.
+                        goal[pid] = ids.BENCH_SLOT
+                        log.info(
+                            "    %s cannot go on IR; benching him instead so "
+                            "the rest of the lineup can move",
+                            next((p.name for p in live if p.player_id == pid), pid),
+                        )
+                    else:
+                        # Leave the player where ESPN insists he is.
+                        goal[pid] = here
+            live = after
 
         return WriteResult(
             ok=True,
             shadow=False,
             kind="LINEUP",
             items=tuple(done),
+            unhonored=tuple(refused_all),
             transaction_id=last.transaction_id if last else None,
             status=last.status if last else None,
             messages=("written in %d step(s) after ESPN refused the single "
@@ -486,6 +618,78 @@ class EspnWrite:
 
     def _team_label(self, team_id: int) -> str:
         return "team %d in league %d" % (int(team_id), int(self.cfg.league_id))
+
+    def _readback(
+        self, team_id: int, period: int,
+    ) -> Optional[List[RosterEntry]]:
+        """The roster as ESPN reports it *after* a write, or None if unreadable."""
+        try:
+            return list(self.read.roster(team_id, scoring_period=int(period)))
+        except Exception as exc:  # pragma: no cover - network
+            log.warning(
+                "could not read the roster back to verify the lineup write (%s); "
+                "treating the 200 at face value, which it may not deserve", exc,
+            )
+            return None
+
+    @staticmethod
+    def _unhonored(
+        items: Sequence[Mapping[str, Any]], after: Sequence[RosterEntry],
+    ) -> List[Mapping[str, Any]]:
+        """Which of ``items`` is the roster *not* showing as applied?
+
+        **A 200 is not proof that a lineup item was applied, and neither is
+        ESPN's own transaction record.** Established by live probing on
+        2026-11-11, in this order:
+
+        * ``Murphy SG->IR`` returned 200 and was *recorded* by ESPN as
+          ``SG -> SG`` -- a same-slot no-op. The vacate never happened, so the
+          very next step, ``George UTIL->SG``, was refused with ``Too many
+          players in the SG slot (maximum 1)``. That is the whole mystery of
+          2026-11-10: not an unguessable counting rule, a silently dropped
+          item. ESPN counted correctly; we were the ones holding a roster that
+          had never changed.
+        * ``Jackson IR->BE; Murphy BE->IR`` then returned 200 with *both*
+          items recorded as real moves -- and a roster read seconds later had
+          Murphy back on the bench. So the transaction record will report
+          "executed" for a move that did not take effect, which is why this
+          checks the roster and not ``mTransactions2``.
+        * The same ``Murphy BE->IR`` had already been dropped silently twice,
+          while an ineligible player (``Cam Thomas``, ACTIVE) drew an explicit
+          409 naming the reason. So silence is not reserved for nonsense
+          requests, and there is no error text to match on -- the only
+          trustworthy signal is where the player actually is afterwards.
+
+        Returns the offending items, each copied with an extra
+        ``actualLineupSlotId`` saying where the player really is. Players who
+        have left the roster entirely are skipped: that is a drop, not a
+        refused lineup move, and ``roster()`` has its own ghost handling.
+        """
+        actual = {p.player_id: int(p.current_slot) for p in after}
+        out: List[Mapping[str, Any]] = []
+        for i in items:
+            pid = int(i["playerId"])
+            if pid not in actual:
+                continue
+            if actual[pid] != int(i["toLineupSlotId"]):
+                refused = dict(i)
+                refused["actualLineupSlotId"] = actual[pid]
+                out.append(refused)
+        return out
+
+    @staticmethod
+    def _describe_refusals(
+        items: Sequence[Mapping[str, Any]], roster: Sequence[RosterEntry],
+    ) -> str:
+        names = {p.player_id: p.name for p in roster}
+        return "; ".join(
+            "%s asked for %s but is still in %s" % (
+                names.get(int(i["playerId"]), int(i["playerId"])),
+                ids.slot_name(int(i["toLineupSlotId"])),
+                ids.slot_name(int(i["actualLineupSlotId"])),
+            )
+            for i in items
+        )
 
     @staticmethod
     def _describe(

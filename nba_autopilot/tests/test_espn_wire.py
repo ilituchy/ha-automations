@@ -44,6 +44,7 @@ from models import LeagueSettings, RosterEntry  # noqa: E402
 from solve.calendar import SeasonCalendar  # noqa: E402
 
 PG, C, UTIL, BE, IR = 0, 4, 11, 12, 13
+SG = 1
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +269,7 @@ def _player(pid, name, slot, eligible=(UTIL, BE), **kw):
         pro_team_id=2,
         injury_status=kw.get("injury_status", "ACTIVE"),
         acquisition_status=kw.get("acquisition_status", "ONTEAM"),
+        ir_eligible=kw.get("ir_eligible", False),
     )
 
 
@@ -970,6 +972,7 @@ class _SlotLimitClient(_CapturingClient):
         )
         self.kind = kind or ("TRAN_ROSTER_SLOT_LIMIT_EXCEEDED" if message is None
                              else "TRAN_ROSTER_LOCKED")
+        self.accepted = []
 
     def post(self, url, content=None, headers=None, cookies=None):
         body = json.loads(content.decode("utf-8"))
@@ -982,6 +985,7 @@ class _SlotLimitClient(_CapturingClient):
                               "type": self.kind}]},
                 status=409,
             )
+        self.accepted.append(body.get("items") or [])
         return _Resp({
             "id": "dc39b83f-3bf9-4f0f-9b14-71472ea6f7fa",
             "status": "EXECUTED",
@@ -989,10 +993,111 @@ class _SlotLimitClient(_CapturingClient):
         })
 
 
+class _World:
+    """A roster that writes actually change, the way ESPN's does.
+
+    The earlier fakes answered ``roster()`` with a fixed list, so a test could
+    not tell a write that landed from one that did not -- which is precisely
+    the distinction the 2026-11-10/11 bug lived in. This one applies accepted
+    items, enforces the slot caps against its own state, and can be told to
+    swallow a player's moves silently, which is what ESPN does to an IR move
+    it will not honor: HTTP 200, the item echoed back in the transaction
+    record, and no change to the roster.
+    """
+
+    def __init__(self, roster, capacity, swallow=()):
+        self.players = {p.player_id: p for p in roster}
+        self.capacity = dict(capacity)
+        #: ``(player_id, destination_slot)`` pairs ESPN takes and ignores.
+        #: Live on 2026-11-11 it swallowed Murphy's moves *to IR* -- both
+        #: ``SG->IR`` and ``BE->IR`` -- while ``SG->BE`` went through first
+        #: try, so the refusal is per destination, not per player.
+        self.swallow = {(int(a), int(b)) for a, b in swallow}
+
+    def entries(self):
+        return list(self.players.values())
+
+    def would_overfill(self, items):
+        slots = {pid: p.current_slot for pid, p in self.players.items()}
+        for i in items:
+            pid, dest = int(i["playerId"]), int(i["toLineupSlotId"])
+            if (pid, dest) in self.swallow:
+                continue
+            slots[pid] = dest
+        occupancy = {}
+        for slot in slots.values():
+            occupancy[slot] = occupancy.get(slot, 0) + 1
+        for slot, n in sorted(occupancy.items()):
+            cap = self.capacity.get(slot)
+            if cap is not None and n > int(cap):
+                return slot
+        return None
+
+    def apply(self, items):
+        for i in items:
+            pid, dest = int(i["playerId"]), int(i["toLineupSlotId"])
+            if (pid, dest) in self.swallow:
+                continue
+            self.players[pid] = dataclasses.replace(
+                self.players[pid], current_slot=dest)
+
+
+class _WorldRead(_FakeRead):
+    """Reads straight out of a :class:`_World`, so read-backs are honest."""
+
+    def __init__(self, world, settings):
+        super().__init__(world.entries())
+        self.world = world
+        self._settings = settings
+
+    def roster(self, team_id=None, scoring_period=None):
+        return self.world.entries()
+
+    def league_settings(self):
+        return self._settings
+
+
+class _WorldClient(_CapturingClient):
+    """Enforces the slot caps the way ESPN does, including silently."""
+
+    def __init__(self, world):
+        super().__init__()
+        self.world = world
+
+    def post(self, url, content=None, headers=None, cookies=None):
+        body = json.loads(content.decode("utf-8"))
+        self.bodies.append(body)
+        items = body.get("items") or []
+        over = self.world.would_overfill(items)
+        if over is not None:
+            msg = "Too many players in the %s slot (maximum %d)" % (
+                ids.slot_name(over), self.world.capacity[over])
+            return _Resp(
+                {"messages": [msg],
+                 "details": [{"message": msg,
+                              "type": "TRAN_ROSTER_SLOT_LIMIT_EXCEEDED"}]},
+                status=409,
+            )
+        self.world.apply(items)
+        # ESPN echoes every item back, honored or not. See _unhonored.
+        return _Resp({"id": "tx", "status": "EXECUTED", "items": items})
+
+
 class _FakeReadWithSettings(_FakeRead):
-    def __init__(self, roster, settings):
+    """Replays whatever ``client`` accepted, so a read-back tells the truth."""
+
+    def __init__(self, roster, settings, client=None):
         super().__init__(roster)
         self._settings = settings
+        self.client = client
+
+    def roster(self, team_id=None, scoring_period=None):
+        slots = {p.player_id: p.current_slot for p in self._roster}
+        for items in getattr(self.client, "accepted", ()):
+            for i in items:
+                slots[int(i["playerId"])] = int(i["toLineupSlotId"])
+        return [dataclasses.replace(p, current_slot=slots[p.player_id])
+                for p in self._roster]
 
     def league_settings(self):
         return self._settings
@@ -1013,7 +1118,8 @@ class TestSlotLimitFallback(unittest.TestCase):
             _player(3, "Bench Guy", BE, eligible=(PG, C, UTIL, BE)),
             _player(4, "Bench Two", BE, eligible=(PG, C, UTIL, BE)),
         ]
-        w = EspnWrite(cfg, http, _FakeReadWithSettings(roster, settings),
+        w = EspnWrite(cfg, http,
+                      _FakeReadWithSettings(roster, settings, client=http),
                       shadow_mode=False)
         return w, http, roster
 
@@ -1508,3 +1614,117 @@ class TestEntryInjuryStatusGatesIR(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSilentlyRefusedItems(unittest.TestCase):
+    """ESPN can take a 200 and quietly not do one of the items.
+
+    Replays the real failure of 2026-11-10 and 2026-11-11. Dynassty's target
+    was ``Murphy SG->IR; George UTIL->SG; Smith BE->UTIL``. ESPN would not
+    honor the IR move -- it returned 200 and recorded it as ``SG -> SG`` -- so
+    Murphy never left SG, and George's move into SG made two players in a
+    one-deep slot. ESPN's ``Too many players in the SG slot (maximum 1)`` was
+    arithmetically correct the whole time; the fiction was ours.
+    """
+
+    MURPHY, GEORGE, SMITH, SHEAD = 1, 2, 3, 4
+    CAPS = {PG: 1, SG: 1, UTIL: 1,
+            BE: 9, IR: 3}
+
+    def _writer(self, swallow=()):
+        cfg = EspnConfig(league_id=1, team_id=7, espn_s2="s2", swid="{X}",
+                         season=2027)
+        roster = [
+            _player(self.MURPHY, "Trey Murphy III", SG,
+                    eligible=(SG, UTIL, BE, IR),
+                    injury_status="OUT", ir_eligible=True),
+            _player(self.GEORGE, "Keyonte George", UTIL,
+                    eligible=(SG, UTIL, BE)),
+            _player(self.SMITH, "Jalen Smith", BE,
+                    eligible=(UTIL, BE)),
+            _player(self.SHEAD, "Jamal Shead", PG,
+                    eligible=(PG, BE)),
+        ]
+        world = _World(roster, self.CAPS, swallow=swallow)
+        http = _WorldClient(world)
+        settings = _settings(lineup_slot_counts=self.CAPS)
+        w = EspnWrite(cfg, http, _WorldRead(world, settings), shadow_mode=False)
+        return w, http, world
+
+    TARGET = {MURPHY: IR, GEORGE: SG,
+              SMITH: UTIL, SHEAD: PG}
+
+    def test_the_whole_target_lands_when_espn_honors_everything(self):
+        w, _, world = self._writer()
+        result = w.set_lineup(dict(self.TARGET), scoring_period=23)
+        self.assertTrue(result.ok)
+        self.assertEqual((), tuple(result.unhonored))
+        self.assertEqual(
+            {p.player_id: p.current_slot for p in world.entries()},
+            dict(self.TARGET),
+        )
+
+    def _refused_ir(self):
+        """ESPN swallows Murphy's moves to IR, from anywhere. As it did."""
+        return self._writer(swallow=((self.MURPHY, IR),))
+
+    def test_the_rest_of_the_lineup_still_lands(self):
+        w, _, world = self._refused_ir()
+        result = w.set_lineup(dict(self.TARGET), scoring_period=23)
+
+        # It must not raise. Before the read-back the retry believed its own
+        # first step and sent George into an SG that Murphy still held, which
+        # died with a part-applied lineup and no lineup change at all.
+        self.assertTrue(result.ok)
+        slots = {p.player_id: p.current_slot for p in world.entries()}
+
+        # Murphy could not reach IR, so he is benched -- not left starting.
+        self.assertEqual(BE, slots[self.MURPHY])
+        # And the two moves that were waiting on his slot both land.
+        self.assertEqual(SG, slots[self.GEORGE])
+        self.assertEqual(UTIL, slots[self.SMITH])
+        self.assertEqual(PG, slots[self.SHEAD])
+
+    def test_the_refusal_is_reported_once(self):
+        w, _, _ = self._refused_ir()
+        result = w.set_lineup(dict(self.TARGET), scoring_period=23)
+        self.assertEqual([self.MURPHY],
+                         [int(i["playerId"]) for i in result.unhonored])
+        self.assertEqual(IR, int(result.unhonored[0]["toLineupSlotId"]))
+        self.assertEqual(SG, int(result.unhonored[0]["actualLineupSlotId"]))
+
+    def test_the_lineup_left_behind_is_legal(self):
+        w, _, world = self._refused_ir()
+        w.set_lineup(dict(self.TARGET), scoring_period=23)
+        occupancy = {}
+        for p in world.entries():
+            occupancy[p.current_slot] = occupancy.get(p.current_slot, 0) + 1
+        for slot, n in occupancy.items():
+            self.assertLessEqual(
+                n, self.CAPS[slot],
+                "slot %s left holding %d" % (ids.slot_name(slot), n))
+
+    def test_the_doomed_move_is_not_retried_forever(self):
+        w, http, _ = self._refused_ir()
+        w.set_lineup(dict(self.TARGET), scoring_period=23)
+        to_ir = [
+            b for b in http.bodies
+            for i in b.get("items") or []
+            if int(i["playerId"]) == self.MURPHY and int(i["toLineupSlotId"]) == IR
+        ]
+        # Once inside the opening packet, once alone in the retry. After the
+        # read-back shows it did not take, it is abandoned rather than resent.
+        self.assertLessEqual(len(to_ir), 2, "the refused IR move was resent")
+
+    def test_a_refusal_with_nowhere_to_fall_back_to_stops_cleanly(self):
+        # ESPN swallows George's move into SG instead. There is no second-best
+        # slot to aim at, so the remaining moves are simply unreachable.
+        w, _, world = self._writer(swallow=((self.GEORGE, SG),))
+        result = w.set_lineup(dict(self.TARGET), scoring_period=23)
+        self.assertTrue(result.ok)
+        self.assertEqual([self.GEORGE],
+                         [int(i["playerId"]) for i in result.unhonored])
+        slots = {p.player_id: p.current_slot for p in world.entries()}
+        # George stayed where ESPN insists, and nothing doubled up behind him.
+        self.assertEqual(UTIL, slots[self.GEORGE])
+        self.assertNotEqual(slots[self.SMITH], slots[self.GEORGE])
