@@ -171,6 +171,23 @@ class TestAddDrop(unittest.TestCase):
             costs = [c.score for c in rep.drops]
             self.assertEqual(costs, sorted(costs))
 
+    def test_season_ending_free_agents_are_not_suggested(self):
+        from dataclasses import replace
+        from advisor.adddrop import out_for_season, recommend
+        self.assertTrue(out_for_season({"injury_status": "IR"}, 0))
+        self.assertTrue(out_for_season({"injury_status": "Out", "injury_notes": "Out for the season (ACL)"}, 50))
+        self.assertFalse(out_for_season({"injury_status": "IR"}, 300))   # short stint, still priced this year
+        self.assertFalse(out_for_season({"injury_status": "Out"}, 0))    # Out is week to week
+        self.assertFalse(out_for_season({}, 0))
+        league, values, index, teams, book = build()
+        top = recommend(league, book, 1, [], "balanced").adds[0].asset.key
+        book.index[top] = dict(book.index[top], injury_status="IR")
+        values.players[top] = replace(values.players[top], redraft=0.0)
+        rep = recommend(league, book, 1, [], "balanced")
+        self.assertNotIn(top, [c.asset.key for c in rep.adds])
+        self.assertNotIn(top, [a.asset.key for a, _d, _g in rep.swaps])
+        self.assertEqual(rep.skipped_injured, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

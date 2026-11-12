@@ -27,6 +27,25 @@ from .trades import STRATEGIES
 
 STARTABLE = {"QB", "RB", "WR", "TE"}
 SWAP_MARGIN = 350.0
+#: Sleeper designations that mean weeks out at minimum (NFL injured reserve,
+#: PUP, non-football injury, suspension, did not report).
+LONG_TERM = {"IR", "PUP", "NFI", "NFI-R", "Sus", "DNR"}
+
+
+def out_for_season(info: Mapping, now_value: float) -> bool:
+    """A free agent who cannot help this season and should not be suggested.
+
+    Either Sleeper's notes say so outright, or he carries a long-term
+    designation AND the rest-of-season market prices him at zero (FantasyCalc
+    zeroes a player once his season is over). An "Out" or "IR" player the
+    market still prices for this year is on a short stint and stays eligible.
+    Seen live: an IR receiver with a torn patellar tendon recommended "into an
+    open spot" because his dynasty value cleared the bar.
+    """
+    notes = str(info.get("injury_notes") or "").lower()
+    if "season" in notes and ("out for" in notes or "season-ending" in notes or "ended" in notes):
+        return True
+    return info.get("injury_status") in LONG_TERM and now_value <= 0
 
 
 @dataclass
@@ -53,6 +72,7 @@ class AddDropReport:
     drops: List[Candidate] = field(default_factory=list)
     swaps: List[tuple] = field(default_factory=list)  # (add, drop or None, gain)
     open_spots: int = 0  # active spots free once the IR moves are made
+    skipped_injured: int = 0  # free agents left out as done for the season
 
 
 def recommend(
@@ -111,6 +131,9 @@ def recommend(
         if not info.get("active") or not info.get("team"):
             continue
         if not set(book.positions(pid)) & STARTABLE:
+            continue
+        if out_for_season(info, book.values.now(pid)):
+            rep.skipped_injured += 1
             continue
         now = fast_lineup_value(active | {pid}, book.positions, book.values.now, slots) - base
         c = cand(pid, now)

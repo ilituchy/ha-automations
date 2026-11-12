@@ -360,6 +360,9 @@ def _moves(m: Dict) -> str:
     if m.get("trending_unvalued"):
         extra.append("Trending on Sleeper, not yet valued: " + ", ".join(
             "%s (%s %s)" % (_pl(t), _e(t.get("team")), _e(t["pos"])) for t in m["trending_unvalued"]))
+    if m.get("skipped_injured"):
+        n = m["skipped_injured"]
+        extra.append("Left out: %d free agent%s done for the season." % (n, "" if n == 1 else "s"))
     if m.get("cheapest"):
         extra.append("Cheapest to lose: " + ", ".join(
             "%s (%s%s)" % (_pl(c), _n(c["value"]), ", starting" if c.get("starter") else "") for c in m["cheapest"]))

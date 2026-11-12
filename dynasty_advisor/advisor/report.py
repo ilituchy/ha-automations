@@ -346,6 +346,7 @@ def build_view(league: League, me: int, strategy: str, teams: Dict[int, TeamProf
         "moves": {
             "active": ad.active_count, "active_max": ad.active_max,
             "reserve_open": max(0, ad.reserve_open), "open_spots": ad.open_spots,
+            "skipped_injured": ad.skipped_injured,
             "ir": [{"name": a.label, "id": a.key, "pos": a.position, "status": (book.index.get(a.key) or {}).get("injury_status")}
                    for a in ad.ir_moves],
             "actions": [{"add": dict(_asset_view(a.asset), team=a.nfl_team, depth=a.depth, injury=a.injury,
