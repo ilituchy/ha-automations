@@ -494,6 +494,13 @@ class Autopilot:
     def startup_checks(self) -> bool:
         ok = True
         log.info("config: %s", json.dumps(self.cfg.redacted(), default=str))
+        # Also the deploy canary for the read-back change: it prints on every
+        # start, so one glance at the log after a rebuild says which image is
+        # running. See docs/DEPLOY.md on why version numbers cannot serve.
+        log.info(
+            "espn.write: lineup writes are verified by reading the roster back; "
+            "a 200 from ESPN is not taken as proof that an item was applied"
+        )
 
         for lg in self.leagues:
             try:

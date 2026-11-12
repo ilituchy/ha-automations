@@ -402,6 +402,7 @@ class EspnWrite:
             return result
         refused = self._unhonored(items, after)
         if not refused:
+            log.info("lineup write verified: all %d item(s) applied", len(items))
             return result
         log.warning(
             "ESPN returned 200 for the lineup but a roster read-back shows it "
