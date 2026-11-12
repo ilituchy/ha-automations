@@ -1,7 +1,7 @@
 ---
 slug: dynasty_advisor
 name: Dynasty Advisor
-version: "0.4.0"
+version: "0.5.0"
 description: >-
   Trade targets and add/drop recommendations for a Sleeper dynasty football
   league. Read-only: it recommends, you make the moves in Sleeper.
@@ -45,6 +45,8 @@ options:
   # A notify service, e.g. mobile_app_iphone (Settings > Companion app shows
   # your device). Empty = scheduled runs still happen, nothing is sent.
   notify_service: ""
+  # Players never to offer in a trade, by name as Sleeper spells it.
+  untouchable: []
   log_level: info
 
 schema:
@@ -54,4 +56,6 @@ schema:
   schedule:
     - match(^\s*(mon|tue|wed|thu|fri|sat|sun|daily)\s+([01]?\d|2[0-3]):[0-5]\d\s*$)
   notify_service: str?
+  untouchable:
+    - str
   log_level: list(debug|info|warning|error)

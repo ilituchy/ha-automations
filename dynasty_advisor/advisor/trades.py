@@ -33,7 +33,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .assets import Asset, AssetBook, package_value
+from .assets import Asset, AssetBook, age_adjusted, package_value
 from .league import League
 from .lineup import fast_lineup_value
 from .profiles import ManagerProfile, likelihood
@@ -42,12 +42,18 @@ from .teams import TeamProfile
 log = logging.getLogger(__name__)
 
 #: strategy -> (weight on dynasty change, weight on lineup change,
-#:              youth bonus, veteran penalty)
+#:              age-curve strength; see assets.age_curve)
+#: Even "contend" weights the dynasty side above this season's lineup and
+#: applies the age curve: this is a dynasty league, and a contender that pays
+#: a 22-year-old for a 37-year-old has bought one season.
 STRATEGIES = {
-    "contend": (0.6, 1.0, 0.0, 0.0),
-    "balanced": (1.0, 0.4, 0.0, 0.0),
-    "rebuild": (1.0, 0.0, 0.15, 0.25),
+    "contend": (0.8, 0.5, 0.6),
+    "balanced": (1.0, 0.3, 0.9),
+    "rebuild": (1.0, 0.0, 1.3),
 }
+#: Every idea must hold our age-adjusted dynasty value to within this share of
+#: the package -- no strategy may trade the future for this season.
+DYNASTY_FLOOR = 0.05
 
 GIVE_POOL = 22
 TARGETS_PER_TEAM = 9
@@ -93,6 +99,7 @@ class TradeSearch:
         managers: Dict[str, ManagerProfile],
         me: int,
         strategy: str = "balanced",
+        untouchable: Iterable[str] = (),
     ) -> None:
         self.league = league
         self.book = book
@@ -100,7 +107,8 @@ class TradeSearch:
         self.managers = managers
         self.me = me
         self.strategy = strategy
-        self.w_dyn, self.w_now, self.youth, self.vet_pen = STRATEGIES[strategy]
+        self.w_dyn, self.w_now, self.age = STRATEGIES[strategy]
+        self.untouchable = set(untouchable)
         self.names = {rid: t.team.display_name for rid, t in teams.items()}
         self._lineups: Dict[Tuple[int, frozenset], float] = {}
         self.evaluated = 0
@@ -121,15 +129,10 @@ class TradeSearch:
         return frozenset(cur)
 
     def _my_adj(self, a: Asset) -> float:
-        v = a.vor
-        if a.is_young:
-            v *= 1 + self.youth
-        if a.is_vet:
-            v *= 1 - self.vet_pen
-        return v
+        return age_adjusted(a, self.age)
 
     @staticmethod
-    def their_weights(t: TeamProfile) -> Tuple[float, float, float, float]:
+    def their_weights(t: TeamProfile) -> Tuple[float, float, float]:
         """The other side judges a trade by the same rule we would use in
         their position: contenders by ``contend``, sellers by ``rebuild``,
         bubble teams by ``balanced`` with a mild lean toward selling."""
@@ -137,19 +140,13 @@ class TradeSearch:
             return STRATEGIES["contend"]
         if t.mode == "seller":
             return STRATEGIES["rebuild"]
-        w_dyn, w_now, _y, _v = STRATEGIES["balanced"]
+        w_dyn, w_now, age = STRATEGIES["balanced"]
         if t.mode == "bubble":
-            return (w_dyn, w_now, 0.05, 0.10)
-        return (w_dyn, w_now, 0.0, 0.0)
+            return (w_dyn, w_now, age + 0.15)
+        return (w_dyn, w_now, age)
 
     def _their_adj(self, t: TeamProfile, a: Asset) -> float:
-        _d, _n, youth, vet_pen = self.their_weights(t)
-        v = a.vor
-        if a.is_young:
-            v *= 1 + youth
-        if a.is_vet:
-            v *= 1 - vet_pen
-        return v
+        return age_adjusted(a, self.their_weights(t)[2])
 
     def evaluate(self, rid: int, give: Sequence[Asset], get: Sequence[Asset]) -> Package:
         self.evaluated += 1
@@ -159,7 +156,7 @@ class TradeSearch:
         my_now = self._lineup(self.me, self._active_after(self.me, give, get)) - base_me
         their_now = self._lineup(rid, self._active_after(rid, get, give)) - base_them
         my_dyn = package_value(self._my_adj(a) for a in get) - package_value(self._my_adj(a) for a in give)
-        t_dyn, t_now, _y, _v = self.their_weights(t)
+        t_dyn, t_now, _a = self.their_weights(t)
         theirs = t_dyn * (
             package_value(self._their_adj(t, a) for a in give)
             - package_value(self._their_adj(t, a) for a in get)
@@ -183,9 +180,21 @@ class TradeSearch:
         team = self.teams[self.me].team
         assets = [self.book.player(p) for p in team.players]
         assets += [self.book.pick(p, self.names) for p in self.league.picks_of(self.me)]
-        assets = [a for a in assets if a.vor > 0]
+        assets = [a for a in assets if a.vor > 0 and a.key not in self.untouchable]
         assets.sort(key=lambda a: -a.vor)
         return assets[:GIVE_POOL]
+
+    @staticmethod
+    def acceptable_for_me(pk: Package) -> bool:
+        """Dynasty guardrails, in every strategy: never lose meaningful
+        age-adjusted dynasty value, and give up a core young player only for
+        a return with no veterans in it and no dynasty loss at all."""
+        if pk.mine <= 0 or pk.my_dyn < -DYNASTY_FLOOR * pk.size:
+            return False
+        if any(a.is_core for a in pk.give):
+            if pk.my_dyn < 0 or any(a.is_vet for a in pk.get):
+                return False
+        return True
 
     def targets(self, rid: int) -> List[Asset]:
         t = self.teams[rid]
@@ -236,7 +245,7 @@ class TradeSearch:
                 if not lo <= give_v <= hi:
                     continue
                 pk = self.evaluate(rid, give, get)
-                if pk.mine <= 0:
+                if not self.acceptable_for_me(pk):
                     continue
                 if pk.theirs >= need * pk.size and (opening is None or pk.mine > opening.mine):
                     opening = pk

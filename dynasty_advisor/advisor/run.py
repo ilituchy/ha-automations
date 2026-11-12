@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import os
 import time
 from dataclasses import dataclass
@@ -45,6 +46,27 @@ class RunResult:
     urgent: bool = False
 
 
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", s.lower().replace(" jr", "").replace(" sr", "").replace(" iii", "").replace(" ii", ""))
+
+
+def resolve_players(names, roster, book):
+    """Owner-typed names (or Sleeper ids) -> ids on the owner's roster.
+    Forgiving about case, punctuation and Jr./III suffixes."""
+    by_name = {_norm(book.name(p)): p for p in roster}
+    keep, unknown = set(), []
+    for n in names or ():
+        n = str(n).strip()
+        if not n:
+            continue
+        pid = n if n in roster else by_name.get(_norm(n))
+        if pid:
+            keep.add(pid)
+        else:
+            unknown.append(n)
+    return keep, unknown
+
+
 def run_once(
     username: str,
     league_id: Optional[str],
@@ -53,6 +75,7 @@ def run_once(
     *,
     offline: bool = False,
     n_trades: int = 10,
+    untouchable=(),
 ) -> RunResult:
     if strategy != "auto" and strategy not in STRATEGIES:
         raise RunError("unknown strategy %r" % strategy)
@@ -99,7 +122,10 @@ def run_once(
     if strategy == "auto":
         strategy = {"contender": "contend", "seller": "rebuild"}.get(teams[me].mode, "balanced")
         log.info("strategy auto -> %s (your team is %s)", strategy, teams[me].mode)
-    search = TradeSearch(league, book, teams, managers, me, strategy)
+    keep, unknown = resolve_players(untouchable, league.teams[me].players, book)
+    if keep:
+        log.info("untouchable: %s", ", ".join(book.name(p) for p in sorted(keep)))
+    search = TradeSearch(league, book, teams, managers, me, strategy, untouchable=keep)
     ideas = search.search(n_trades)
     ad = recommend(league, book, me, sl.trending("add"), strategy)
 
@@ -109,7 +135,8 @@ def run_once(
     with open(out + ".tmp", "w") as f:
         f.write(md)
     os.replace(out + ".tmp", out)
-    view = build_view(league, me, strategy, teams, managers, ideas, ad, book, values.unchanged_days)
+    view = build_view(league, me, strategy, teams, managers, ideas, ad, book, values.unchanged_days,
+                      untouchable=keep, unknown_untouchable=unknown)
     vpath = out[:-3] + ".json"
     with open(vpath + ".tmp", "w") as f:
         json.dump(view, f, separators=(",", ":"))

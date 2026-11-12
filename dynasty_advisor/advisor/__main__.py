@@ -49,7 +49,8 @@ def main(argv=None) -> int:
         ap.error("need --username or a config file")
 
     try:
-        res = run_once(username, league_id, strategy, args.data_dir, offline=args.offline, n_trades=args.trades)
+        res = run_once(username, league_id, strategy, args.data_dir, offline=args.offline, n_trades=args.trades,
+                       untouchable=cfg.get("untouchable") or [])
     except RunError as e:
         print(str(e), file=sys.stderr)
         return 2

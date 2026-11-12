@@ -263,7 +263,8 @@ def _asset_view(a: Asset) -> dict:
     if " via " in label:
         label, via = label.split(" via ", 1)
     return {"name": label, "kind": a.kind, "pos": a.position, "age": round(a.age) if a.age else None,
-            "value": round(a.dyn), "via": via, "id": a.key if a.kind == "player" else None}
+            "value": round(a.dyn), "via": via, "id": a.key if a.kind == "player" else None,
+            "core": a.is_core}
 
 
 def _pkg_view(pk: Package) -> dict:
@@ -296,7 +297,7 @@ def _notes(idea: TradeIdea) -> List[str]:
 
 def build_view(league: League, me: int, strategy: str, teams: Dict[int, TeamProfile],
                managers: Dict[str, ManagerProfile], ideas: List[TradeIdea], ad: AddDropReport,
-               book: AssetBook, values_unchanged_days: int) -> dict:
+               book: AssetBook, values_unchanged_days: int, untouchable=(), unknown_untouchable=()) -> dict:
     my = league.teams[me]
     mine = teams[me]
     dl = league.trade_deadline
@@ -312,6 +313,8 @@ def build_view(league: League, me: int, strategy: str, teams: Dict[int, TeamProf
         warnings.append("Pick ownership self-check failed against the completed draft (%d mismatches); pick lists may be wrong." % len(league.pick_check))
     if values_unchanged_days >= 3:
         warnings.append("FantasyCalc values unchanged for %d days — the feed may be stale." % values_unchanged_days)
+    if unknown_untouchable:
+        warnings.append("Untouchable not found on your roster: %s. Check the spelling in the app's Configuration tab." % ", ".join(unknown_untouchable))
     names = {rid: t.team.display_name for rid, t in teams.items()}
     cur = {t.owner_id for t in league.teams.values()}
     max_now = max((p.now_value for p in teams.values()), default=1) or 1
@@ -367,6 +370,9 @@ def build_view(league: League, me: int, strategy: str, teams: Dict[int, TeamProf
         } for m in sorted((m for m in managers.values() if m.user_id in cur), key=lambda m: -m.softness)],
         "picks": [dict(_asset_view(book.pick(p, names)), season=p.season, round=p.round)
                   for p in league.picks_of(me)],
+        "protected": [dict(_asset_view(book.player(p)), untouchable=p in untouchable)
+                      for p in sorted(set(my.players), key=lambda p: -book.player(p).dyn)
+                      if p in untouchable or book.player(p).is_core],
         "replacement": round(book.replacement),
         "attribution": ATTRIBUTION,
     }

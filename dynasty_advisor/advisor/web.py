@@ -124,7 +124,7 @@ class Runner:
                 raise RunError("Set your Sleeper username in the app's Configuration tab.")
             league = str(opts.get("league_id") or "").strip() or None
             log.info("run: strategy=%s league=%s", strategy, "set" if league else "auto-detect")
-            res = run_once(username, league, strategy, DATA)
+            res = run_once(username, league, strategy, DATA, untouchable=opts.get("untouchable") or [])
             self.last = os.path.basename(res.report_path)
             self.summary = "%s strategy · %d API calls · %d trade packages checked · %.0fs" % (
                 res.strategy, res.calls, res.evaluated, res.seconds)

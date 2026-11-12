@@ -25,5 +25,12 @@ configuration:
     description: >-
       Your phone's notify service without the "notify." prefix, e.g.
       mobile_app_iphone. Leave empty to run on schedule without notifying.
+  untouchable:
+    name: Untouchable players
+    description: >-
+      Players the advisor must never offer in a trade, by name (e.g.
+      "Bijan Robinson"). Young players whose value is rising are protected
+      automatically: they're only offered when the return has no veterans in
+      it and loses no long-term value.
   log_level:
     name: Log level

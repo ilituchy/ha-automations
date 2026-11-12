@@ -38,6 +38,35 @@ from .values import Values
 VET_AGE = {"QB": 32, "RB": 26, "WR": 28, "TE": 29}
 YOUNG_AGE = {"QB": 26, "RB": 24, "WR": 25, "TE": 25}
 
+#: Dynasty age curve. FantasyCalc's dynasty values already price age in, but
+#: they are a market average; the owner's rule is sharper ("i wouldnt want to
+#: trade for travis kelce in dynasty"), so every strategy applies this curve
+#: on top, scaled by the strategy's ``age`` strength.
+#: Peak age by position, and how much value falls per year past it.
+PEAK_AGE = {"QB": 30, "RB": 25, "WR": 27, "TE": 28}
+DECLINE = {"QB": 0.06, "RB": 0.12, "WR": 0.09, "TE": 0.09}
+#: Credit per year younger than peak, capped at YOUTH_CAP.
+YOUTH_RATE, YOUTH_CAP, DECLINE_CAP = 0.04, 0.20, 0.70
+#: A draft pick is the youngest asset there is.
+PICK_YOUTH = 0.10
+
+
+def age_curve(a: "Asset") -> float:
+    """Unscaled adjustment for an asset's age: +0.20 for a 22-year-old WR,
+    -0.70 for a 37-year-old TE, 0 at peak or with no age."""
+    if a.kind == "pick":
+        return PICK_YOUTH
+    if a.age is None or a.position not in PEAK_AGE:
+        return 0.0
+    d = a.age - PEAK_AGE[a.position]
+    if d < 0:
+        return min(YOUTH_CAP, -d * YOUTH_RATE)
+    return -min(DECLINE_CAP, d * DECLINE[a.position])
+
+
+def age_adjusted(a: "Asset", strength: float) -> float:
+    return a.vor * max(0.0, 1.0 + strength * age_curve(a))
+
 
 @dataclass(frozen=True)
 class Asset:
@@ -50,10 +79,18 @@ class Asset:
     now: float  # raw rest-of-season value
     vor: float  # dynasty value over replacement
     pick: Optional[Pick] = None
+    trend: float = 0.0  # FantasyCalc 30-day value change
 
     @property
     def is_vet(self) -> bool:
         return self.kind == "player" and self.age is not None and self.age >= VET_AGE.get(self.position, 99)
+
+    @property
+    def is_core(self) -> bool:
+        """A young player whose value is still climbing: the asset a dynasty
+        team builds around. Offered only for no-loss, no-veteran returns."""
+        return self.kind == "player" and self.trend > 0 and self.age is not None \
+            and self.age <= YOUNG_AGE.get(self.position, 0)
 
     @property
     def is_young(self) -> bool:
@@ -136,6 +173,7 @@ class AssetBook:
             dyn=dyn,
             now=pv.redraft if pv else 0.0,
             vor=max(0.0, dyn - self.replacement),
+            trend=pv.trend30 if pv else 0.0,
         )
         self._cache[pid] = a
         return a

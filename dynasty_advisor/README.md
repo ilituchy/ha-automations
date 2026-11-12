@@ -72,8 +72,16 @@ All values are FantasyCalc units, **over replacement** (minus the median value
 of the best `n_teams` free agents), so two bench players never add up to one
 starter and 4th-round picks count for roughly nothing.
 
-* **mine** = strategy-weighted dynasty change + change in my best
-  rest-of-season lineup.
+* **mine** = strategy-weighted, **age-adjusted** dynasty change + change in my
+  best rest-of-season lineup. The age curve (`assets.age_curve`: peak QB 30,
+  RB 25, WR 27, TE 28; +4%/yr younger up to +20%, -6 to -12%/yr older up to
+  -70%) applies in every strategy, scaled 0.6 / 0.9 / 1.3 for contend /
+  balanced / rebuild. Contend weights dynasty 0.8 and lineup 0.5.
+* **Dynasty guardrails** (`TradeSearch.acceptable_for_me`), every strategy:
+  no idea may lose more than 5% of the package in age-adjusted dynasty value;
+  a *core* player (young for his position, FantasyCalc value rising) is
+  offered only for a return with no veterans and no dynasty loss; players in
+  the `untouchable` option are never offered.
 * **theirs** = the same rule from their seat: a seller judges as a rebuilder
   (veterans down, youth/picks up, ignores its lineup); a contender judges on
   its lineup.

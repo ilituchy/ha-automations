@@ -183,6 +183,10 @@ td.num, th.num { text-align:right; }
 .pk { display:inline-flex; align-items:baseline; gap:6px; padding:5px 10px; border-radius:10px; background:var(--sunk);
   border:1px solid var(--line); font-size:13px; font-weight:600; }
 .pk small { font-weight:400; color:var(--text-3); font-variant-numeric:tabular-nums; }
+.core { font-size:10px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--text-2);
+  border:1px solid var(--line-2); border-radius:5px; padding:0 4px; margin-left:6px; vertical-align:1px; }
+.prot { display:flex; flex-wrap:wrap; gap:8px; padding:14px 16px; }
+.prot .pk { align-items:center; }
 .pk.r1 { border-color:color-mix(in srgb, var(--accent) 45%, var(--line)); }
 
 .history { display:flex; flex-wrap:wrap; gap:6px; }
@@ -218,9 +222,10 @@ def _asset_row(a: Dict) -> str:
         extra.append(str(a["age"]))
     if a.get("via"):
         extra.append("via " + a["via"])
-    return ("<div class=asset><span class='pos %s'>%s</span><span class=nm>%s%s</span><span class=val>%s</span></div>"
+    core = "<span class=core title='Young and rising: protected'>core</span>" if a.get("core") else ""
+    return ("<div class=asset><span class='pos %s'>%s</span><span class=nm>%s%s%s</span><span class=val>%s</span></div>"
             % (_e(tag), _e(tag), _pl(a),
-               "<small>%s</small>" % _e(" · ".join(extra)) if extra else "", _n(a.get("value") or 0)))
+               "<small>%s</small>" % _e(" · ".join(extra)) if extra else "", core, _n(a.get("value") or 0)))
 
 
 def _swap(pk: Dict) -> str:
@@ -400,8 +405,15 @@ def render_view(v: Dict) -> str:
     out.append("<section><div class=sec-head><h2>Roster moves</h2></div>%s</section>" % _moves(v["moves"]))
     out.append("<section><div class=sec-head><h2>League</h2><span class='small faint'>projected finish</span></div>%s</section>" % _teams(v["teams"]))
     out.append("<section><div class=sec-head><h2>Managers</h2><span class='small faint'>most likely to accept first</span></div>%s</section>" % _managers(v["managers"]))
+    if v.get("protected"):
+        out.append("<section><div class=sec-head><h2>Protected</h2><span class='small faint'>never offered for veterans or at a loss</span></div>"
+                   "<div class='card prot'>%s</div></section>" % "".join(
+                       "<span class=pk><span class='pos %s'>%s</span> %s <small>%s · %s</small></span>" % (
+                           _e(p["pos"]), _e(p["pos"]), _pl(p), _e(p.get("age") or "?"),
+                           "untouchable" if p.get("untouchable") else "young &amp; rising")
+                       for p in v["protected"]))
     out.append("<section><div class=sec-head><h2>Your picks</h2></div>%s</section>" % _picks(v["picks"]))
     out.append("<footer>Values are FantasyCalc dynasty values; trades compare value over replacement (%s, the median of the best free agents). "
-               "“Your lineup” is the change in your best starting lineup’s rest-of-season value. Past trades are judged at today’s values. %s</footer>"
+               "Your side is age-adjusted on a dynasty curve (peak QB 30, RB 25, WR 27, TE 28) and no idea may lose long-term value. “Your lineup” is the change in your best starting lineup’s rest-of-season value. Past trades are judged at today’s values. %s</footer>"
                % (_n(v.get("replacement") or 0), _e(v.get("attribution"))))
     return "\n".join(out)

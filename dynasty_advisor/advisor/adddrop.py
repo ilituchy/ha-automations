@@ -63,7 +63,7 @@ def recommend(
     strategy: str = "balanced",
     n: int = 8,
 ) -> AddDropReport:
-    w_dyn, w_now, _y, _v = STRATEGIES[strategy]
+    w_dyn, w_now, _age = STRATEGIES[strategy]
     team = league.teams[me]
     slots = league.starter_slots
     idx = book.index

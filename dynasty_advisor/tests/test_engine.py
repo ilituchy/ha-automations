@@ -115,8 +115,48 @@ class TestTrades(unittest.TestCase):
         self.assertEqual(package_value([]), 0.0)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestAge(unittest.TestCase):
+    def test_age_curve(self):
+        from advisor.assets import Asset, age_curve
+        def a(pos, age):
+            return Asset("x", "player", "x", pos, age, 1000, 1000, 1000)
+        self.assertAlmostEqual(age_curve(a("WR", 22)), 0.20)
+        self.assertAlmostEqual(age_curve(a("TE", 37)), -0.70)  # Kelce: capped decline
+        self.assertEqual(age_curve(a("WR", 27)), 0.0)
+        self.assertLess(age_curve(a("RB", 28)), age_curve(a("QB", 33)))  # RBs age fastest
+
+    def test_contender_will_not_buy_old_for_young(self):
+        """Owner: "i wouldnt want to trade for travis kelce in dynasty"."""
+        league, _v, _i, teams, book = build()
+        s = TradeSearch(league, book, teams, {}, 1, "contend")
+        # A young WR for a seller's 33-year-old QB that starts for us now.
+        pk = s.evaluate(2, (book.player("w3"),), (book.player("q2"),))
+        self.assertFalse(s.acceptable_for_me(pk))
+        for idea in s.search(10):
+            self.assertGreaterEqual(idea.opening.my_dyn, -0.05 * idea.opening.size)
+
+    def test_core_players_only_for_no_loss_no_veterans(self):
+        from advisor.trades import Package
+        from advisor.assets import Asset
+        core = Asset("c", "player", "c", "WR", 22, 3000, 1000, 2000, trend=50)
+        vet = Asset("v", "player", "v", "TE", 33, 3000, 3000, 2000)
+        young = Asset("y", "player", "y", "RB", 23, 3000, 3000, 2000)
+        self.assertTrue(core.is_core)
+        mk = lambda get, dyn: Package((core,), (get,), 100, 100, dyn, 0, 0, 0, 2000)
+        self.assertFalse(TradeSearch.acceptable_for_me(mk(vet, 10)))
+        self.assertFalse(TradeSearch.acceptable_for_me(mk(young, -10)))
+        self.assertTrue(TradeSearch.acceptable_for_me(mk(young, 10)))
+
+    def test_untouchable_never_offered(self):
+        from advisor.run import resolve_players
+        league, _v, _i, teams, book = build()
+        keep, unknown = resolve_players(["Pw1", "nobody", "w2"], league.teams[1].players, book)
+        self.assertEqual(keep, {"w1", "w2"})
+        self.assertEqual(unknown, ["nobody"])
+        s = TradeSearch(league, book, teams, {}, 1, "contend", untouchable=keep)
+        self.assertFalse({"w1", "w2"} & {a.key for a in s.my_assets()})
+        for idea in s.search(10):
+            self.assertFalse({"w1", "w2"} & {a.key for a in idea.opening.give + idea.ceiling.give})
 
 
 class TestAddDrop(unittest.TestCase):
@@ -130,3 +170,7 @@ class TestAddDrop(unittest.TestCase):
             self.assertNotIn(cheapest, {"q1", "w1", "w2"}, strategy)
             costs = [c.score for c in rep.drops]
             self.assertEqual(costs, sorted(costs))
+
+
+if __name__ == "__main__":
+    unittest.main()
