@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -55,7 +56,8 @@ class CachedHttp:
         if self.offline:
             raise FetchError("offline and not cached: %s" % url)
         data = self._fetch(url)
-        tmp = path + ".tmp"
+        # Per-thread temp name: the web page serves cards on several threads.
+        tmp = "%s.%d.tmp" % (path, threading.get_ident())
         with open(tmp, "w") as f:
             json.dump(data, f)
         os.replace(tmp, path)

@@ -18,6 +18,11 @@ Tuesday evening is deliberate: Sleeper waivers clear just after midnight
 Pacific going into Wednesday. During trade-deadline week the notification is
 marked time-sensitive so it gets through Focus modes.
 
+**Player cards.** Tap any player's name to open his card: headshot, injury
+status, dynasty and rest-of-season value, depth chart, who rosters him, his
+next three games with projections, season-by-season stats and a week-by-week
+game log in your league's own scoring, and the latest news.
+
 Sleeper's public API is read-only, so the app never changes anything in your
 league — every trade and pickup is a suggestion you make yourself in Sleeper.
 

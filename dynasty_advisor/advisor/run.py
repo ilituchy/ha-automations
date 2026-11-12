@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from . import cards
 from .adddrop import recommend
 from .assets import AssetBook
 from .history import load_trades, walk_chain
@@ -114,6 +115,7 @@ def run_once(
         json.dump(view, f, separators=(",", ":"))
     os.replace(vpath + ".tmp", vpath)
     jpath = journal(data_dir, league, strategy, ideas, ad, book)
+    cards.write_index(data_dir, league, players, values, book, me)
     title, message, urgent = summarize(league, ideas, ad)
     return RunResult(out, jpath, md, strategy, http.calls, time.time() - t0, search.evaluated,
                      title, message, urgent)

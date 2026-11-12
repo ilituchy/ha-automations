@@ -21,8 +21,10 @@ which cost that project a debugging session:
 * **Only the ingress proxy may connect** (``172.30.32.2``) when
   ``ADVISOR_INGRESS_ONLY=1``, so the port is useless even if published.
 
-No JavaScript: a form POST, a 303 back to the page, and a meta refresh while a
-run is in flight.
+Running is a plain form POST, a 303 back to the page, and a meta refresh while
+a run is in flight. The only script opens player cards in a dialog
+(``cards.JS``); every player name is also a real link to ``player?id=...``, so
+the page works without it.
 """
 
 from __future__ import annotations
@@ -40,7 +42,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
-from . import notify, page
+from . import cards, notify, page
+from .http import CachedHttp
 from .run import RunError, run_once
 from .trades import STRATEGIES
 
@@ -145,6 +148,34 @@ class Runner:
 
 
 RUNNER = Runner()
+INDEX = cards.Index(DATA)
+_CARD_HTTP: List[CachedHttp] = []
+
+
+def card_view(pid: str) -> Dict:
+    if not _CARD_HTTP:
+        _CARD_HTTP.append(CachedHttp(os.path.join(DATA, "cache")))
+    try:
+        return cards.build_card(INDEX.get(), pid, _CARD_HTTP[0])
+    except Exception as e:  # noqa: BLE001 -- one bad card must not take down the page
+        log.error("card %s failed:\n%s", pid, traceback.format_exc())
+        return {"error": "Could not build this card: %s" % type(e).__name__}
+
+
+def _doc(title: str, body: str, refresh: str = "") -> str:
+    return """<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width, initial-scale=1">
+<meta name=referrer content=no-referrer>%s<title>%s</title><style>%s%s</style></head>
+<body><main>%s</main>%s%s</body></html>""" % (refresh, _e(title), page.CSS, cards.CSS, body, cards.SHELL, cards.JS)
+
+
+def render_player(pid: str, frag: bool) -> str:
+    v = card_view(pid)
+    card = cards.card_html(v)
+    if frag:
+        return card
+    return _doc("%s · Dynasty Advisor" % (v.get("name") or "Player"),
+                "<div class=ppage><a class=back href='./'>‹ Dynasty Advisor</a>%s</div>" % card)
 
 
 def list_reports(limit: int = 20) -> List[str]:
@@ -311,16 +342,12 @@ def render_page(selected: Optional[str]) -> str:
             "<a href='?r=%s'%s>%s</a>" % (_e(n), " class=cur" if n == name else "", _e(report_label(n))) for n in reports)
     if not name:
         body = "<div class='card trade'><p>No reports yet. Press <b>Run now</b>.</p></div>"
-    return """<!doctype html><html lang=en><head><meta charset=utf-8>
-<meta name=viewport content="width=device-width, initial-scale=1">
-<meta name=referrer content=no-referrer>%s<title>Dynasty Advisor</title><style>%s</style></head>
-<body><main>
+    return _doc("Dynasty Advisor", """
 <header class=head><div class=brand><h1>Dynasty Advisor</h1><div class=sub>%s</div></div>
 <form class=run method=post action=run><select name=strategy aria-label=Strategy%s>%s</select>%s%s</form></header>
 <div class=status>%s</div>
-%s%s%s
-</main></body></html>""" % (refresh, page.CSS, _e(sub), " disabled" if r.running else "", select, check, button,
-                            "".join("<span>%s</span>" % _e(x) for x in status), err, body, hist)
+%s%s%s""" % (_e(sub), " disabled" if r.running else "", select, check, button,
+             "".join("<span>%s</span>" % _e(x) for x in status), err, body, hist), refresh)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -348,11 +375,15 @@ class Handler(BaseHTTPRequestHandler):
         if not self._allowed():
             return
         u = urlparse(self.path)
+        q = parse_qs(u.query)
+        if u.path.rstrip("/").endswith("/player") or u.path == "player":
+            pid = (q.get("id") or [""])[0]
+            return self._send(200, render_player(pid, (q.get("frag") or [""])[0] == "1"))
         if u.path.rstrip("/") not in ("", "/index.html"):
             if u.path.endswith("/health"):
                 return self._send(200, "ok", "text/plain")
             return self.send_error(404)
-        sel = (parse_qs(u.query).get("r") or [None])[0]
+        sel = (q.get("r") or [None])[0]
         if sel and not REPORT_RE.match(sel):
             sel = None
         self._send(200, render_page(sel))

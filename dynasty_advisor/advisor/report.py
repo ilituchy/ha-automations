@@ -263,7 +263,7 @@ def _asset_view(a: Asset) -> dict:
     if " via " in label:
         label, via = label.split(" via ", 1)
     return {"name": label, "kind": a.kind, "pos": a.position, "age": round(a.age) if a.age else None,
-            "value": round(a.dyn), "via": via}
+            "value": round(a.dyn), "via": via, "id": a.key if a.kind == "player" else None}
 
 
 def _pkg_view(pk: Package) -> dict:
@@ -343,7 +343,7 @@ def build_view(league: League, me: int, strategy: str, teams: Dict[int, TeamProf
         "moves": {
             "active": ad.active_count, "active_max": ad.active_max,
             "reserve_open": max(0, ad.reserve_open), "open_spots": ad.open_spots,
-            "ir": [{"name": a.label, "pos": a.position, "status": (book.index.get(a.key) or {}).get("injury_status")}
+            "ir": [{"name": a.label, "id": a.key, "pos": a.position, "status": (book.index.get(a.key) or {}).get("injury_status")}
                    for a in ad.ir_moves],
             "actions": [{"add": dict(_asset_view(a.asset), team=a.nfl_team, depth=a.depth, injury=a.injury,
                                      starts=a.now_delta > 0),

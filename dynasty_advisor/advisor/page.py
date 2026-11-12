@@ -197,6 +197,15 @@ MODE_LABEL = {"seller": "Selling", "bubble": "Bubble", "contender": "Contending"
 CHANCE_PIPS = {"likely": 3, "plausible": 2}
 
 
+def _pl(a: Dict, key: str = "name") -> str:
+    """A player's name, linked to his card when the view carries his id."""
+    name = _e(a.get(key))
+    pid = a.get("id")
+    if not pid:
+        return name
+    return "<a class=pl data-card href='player?id=%s'>%s</a>" % (_e(pid), name)
+
+
 def _mode_chip(mode: str) -> str:
     return "<span class=chip><span class='dot %s'></span>%s</span>" % (_e(mode), _e(MODE_LABEL.get(mode, mode)))
 
@@ -210,7 +219,7 @@ def _asset_row(a: Dict) -> str:
     if a.get("via"):
         extra.append("via " + a["via"])
     return ("<div class=asset><span class='pos %s'>%s</span><span class=nm>%s%s</span><span class=val>%s</span></div>"
-            % (_e(tag), _e(tag), _e(a.get("name")),
+            % (_e(tag), _e(tag), _pl(a),
                "<small>%s</small>" % _e(" · ".join(extra)) if extra else "", _n(a.get("value") or 0)))
 
 
@@ -285,11 +294,11 @@ def _ord(n: int) -> str:
 def _moves(m: Dict) -> str:
     rows = []
     if m["ir"] and m["reserve_open"]:
-        names = ", ".join("%s (%s)" % (x["name"], x["status"]) for x in m["ir"])
+        names = ", ".join("%s (%s)" % (_pl(x), _e(x["status"])) for x in m["ir"])
         rows.append("<div class='card move'><span class=verb>IR</span><div class=what>"
                     "<b>Move %d to IR</b> <span class=muted>— choose from %s</span>"
                     "<div class=why>%d open IR spot%s; each move frees an active roster spot at no cost</div></div></div>"
-                    % (min(m["reserve_open"], len(m["ir"])), _e(names), m["reserve_open"], "" if m["reserve_open"] == 1 else "s"))
+                    % (min(m["reserve_open"], len(m["ir"])), names, m["reserve_open"], "" if m["reserve_open"] == 1 else "s"))
     for a in m["actions"]:
         add, drop = a["add"], a["drop"]
         why = []
@@ -300,9 +309,9 @@ def _moves(m: Dict) -> str:
         if add.get("injury"):
             why.append(add["injury"])
         what = "<b>%s</b> <span class=muted>%s %s · %s</span>" % (
-            _e(add["name"]), _e(add.get("team") or ""), _e(add.get("pos")), _n(add.get("value") or 0))
+            _pl(add), _e(add.get("team") or ""), _e(add.get("pos")), _n(add.get("value") or 0))
         if drop:
-            what += " <span class=muted>for</span> <b>%s</b> <span class=muted>%s</span>" % (_e(drop["name"]), _n(drop.get("value") or 0))
+            what += " <span class=muted>for</span> <b>%s</b> <span class=muted>%s</span>" % (_pl(drop), _n(drop.get("value") or 0))
         else:
             why.insert(0, "into an open spot")
         rows.append("<div class='card move'><span class=verb>Add</span><div class=what>%s<div class=why>%s</div></div></div>"
@@ -317,16 +326,16 @@ def _moves(m: Dict) -> str:
               "<th class=num>Dynasty</th><th class=num>Rest of season</th><th>Starts for you</th></tr></thead><tbody>%s</tbody></table></div>"
               % "".join("<tr><td><b>%s</b><span class=tag>%s</span></td><td><span class='pos %s'>%s</span></td><td class=num>%s</td>"
                         "<td class=num>%s</td><td class=num>%s</td><td>%s</td></tr>"
-                        % (_e(f["name"]), _e(f.get("team") or "FA"), _e(f["pos"]), _e(f["pos"]), _e(f.get("age") or ""),
+                        % (_pl(f), _e(f.get("team") or "FA"), _e(f["pos"]), _e(f["pos"]), _e(f.get("age") or ""),
                            _n(f["value"]), _n(f["now"]), _signed(f["starts"]) if f["starts"] else "<span class=faint>no</span>")
                         for f in m["free_agents"]))
     extra = []
     if m.get("trending_unvalued"):
         extra.append("Trending on Sleeper, not yet valued: " + ", ".join(
-            "%s (%s %s)" % (_e(t["name"]), _e(t.get("team")), _e(t["pos"])) for t in m["trending_unvalued"]))
+            "%s (%s %s)" % (_pl(t), _e(t.get("team")), _e(t["pos"])) for t in m["trending_unvalued"]))
     if m.get("cheapest"):
         extra.append("Cheapest to lose: " + ", ".join(
-            "%s (%s%s)" % (_e(c["name"]), _n(c["value"]), ", starting" if c.get("starter") else "") for c in m["cheapest"]))
+            "%s (%s%s)" % (_pl(c), _n(c["value"]), ", starting" if c.get("starter") else "") for c in m["cheapest"]))
     return line + "<div class=moves>%s</div>%s%s" % ("".join(rows), fa,
                                                      "".join("<p class='small muted'>%s</p>" % x for x in extra))
 

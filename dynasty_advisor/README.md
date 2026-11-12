@@ -30,6 +30,7 @@ Where each lives:
 | More aggressive with frequent accepters | `ManagerProfile.edge` sets how far the opening offer leans our way |
 | Losing teams sell | `teams.py` modes (seller / bubble / middle / contender); sellers judge trades as rebuilders |
 | Add/drop | `adddrop.py` — IR moves first, open spots, then swaps that clear a margin |
+| Player cards (tap a name) | `cards.py` — bio, values, schedule + projections, stats and game log in league scoring, news |
 
 Lineup optimisation exists only as a measuring tool (`lineup.py`), never as advice.
 
@@ -55,7 +56,8 @@ In Home Assistant the app runs as an ingress page (`advisor/web.py`) with a
 `strategy`: `auto` (default) follows your team's own mode — contender ->
 `contend`, seller -> `rebuild`, else `balanced`.
 
-Output goes to `~/.local/share/dynasty_advisor/`: `reports/YYYY-MM-DD.md`, a
+Output goes to `~/.local/share/dynasty_advisor/`: `reports/YYYY-MM-DD-HHMMSS.md`
+(plus a `.json` view for the page), `players.json` (the player-card index), a
 JSON journal per run in `runs/` (the inputs behind every idea), a daily
 FantasyCalc snapshot in `values/`, and the HTTP cache. Standard library only;
 Python 3.9+.
