@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from . import cards
+from . import cards, review
 from .adddrop import recommend
 from .assets import AssetBook
 from .history import load_trades, walk_chain
@@ -67,6 +67,16 @@ def resolve_players(names, roster, book):
     return keep, unknown
 
 
+def league_facts(league) -> dict:
+    """Format facts the reviewer needs and the view does not carry."""
+    sc = league.scoring
+    rec = float(sc.get("rec") or 0)
+    bits = ["%g PPR" % rec if rec else "non-PPR", "%g-point passing TDs" % float(sc.get("pass_td") or 4)]
+    if sc.get("bonus_rec_te"):
+        bits.append("TE premium +%g per catch" % float(sc["bonus_rec_te"]))
+    return {"slots": list(league.starter_slots), "superflex": league.superflex, "scoring": ", ".join(bits)}
+
+
 def run_once(
     username: str,
     league_id: Optional[str],
@@ -76,6 +86,8 @@ def run_once(
     offline: bool = False,
     n_trades: int = 10,
     untouchable=(),
+    api_key: str = "",
+    ai_model: str = "",
 ) -> RunResult:
     if strategy != "auto" and strategy not in STRATEGIES:
         raise RunError("unknown strategy %r" % strategy)
@@ -137,12 +149,18 @@ def run_once(
     os.replace(out + ".tmp", out)
     view = build_view(league, me, strategy, teams, managers, ideas, ad, book, values.unchanged_days,
                       untouchable=keep, unknown_untouchable=unknown)
+    ipath = cards.write_index(data_dir, league, players, values, book, me)
+    if api_key:
+        with open(ipath) as f:
+            index = json.load(f)
+        review.review_view(view, index, league_facts(league), api_key=api_key,
+                           model=ai_model or review.DEFAULT_MODEL, http=http)
     vpath = out[:-3] + ".json"
     with open(vpath + ".tmp", "w") as f:
         json.dump(view, f, separators=(",", ":"))
     os.replace(vpath + ".tmp", vpath)
     jpath = journal(data_dir, league, strategy, ideas, ad, book)
-    cards.write_index(data_dir, league, players, values, book, me)
-    title, message, urgent = summarize(league, ideas, ad)
+    skip = review.passed(view)
+    title, message, urgent = summarize(league, [i for n, i in enumerate(ideas, 1) if n not in skip], ad)
     return RunResult(out, jpath, md, strategy, http.calls, time.time() - t0, search.evaluated,
                      title, message, urgent)

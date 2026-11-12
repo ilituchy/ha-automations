@@ -4,14 +4,17 @@
 # Supervisor 2026.04.0 BUILD_FROM is only passed when a build file exists.
 FROM ghcr.io/home-assistant/base-python:3.13-alpine3.24-2026.06.1
 
-ARG BUILD_VERSION="0.5.0"
+ARG BUILD_VERSION="0.6.0"
 ARG BUILD_ARCH="amd64"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app
 
-# Standard library only: nothing to pip install.
+# Standard library only, except the Anthropic SDK for the optional AI review
+# (advisor/review.py imports it lazily; everything else runs without it).
+RUN pip install --no-cache-dir "anthropic>=0.125,<2"
+
 COPY advisor /app/advisor
 COPY rootfs /
 

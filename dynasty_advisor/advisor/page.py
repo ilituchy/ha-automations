@@ -153,6 +153,17 @@ details.ceil summary::-webkit-details-marker { display:none; }
 details.ceil summary::before { content:"›"; display:inline-block; margin-right:6px; transition:transform .15s; }
 details.ceil[open] summary::before { transform:rotate(90deg); }
 details.ceil .swap { margin:10px 0 8px; }
+.rv { margin-top:12px; padding:10px 12px; border-radius:10px; background:var(--sunk); border-left:3px solid var(--text-3); font-size:13.5px; }
+.rv p { margin:4px 0 0; color:var(--text); line-height:1.45; }
+.rv p.rv-watch { color:var(--text-2); }
+.rv.go { border-left-color:var(--good); } .rv.consider { border-left-color:var(--bubble); } .rv.pass { border-left-color:var(--bad); }
+.rv-tag { font-size:11px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--text-2); }
+.move .rv { margin-top:8px; }
+.card.overview { padding:14px 16px; margin:0 0 14px; }
+.card.overview p { margin:4px 0 0; font-size:14px; line-height:1.5; }
+details.passed { margin-top:14px; padding:12px 16px; }
+details.passed summary { cursor:pointer; font-weight:600; color:var(--text-2); }
+details.passed .trade { margin-top:12px; box-shadow:none; }
 
 /* moves */
 .moves { display:grid; gap:10px; }
@@ -246,6 +257,17 @@ def _metrics(pk: Dict) -> str:
     return "<div class=metrics>%s</div>" % "".join(m)
 
 
+VERDICT_LABEL = {"go": "Reviewer: go", "consider": "Reviewer: consider", "pass": "Reviewer: pass"}
+
+
+def _review(r: Dict) -> str:
+    if not r:
+        return ""
+    watch = "<p class=rv-watch>%s</p>" % _e(r["watch"]) if r.get("watch") else ""
+    return ("<div class='rv %s'><span class=rv-tag>%s</span><p>%s</p>%s</div>"
+            % (_e(r["verdict"]), _e(VERDICT_LABEL.get(r["verdict"], r["verdict"])), _e(r.get("take")), watch))
+
+
 def _trade(i: int, t: Dict) -> str:
     pips = CHANCE_PIPS.get(t["chance"], 1)
     chance = t["chance"].split(" (")[0]
@@ -265,10 +287,10 @@ def _trade(i: int, t: Dict) -> str:
 <div class=t-top><div class=rank>%d</div>
 <div class=t-title><h3>%s %s</h3><div class=ctx>%s</div></div>
 <div class=chance><div class=pips aria-hidden=true>%s</div>%s</div></div>
-%s%s<ul class=notes>%s</ul>%s</article>""" % (
+%s%s%s<ul class=notes>%s</ul>%s</article>""" % (
         i, _e(t["partner"]), _mode_chip(t["mode"]), _e(t.get("context")),
         "".join("<span class=on></span>" if k < pips else "<span></span>" for k in range(3)), _e(chance),
-        _swap(t["opening"]), _metrics(t["opening"]),
+        _swap(t["opening"]), _metrics(t["opening"]), _review(t.get("review")),
         "".join("<li>%s</li>" % _e(n) for n in notes), ceil)
 
 
@@ -319,8 +341,8 @@ def _moves(m: Dict) -> str:
             what += " <span class=muted>for</span> <b>%s</b> <span class=muted>%s</span>" % (_pl(drop), _n(drop.get("value") or 0))
         else:
             why.insert(0, "into an open spot")
-        rows.append("<div class='card move'><span class=verb>Add</span><div class=what>%s<div class=why>%s</div></div></div>"
-                    % (what, _e(" · ".join(why))))
+        rows.append("<div class='card move'><span class=verb>Add</span><div class=what>%s<div class=why>%s</div>%s</div></div>"
+                    % (what, _e(" · ".join(why)), _review(a.get("review"))))
     if not rows:
         rows.append("<div class='card move'><div class='what muted'>No pickup clears the bar over your weakest active player.</div></div>")
     line = "<div class=rosterline><span>Active roster %d/%d</span><span>IR spots open %d</span><span>Open after IR moves %d</span></div>" % (
@@ -396,12 +418,26 @@ def render_view(v: Dict) -> str:
     for w in v.get("warnings") or []:
         out.append("<div class='banner err'><span aria-hidden=true>⚠︎</span><div>%s</div></div>" % _e(w))
     out.append(_tiles(v))
+    rv = v.get("review") or {}
+    if rv.get("error"):
+        out.append("<div class='banner err'><span aria-hidden=true>⚠︎</span><div><b>AI review unavailable</b> — "
+                   "these ideas are unreviewed. %s</div></div>" % _e(rv["error"]))
+    elif rv.get("overview"):
+        out.append("<div class='card overview'><span class=rv-tag>AI review</span><p>%s</p></div>" % _e(rv["overview"]))
     trades = v.get("trades") or []
+    kept = [t for t in trades if (t.get("review") or {}).get("verdict") != "pass"]
+    dropped = [t for t in trades if (t.get("review") or {}).get("verdict") == "pass"]
+    passed = ""
+    if dropped:
+        passed = ("<details class='card passed'><summary>The reviewer passed on %d idea%s</summary>%s</details>" % (
+            len(dropped), "" if len(dropped) == 1 else "s",
+            "".join(_trade(i, t) for i, t in enumerate(dropped, len(kept) + 1))))
     out.append("<section><div class=sec-head><h2>Trade targets</h2><span class='small faint'>%d idea%s, best first</span></div>"
-               "<div class=trades>%s</div></section>" % (
-                   len(trades), "" if len(trades) == 1 else "s",
-                   "".join(_trade(i, t) for i, t in enumerate(trades, 1)) or
-                   "<div class='card trade muted'>No trade found that helps you and that the other manager plausibly accepts.</div>"))
+               "<div class=trades>%s</div>%s</section>" % (
+                   len(kept), "" if len(kept) == 1 else "s",
+                   "".join(_trade(i, t) for i, t in enumerate(kept, 1)) or
+                   "<div class='card trade muted'>No trade found that helps you and that the other manager plausibly accepts.</div>",
+                   passed))
     out.append("<section><div class=sec-head><h2>Roster moves</h2></div>%s</section>" % _moves(v["moves"]))
     out.append("<section><div class=sec-head><h2>League</h2><span class='small faint'>projected finish</span></div>%s</section>" % _teams(v["teams"]))
     out.append("<section><div class=sec-head><h2>Managers</h2><span class='small faint'>most likely to accept first</span></div>%s</section>" % _managers(v["managers"]))

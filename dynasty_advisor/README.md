@@ -31,6 +31,7 @@ Where each lives:
 | Losing teams sell | `teams.py` modes (seller / bubble / middle / contender); sellers judge trades as rebuilders |
 | Add/drop | `adddrop.py` — IR moves first, open spots, then swaps that clear a margin |
 | Player cards (tap a name) | `cards.py` — bio, values, schedule + projections, stats and game log in league scoring, news |
+| AI review (optional) | `review.py` — one Claude request per run: go / consider / pass + reason per idea and pickup, with rosters and recent ESPN news; passes collapse, failures show unreviewed |
 
 Lineup optimisation exists only as a measuring tool (`lineup.py`), never as advice.
 
@@ -47,6 +48,10 @@ Config (kept **outside** this public repo — league ids identify a real team):
 ```json
 {"username": "<sleeper username>", "league_id": "<league id>", "strategy": "auto"}
 ```
+
+The AI review runs when `ANTHROPIC_API_KEY` is set in the environment (or
+`anthropic_api_key` is in the config file) and the `anthropic` package is
+installed; without either, runs are unchanged.
 
 In Home Assistant the app runs as an ingress page (`advisor/web.py`) with a
 **Run now** button, plus scheduled runs that push a summary to your phone

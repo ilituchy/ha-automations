@@ -23,6 +23,18 @@ status, dynasty and rest-of-season value, depth chart, who rosters him, his
 next three games with projections, season-by-season stats and a week-by-week
 game log in your league's own scoring, and the latest news.
 
+**AI review (optional).** Put an Anthropic API key in `anthropic_api_key` and
+every run ends with Claude reading each trade idea and pickup alongside your
+roster, the other team's roster, your league's starting slots and the last
+two weeks of ESPN news. It marks each one **go**, **consider** or **pass**
+with a one- or two-sentence reason, and adds a short overview of what your
+team needs. This catches what the value numbers can't see: injuries, a
+starter who's only filling in, a lost job, a pick that will land late. Ideas
+it passes on move to a collapsed list at the bottom, so you can still read
+them. If the review can't run, the ideas are shown unreviewed under a
+warning. One request per run, about $0.20, billed to your Anthropic account.
+`ai_model` picks the model (default `claude-opus-5-5`).
+
 Sleeper's public API is read-only, so the app never changes anything in your
 league — every trade and pickup is a suggestion you make yourself in Sleeper.
 

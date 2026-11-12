@@ -50,7 +50,9 @@ def main(argv=None) -> int:
 
     try:
         res = run_once(username, league_id, strategy, args.data_dir, offline=args.offline, n_trades=args.trades,
-                       untouchable=cfg.get("untouchable") or [])
+                       untouchable=cfg.get("untouchable") or [],
+                       api_key=os.environ.get("ANTHROPIC_API_KEY") or cfg.get("anthropic_api_key") or "",
+                       ai_model=cfg.get("ai_model") or "")
     except RunError as e:
         print(str(e), file=sys.stderr)
         return 2

@@ -32,5 +32,16 @@ configuration:
       "Bijan Robinson"). Young players whose value is rising are protected
       automatically: they're only offered when the return has no veterans in
       it and loses no long-term value.
+  anthropic_api_key:
+    name: Anthropic API key
+    description: >-
+      Turns on the AI review. Claude reads every trade idea and pickup with
+      both rosters and recent news, and marks each go, consider or pass with a
+      reason. Ideas it passes on move to a collapsed list. About $0.20 a run,
+      billed to your Anthropic account. Leave empty to turn it off.
+  ai_model:
+    name: AI review model
+    description: >-
+      Which Claude model reviews the ideas.
   log_level:
     name: Log level
