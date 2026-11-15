@@ -1112,6 +1112,35 @@ class _FakeReadWithSettings(_FakeRead):
         return self._settings
 
 
+class TestEffectiveSlotCapacity(unittest.TestCase):
+    """ESPN's BE count is roster-size bookkeeping, not a cap on the bench."""
+
+    COUNTS = {0: 1, 1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 11: 3, 12: 3, 13: 3}
+
+    def test_bench_opens_up_to_the_active_roster(self):
+        eff = ids.effective_slot_capacity(self.COUNTS)
+        self.assertEqual(eff[ids.BENCH_SLOT], 13)
+        self.assertEqual(
+            eff[ids.BENCH_SLOT], ids.active_roster_cap(self.COUNTS)
+        )
+
+    def test_ir_is_a_real_cap_and_is_left_alone(self):
+        """ESPN enforces IR size *and* eligibility; it is not bookkeeping."""
+        self.assertEqual(
+            ids.effective_slot_capacity(self.COUNTS)[ids.IR_SLOT], 3
+        )
+
+    def test_starting_slots_are_untouched(self):
+        eff = ids.effective_slot_capacity(self.COUNTS)
+        for slot in (0, 1, 2, 3, 4, 5, 6, 11):
+            self.assertEqual(eff[slot], self.COUNTS[slot], slot)
+
+    def test_a_bench_absent_from_the_counts_still_exists(self):
+        """A league that sends no BE row can still bench; it is not zero."""
+        eff = ids.effective_slot_capacity({11: 10, 13: 3})
+        self.assertEqual(eff[ids.BENCH_SLOT], 10)
+
+
 class TestSlotLimitFallback(unittest.TestCase):
     """A refused packet must not cost the whole day's lineup."""
 
@@ -1146,7 +1175,10 @@ class TestSlotLimitFallback(unittest.TestCase):
         w, http, roster = self._writer()
         w.set_lineup({1: BE, 2: C, 3: PG, 4: UTIL}, scoring_period=5)
         state = {p.player_id: p.current_slot for p in roster}
-        caps = {PG: 1, C: 1, UTIL: 1, BE: 2, IR: 1}
+        # BE is the roster-size figure, not a limit on how many may sit, so
+        # the bench is only bounded by the active roster (PG+C+UTIL+BE = 5).
+        # Starting slots are the ones a step must never overfill.
+        caps = {PG: 1, C: 1, UTIL: 1, BE: 5, IR: 1}
         for body in http.bodies[1:]:
             occupancy = {}
             for slot in state.values():

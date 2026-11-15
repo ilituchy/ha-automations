@@ -501,6 +501,11 @@ class Autopilot:
             "espn.write: lineup writes are verified by reading the roster back; "
             "a 200 from ESPN is not taken as proof that an item was applied"
         )
+        log.info(
+            "solve: the bench is sized by the active roster, not by ESPN's BE "
+            "count; a player priced below lambda is benched even when BE is "
+            "nominally full, so a games-played cap can always be respected"
+        )
 
         for lg in self.leagues:
             try:

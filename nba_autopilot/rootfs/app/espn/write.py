@@ -497,7 +497,9 @@ class EspnWrite:
         """
         capacity = {
             int(s): int(n)
-            for s, n in settings.lineup_slot_counts.items()
+            for s, n in ids.effective_slot_capacity(
+                settings.lineup_slot_counts
+            ).items()
             if int(n) > 0
         }
         # Mutable, because a move ESPN silently refuses has to be abandoned:
@@ -984,8 +986,9 @@ class EspnWrite:
         counts: Dict[SlotId, int] = {}
         for slot in target.values():
             counts[slot] = counts.get(slot, 0) + 1
+        effective = ids.effective_slot_capacity(settings.lineup_slot_counts)
         for slot, n in counts.items():
-            cap = settings.lineup_slot_counts.get(slot)
+            cap = effective.get(slot)
             if cap is None:
                 raise PreflightError(
                     "target uses slot %s which this league does not have"

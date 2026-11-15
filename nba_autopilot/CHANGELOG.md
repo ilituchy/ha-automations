@@ -8,6 +8,27 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **ESPN's `BE` count was read as a cap on the bench, which forced starts over
+  the games-played cap.** `lineupSlotCounts` reports `BE` as roster size minus
+  starting slots -- 10 + 3 for a 13-man roster -- and not as a limit on how
+  many players may sit. ESPN lets a manager bench every player he owns. Read
+  literally, a `BE` of 3 said only three could ever be benched, so a fourth was
+  seated no matter what the optimizer thought of him.
+
+  With a games-played cap that is how a lineup goes over one. On 2026-11-15 the
+  Chairman's roster held 13 players, 11 of them with a game, against a budget
+  of 7 games. The optimizer priced Jared McCain below `lambda` and wanted him
+  benched; three players were already down, so it started him anyway -- eight
+  bodies against a seven-game budget. Going over is not just a forfeited game:
+  ESPN drops the overflow from the score (one game over cost this team 64.5
+  points in matchup period 3) and the league's commissioner penalises it.
+
+  Bench capacity now comes from `ids.effective_slot_capacity`, which sizes `BE`
+  at the active roster and leaves `IR` alone -- that one is a real cap, on both
+  its size and ESPN's own eligibility rule. Applied in the assignment, in
+  `validate_target`, in the stepwise write planner and in `_preflight_lineup`,
+  which had been rejecting a legal four-man bench outright.
+
 - **ESPN silently refuses IR moves in both directions, and the app only
   guarded one.** The 2026-11-09 fix stopped it planning a move *onto* IR for an
   entry marked `FUTURE_TO_IR`. The mirror case went unguarded: a player already

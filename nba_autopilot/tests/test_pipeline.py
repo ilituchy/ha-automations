@@ -63,9 +63,11 @@ def settings(**kw) -> LeagueSettings:
         season_id=2027,
         name="test league",
         scoring_type="H2H_POINTS",
-        # Shaped like the real 10-starter league: 10 starting slots, 3 bench,
-        # 3 IR. The exact-capacity property that makes benching impossible on a
-        # light slate only shows up at realistic proportions.
+        # Shaped like the real 10-starter league: 10 starting slots, a BE of
+        # 3 and 3 IR. The BE figure is ESPN's roster-size bookkeeping (10 + 3
+        # = a 13-man roster), NOT a limit on how many may sit -- see
+        # ``ids.effective_slot_capacity``. Keeping the realistic proportions
+        # here is what exercises that distinction.
         lineup_slot_counts={11: 10, 12: 3, 13: 3},
         lineup_slot_stat_limits=None,
         scoring_items={ids.PTS: 1.0},
@@ -458,10 +460,15 @@ class TestPlanLineup(unittest.TestCase):
         self.assertEqual(len(plan.target), 13)
 
     def test_binding_cap_benches_the_marginal_player(self):
-        """With one game of budget left, only the best start.
+        """With one game of budget left, exactly the best one starts.
 
-        The three benched players must be the three worst, and nobody may be
-        left unassigned -- the whole reason the weights are shifted positive.
+        Nobody may be left unassigned -- the whole reason the weights are
+        shifted positive.
+
+        This used to assert that *three* were benched, which was the bench
+        capacity talking rather than the cap: with a BE read as 3, the other
+        nine had nowhere to go and were seated in spite of a lambda that
+        priced them below zero. One game of budget means one start.
 
         Matchup period 2 on purpose: the 2026-27 season opened on a Tuesday,
         so period 1 of this fixture is a six-day week whose cap is 34 rather
@@ -482,7 +489,37 @@ class TestPlanLineup(unittest.TestCase):
         self.assertAlmostEqual(plan.cap, 40.0)
         self.assertGreater(plan.lam, 0.0)
         benched = {p for p, s in plan.target.items() if s == ids.BENCH_SLOT}
-        self.assertEqual(benched, {10, 11, 12})
+        self.assertEqual(benched, set(range(1, 13)))
+        # Total map: the shift is what guarantees it now that capacity
+        # comfortably exceeds the roster.
+        self.assertEqual(set(plan.target), set(range(13)))
+
+    def test_a_full_bench_never_forces_a_start_over_the_cap(self):
+        """The 2026-11-15 defect, reduced.
+
+        13 players, every one with a game, and a budget of 7. Only the best 7
+        may start. With BE read as a cap of 3 the optimizer could bench just
+        three and had to seat the other three regardless of lambda, putting ten
+        games against a seven-game budget. The live roster went over by one and
+        the owner benched the man by hand.
+        """
+        roster = [player(i) for i in range(13)]
+        projections = {i: projection(i, 30.0 - i) for i in range(13)}
+        cal = calendar_like_2027()
+        used = usage_mod.GamesUsed(
+            games=33.0, source=usage_mod.SOURCE_BOTH, trustworthy=True
+        )
+        plan = self.plan(
+            roster, projections,
+            sett=settings(lineup_slot_stat_limits=gp_cap(40)),
+            sched={1: {7: 1}}, used=used, cal=cal, period=7, matchup=2,
+        )
+        self.assertTrue(plan.feasible, plan.notes)
+        started = [p for p, s in plan.target.items()
+                   if ids.is_starting_slot(s)]
+        self.assertEqual(len(started), 7, plan.target)
+        # And they are the seven best, not whichever seven the bench spilled.
+        self.assertEqual(set(started), set(range(7)))
 
     def test_the_cap_shrinks_in_a_week_with_a_dark_day(self):
         """The live defect: `limitValue` is a rate per game day, not a total.
@@ -775,10 +812,23 @@ class TestValidateTarget(unittest.TestCase):
         self.assertTrue(any("not eligible" in p for p in problems))
 
     def test_over_capacity(self):
-        roster = [player(i) for i in range(4)]
-        target = {i: ids.BENCH_SLOT for i in range(4)}
+        """A *starting* slot over its count. The bench has no such limit."""
+        roster = [player(i) for i in range(11)]
+        target = {i: 11 for i in range(11)}
         problems = pipeline.validate_target(settings(), roster, target)
-        self.assertTrue(any("capacity is 3" in p for p in problems))
+        self.assertTrue(any("capacity is 10" in p for p in problems), problems)
+
+    def test_a_bench_deeper_than_the_be_count_is_legal(self):
+        """ESPN's BE figure is roster-size bookkeeping, not a cap.
+
+        Benching four on a BE of 3 is a lineup ESPN accepts -- the owner set
+        exactly that by hand on 2026-11-15 and it read back clean.
+        """
+        roster = [player(i) for i in range(5)]
+        target = {i: ids.BENCH_SLOT for i in range(4)}
+        target[4] = 11
+        problems = pipeline.validate_target(settings(), roster, target)
+        self.assertEqual(problems, [], problems)
 
     def test_partial_map(self):
         roster = [player(1), player(2)]

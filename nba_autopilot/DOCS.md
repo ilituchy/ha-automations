@@ -700,6 +700,51 @@ Do not "fix" this by re-reading the roster after a write and comparing: ESPN's
 read API lagged a confirmed write by more than a minute in testing, so that
 check reports failures that did not happen.
 
+### `BE` in `lineupSlotCounts` is not a cap on the bench
+
+ESPN sends `rosterSettings.lineupSlotCounts` with a `BE` entry, and it is
+tempting to read it as "this many players may sit". It is not. `BE` is roster
+size minus the starting slots -- a 10-starter league with a 13-man roster sends
+`BE: 3` -- and ESPN will happily accept a lineup with far more than that on the
+bench. You can bench **every player you own** and field nobody; ESPN takes the
+write without complaint.
+
+Reading it as a cap is actively dangerous in a league with a games-played cap,
+because it can make the only legal lineup unreachable:
+
+| 2026-11-15, Chairman's | |
+| --- | --- |
+| Roster | 13 |
+| Players with a game | 11 |
+| `BE` as sent | 3 |
+| Games left under the cap | 7 |
+
+Eleven players needed somewhere to stand and only three could sit, so eight
+had to start against a seven-game budget. The optimizer had priced the eighth
+man *below* `lambda` and wanted him benched; it had nowhere to put him. The
+owner benched him by hand in the ESPN app and the roster read back with four on
+`BE` and `PG` empty -- which is to say ESPN never had a problem with it.
+
+Going over is expensive. ESPN does not block the start; it counts the games,
+flags `limitExceeded`, and drops the overflow from your score. Measured across
+matchup period 3 of 2026-27:
+
+| Over the cap by | Points dropped |
+| --- | --- |
+| 1 | 64.5 |
+| 4 | 186.5 |
+| 6 | 224.0 |
+| 7 | 258.0 |
+
+Note the first row: **one game over cost 64.5 points**, so ESPN is not dropping
+your cheapest game. Treat the cap as a hard constraint, not something to
+trade off against expected value.
+
+Use `ids.effective_slot_capacity`, never raw `lineupSlotCounts`, anywhere a
+slot capacity is enforced. It sizes `BE` at the active roster and leaves `IR`
+untouched -- IR *is* a real cap, on its size and on ESPN's injury-designation
+eligibility.
+
 ### A 200 from ESPN does not mean the lineup changed
 
 This was the cause of the `Too many players in the SG slot (maximum 1)`

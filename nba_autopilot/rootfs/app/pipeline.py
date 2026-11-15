@@ -363,9 +363,17 @@ def plan_lineup(
 
     # -- the assignment ----------------------------------------------------
 
+    # Bench capacity comes from ``effective_slot_capacity``, not raw
+    # ``lineupSlotCounts``: ESPN's BE figure is roster-size bookkeeping, not a
+    # limit on how many may sit. Reading it literally left the assignment no
+    # way to bench a player it had priced below ``lam`` once three were already
+    # down, which is how a lineup goes over a games-played cap. See the note on
+    # that function.
     capacity: Dict[SlotId, int] = {
         int(s): int(n)
-        for s, n in settings.lineup_slot_counts.items()
+        for s, n in ids.effective_slot_capacity(
+            settings.lineup_slot_counts
+        ).items()
         if int(n) > 0 and int(s) != ids.IR_SLOT
     }
     # No special case for an exhausted cap. There used to be one: it gave every
@@ -387,12 +395,16 @@ def plan_lineup(
 
     scale = max([abs(x) for x in rc.values()] + [1.0])
     stick = STICKINESS * scale
-    # Every weight is shifted strictly positive. This is not cosmetic: slot
-    # capacity exactly equals the non-IR roster size, so *every* movable player
-    # must be placed somewhere -- and ``max_weight_assignment`` is free to leave
-    # a player unassigned, which it would prefer over a negative weight. With a
-    # negative-valued player left out, the resulting map is not total and the
-    # whole day's lineup is discarded.
+    # Every weight is shifted strictly positive, so that every movable player
+    # is placed and the resulting map is total -- ``max_weight_assignment`` is
+    # free to leave a player unassigned, which it would prefer over a negative
+    # weight, and a partial map discards the whole day's lineup.
+    #
+    # This used to be justified by "slot capacity exactly equals the non-IR
+    # roster size, so every player must be placed". That was an artifact of
+    # reading BE as a cap; with the bench at its true size, capacity exceeds
+    # the roster and a player *could* be left out. The shift is what rules
+    # that out, so it carries the invariant on its own now.
     #
     # The shift is neutral to the optimum: it adds the same constant to every
     # slot a player could occupy, and the matching assigns each player exactly
@@ -648,7 +660,9 @@ def validate_target(
     for slot in target.values():
         counts[slot] = counts.get(slot, 0) + 1
     for slot, n in sorted(counts.items()):
-        capacity = settings.lineup_slot_counts.get(slot)
+        capacity = ids.effective_slot_capacity(
+            settings.lineup_slot_counts
+        ).get(slot)
         if capacity is None:
             problems.append("slot %s does not exist in this league"
                             % ids.slot_name(slot))

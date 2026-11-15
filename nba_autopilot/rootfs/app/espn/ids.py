@@ -341,6 +341,37 @@ def active_roster_cap(lineup_slot_counts: Mapping[SlotId, int]) -> int:
     )
 
 
+def effective_slot_capacity(
+    lineup_slot_counts: Mapping[SlotId, int],
+) -> Dict[SlotId, int]:
+    """``lineupSlotCounts`` with the bench corrected to what ESPN allows.
+
+    ESPN reports BE as *roster size minus starting slots* -- the arithmetic
+    that makes the slot table sum to the roster -- and not as a limit on how
+    many players may sit. A manager may bench every player he owns and field
+    nobody; ESPN accepts that write. Read literally, a BE of 3 says only three
+    players may ever be on the bench, which forces a fourth into a starting
+    slot.
+
+    That is not a cosmetic misreading. With a games-played cap it is how a
+    lineup goes over one. On 2026-11-15 the Chairman's roster held 13 players,
+    11 of them with a game, against a remaining budget of 7 games. Benching the
+    four cheapest was the only lineup under the cap, and a literal BE of 3 made
+    it unreachable: the optimizer priced Jared McCain *below* lambda, wanted him
+    benched, and had to seat him anyway because the bench was "full". The owner
+    benched him by hand in the ESPN app, which took it without complaint, and
+    the roster read back with four on BE and PG empty.
+
+    IR is left exactly as ESPN sends it. That one is a real cap, enforced on
+    both its size and the injury designation that makes a player eligible.
+    """
+    out: Dict[SlotId, int] = {
+        int(s): int(n) for s, n in lineup_slot_counts.items() if int(n) > 0
+    }
+    out[BENCH_SLOT] = active_roster_cap(lineup_slot_counts)
+    return out
+
+
 def active_roster_use(slots: Iterable[SlotId]) -> int:
     """How many of those slots are taken, given each player's current slot.
 
