@@ -116,6 +116,9 @@ __all__ = [
     "FORM_PRIOR_GAMES",
     "FORM_WEIGHT_CAP",
     "NBA_SEASON_GAMES",
+    "RECENT_FULL_SHARE",
+    "REALIZED_WEIGHT",
+    "window_games",
     "AvailabilityNote",
     "OREB_SHARE_DEFAULT",
     "BONUS_PRIOR_GAMES",
@@ -201,6 +204,41 @@ NBA_SEASON_GAMES: int = 82
 #: exactly the case the injuries page says nothing about.
 DURABILITY_WEIGHT: float = 0.5
 
+#: Share of the recent window's games a player must have appeared in before he
+#: counts as fully available. At 0.75, six games out of a seven-game window is
+#: a man with a rest day, not a man with a problem, and he takes no haircut.
+RECENT_FULL_SHARE: float = 0.75
+
+#: How much weight realized availability gets against the status prior.
+#:
+#: Much heavier than :data:`DURABILITY_WEIGHT`, because it is a much better
+#: signal and it is answering the question the other one only gestures at.
+#: ESPN's projected season games is a preseason guess about a player's
+#: durability. How many of the last fifteen days' games he actually appeared
+#: in is a measurement of whether he is playing *now*.
+#:
+#: This exists because the absence of a recent window was being read as the
+#: absence of information. On 2026-11-16 the add/drop pool in Chairman's
+#: ranked Cam Thomas, Kevin Porter Jr., D'Angelo Russell and Cam Whitmore as
+#: its four best free agents. Between them they had appeared in two NBA games
+#: all season. Each was listed ACTIVE, each had an empty last-15 split, and
+#: :func:`recent_form` returns a weight of zero for an empty split -- so
+#: ESPN's preseason projection passed into the mean untouched, and
+#: :func:`p_play_for` then read that same preseason projection's 69-game GP
+#: estimate as evidence of durability. Whitmore had been assigned to the G
+#: League three days earlier and was priced at 0.90 to suit up.
+#:
+#: An empty recent window is not missing data. It is the strongest evidence
+#: available that the preseason projection has been overtaken by events.
+#:
+#: 0.85 rather than 1.0: a player can miss a fortnight and return tonight, and
+#: zeroing him outright would make that unrecoverable until he had rebuilt a
+#: window. The residual 0.15 is the room for that case. The asymmetry argument
+#: in :func:`p_play_for` says which way to err -- benching a player who turns
+#: out to play costs one slot, starting one who is ruled out costs the slot and
+#: a game off the cap.
+REALIZED_WEIGHT: float = 0.85
+
 #: Share of a player's rebounds that are offensive, when he has no history to
 #: read it off. Roughly the league-wide split.
 #:
@@ -270,12 +308,21 @@ class AvailabilityNote:
     status_source: str
     p_play: float
     projected_season_games: Optional[float] = None
+    recent_games: Optional[float] = None
+    window_games: Optional[float] = None
 
     def describe(self) -> str:
         bits = ["%s (%s)" % (self.status, self.status_source)]
         if self.projected_season_games is not None:
             bits.append("ESPN projects %.0f/%d games"
                         % (self.projected_season_games, NBA_SEASON_GAMES))
+        if self.recent_games is not None and self.window_games:
+            # Stated whenever it was read, including when it cost nothing, so
+            # that a reader can tell "he has been playing" from "we never
+            # looked". The silent case is the one that produced the bug this
+            # field exists to make visible.
+            bits.append("played %.0f of the last %.0f"
+                        % (self.recent_games, self.window_games))
         return "p_play %.2f: %s" % (self.p_play, ", ".join(bits))
 
 
@@ -601,12 +648,44 @@ def variance_from_mean(mean: Mapping[StatId, float]) -> Dict[StatId, float]:
     return out
 
 
+def window_games(
+    splits: Mapping[PlayerId, Mapping[str, Mapping[StatId, float]]],
+) -> float:
+    """How many games a fully-available player has had in the recent window.
+
+    Read off the cohort rather than from the calendar: the largest last-15
+    count anybody in ``splits`` has. Somebody in a group this size has played
+    every game his team has played, so his count *is* the length of a full
+    slate -- and it needs no schedule, no timezone and no knowledge of which
+    team each player is on.
+
+    Returns 0.0 when nobody has a recent game, which is the honest answer in
+    the preseason, in the first days of a season and over the All-Star break.
+    Callers treat 0.0 as "do not apply", so the measure switches itself off in
+    exactly the periods where it would otherwise punish everybody at once.
+
+    Reading the maximum can only *understate* a full slate -- if every player
+    in a small cohort has missed a game, the largest count is short by one --
+    which makes the resulting haircut gentler. That is the safe direction for
+    a term that only ever reduces a probability.
+    """
+    best = 0.0
+    for by_split in splits.values():
+        split = (by_split or {}).get(ids.SPLIT_LAST_15) or {}
+        got = float(split.get(ids.GP_STAT, 0.0) or 0.0)
+        if got > best:
+            best = got
+    return best
+
+
 def p_play_for(
     entry: RosterEntry,
     *,
     status: Optional[str] = None,
     status_source: str = "espn",
     projected_season_games: Optional[float] = None,
+    recent_games: Optional[float] = None,
+    window: Optional[float] = None,
 ) -> AvailabilityNote:
     """Probability this player suits up today.
 
@@ -616,6 +695,11 @@ def p_play_for(
             Only *honoured when it is worse* than ESPN's -- see below.
         projected_season_games: ESPN's own ``GP`` projection, the durability
             signal pulled out of the per-game split.
+        recent_games: how many of the last fifteen days' games this player
+            actually appeared in.
+        window: how many a fully-available player had, from
+            :func:`window_games`. Zero or ``None`` disables the realized
+            check -- see that function for when that is the right answer.
 
     An external source may only make a player **less** available, never more.
     The asymmetry is on purpose: the sources disagree on freshness as much as on
@@ -641,12 +725,36 @@ def p_play_for(
         if chosen == "ACTIVE":
             p *= (1.0 - DURABILITY_WEIGHT) + DURABILITY_WEIGHT * rate
 
+    # Realized availability: taken as the *worse* of the two reads rather than
+    # multiplied into the first, which is the same rule this function already
+    # applies to an external status source. Two reasons it has to be ``min``
+    # and not another factor.
+    #
+    # It must not double-count. A player designated DAY_TO_DAY who has missed
+    # the last fortnight is one absence described twice, not two absences, and
+    # compounding 0.75 with 0.15 would bury a man on his way back.
+    #
+    # And it must still fire for him. Gating the check on ACTIVE to dodge the
+    # double-count -- the first version of this -- left exactly the players a
+    # soft designation covers. On 2026-11-16 that let Jaden Ivey sit eleventh
+    # in the Chairman's pool at 0.75, having appeared in no game all season:
+    # DAY_TO_DAY priced one night off, and nothing priced the two months.
+    #
+    # Note which number this reads. ``projected_season_games`` above is what
+    # ESPN guessed in September. This is what has happened since.
+    if recent_games is not None and window:
+        full = float(window) * RECENT_FULL_SHARE
+        realized = min(float(recent_games) / full, 1.0) if full > 0 else 1.0
+        p = min(p, (1.0 - REALIZED_WEIGHT) + REALIZED_WEIGHT * realized)
+
     return AvailabilityNote(
         player_id=entry.player_id,
         status=chosen,
         status_source=source,
         p_play=max(min(p, 1.0), 0.0),
         projected_season_games=gp,
+        recent_games=recent_games,
+        window_games=float(window) if window else None,
     )
 
 
@@ -678,6 +786,10 @@ def build_projections(
     projections: Dict[PlayerId, Projection] = {}
     notes: Dict[PlayerId, AvailabilityNote] = {}
     skipped: list = []
+
+    # Once for the whole batch, not per player: it is a property of where the
+    # season is, not of who is being valued.
+    window = window_games(splits)
 
     for entry in roster:
         by_split = splits.get(entry.player_id) or {}
@@ -711,11 +823,19 @@ def build_projections(
         form, form_games, form_w = recent_form(by_split, role=role)
 
         override = (statuses or {}).get(entry.player_id)
+        # Straight off the split, not ``form_games`` from the blend above:
+        # that one falls back to the season total when the recent window is
+        # empty, which is precisely the case this needs to be able to see.
+        recent_games = float(
+            (by_split.get(ids.SPLIT_LAST_15) or {}).get(ids.GP_STAT, 0.0) or 0.0
+        )
         note = p_play_for(
             entry,
             status=override[0] if override else None,
             status_source=override[1] if override else "espn",
             projected_season_games=projected_games,
+            recent_games=recent_games,
+            window=window,
         )
         notes[entry.player_id] = note
 

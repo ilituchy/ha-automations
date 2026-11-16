@@ -105,6 +105,61 @@ used to *waive* the floor, never to raise it. ESPN publishes no projected final
 for basketball, so a lead you can see accumulated is not evidence the week is
 safe — there is no opponent projection behind it.
 
+### A player with no recent games is not a player we know nothing about
+
+Every projection starts from ESPN's **season projection**, with recent form
+blended in proportionally: the more games the last-15-days window holds, the
+more of it counts. A player with no games in that window gets a blend weight of
+zero — which, read literally, means the preseason projection stands untouched.
+
+That is backwards, and it was wrong in a way worth stating because it looked
+like caution. ESPN keeps projecting a player it wrote up in September: a man
+who has not played since October is still carried at 69 of 82 games and
+twenty-odd fantasy points a night. The projection is not revised downward
+when he stops playing, it is simply never revisited. So the players with the
+least evidence behind them floated to the top of the pool, and the ones with
+a real season on record were ranked beneath them.
+
+On 2026-11-16 the four best free agents in Chairman's, by the app's own
+expected value, were Cam Thomas, Kevin Porter Jr., D'Angelo Russell and Cam
+Whitmore. They had appeared in two NBA games between them. Whitmore had been
+assigned to the Grand Rapids Gold three days before, and the app offered him
+in a swap for Jared McCain, who had played fourteen.
+
+The projection itself is left alone — thirty points a night is a fair estimate
+of what Whitmore *would* do with thirty minutes, and that is what the value
+model is for. What is corrected is **`p_play`**, the probability he suits up at
+all. It now reads how many of the last fifteen days' games the player actually
+appeared in, measured against what a fully-available player managed over the
+same window, and takes the **worse** of that and his injury designation rather
+than multiplying the two. Taking the worse of two reads is the rule this app
+already applies to an external status source, and it matters in both
+directions:
+
+- A player carrying a `DAY_TO_DAY` tag who has still played six of the last
+  eight keeps the probability that tag implies. The absence is described twice
+  and counted once.
+- A player carrying the same tag who has played *none* of them is no longer
+  sheltered by it. The first version of this change skipped designated players
+  to avoid double-counting, and so missed exactly the players a soft
+  designation covers — `DAY_TO_DAY` priced one night off while nothing priced
+  the two months behind it.
+
+Three things follow that are worth knowing:
+
+- **It is invisible in the ordinary case.** Six games out of an eight-game
+  window is a rest day; the threshold for "fully available" is 75% of the
+  window, so he takes no haircut at all.
+- **It switches itself off when there is nothing to measure.** The window's
+  length is read off the busiest player in the batch, so in the preseason, in
+  opening week and over the All-Star break it is zero and the check does not
+  run. It cannot bench a league on the first morning of a season.
+- **It does not bench a returning player permanently.** The floor is 0.15, not
+  zero, so one game back begins rebuilding the window immediately.
+
+A player priced this way still shows what drove it on the status page — *played
+0 of the last 8* — rather than only the number it produced.
+
 ### Who gets dropped, and what the app will not weigh
 
 The drop is chosen on **this week's points and nothing else**: what each

@@ -1145,3 +1145,150 @@ class TestTheOpponentAdjustment(unittest.TestCase):
         with_map, _n, _s = projections.build_projections(
             [entry], splits, as_of=as_of, opponent={1234: 0.5})
         self.assertAlmostEqual(with_map[9].mean[ids.PTS], plain[9].mean[ids.PTS])
+
+
+class TestRealizedAvailability(unittest.TestCase):
+    """A player is priced on whether he has been playing, not on September.
+
+    The 2026-11-16 defect. The Chairman's add/drop pool ranked Cam Thomas,
+    Kevin Porter Jr., D'Angelo Russell and Cam Whitmore as its four best free
+    agents; between them they had appeared in two NBA games all season. Each
+    was listed ACTIVE with an empty last-15 split, so ``recent_form`` returned
+    a blend weight of zero and ESPN's preseason projection reached the value
+    model untouched -- and ``p_play_for`` then read that same projection's
+    69-game estimate as evidence of durability. Whitmore had been assigned to
+    the G League three days earlier and was priced at 0.90 to suit up.
+    """
+
+    def _entry(self, pid=1, status="ACTIVE"):
+        return RosterEntry(
+            player_id=pid,
+            name="Player %d" % pid,
+            current_slot=ids.BENCH_SLOT,
+            eligible_slots=frozenset({11}),
+            pro_team_id=7,
+            injury_status=status,
+        )
+
+    def _splits(self, last15_gp, *, projected_gp=70.0):
+        out = {
+            ids.SPLIT_SEASON_PROJECTED: {ids.PTS: 20.0, ids.GP_STAT: projected_gp},
+        }
+        if last15_gp is not None:
+            out[ids.SPLIT_LAST_15] = {ids.PTS: 20.0, ids.GP_STAT: last15_gp}
+        return out
+
+    # -- the window ------------------------------------------------------
+
+    def test_the_window_is_the_busiest_players_game_count(self):
+        got = projections.window_games({
+            1: self._splits(8.0), 2: self._splits(5.0), 3: self._splits(None),
+        })
+        self.assertEqual(got, 8.0)
+
+    def test_no_recent_games_anywhere_means_no_window(self):
+        """Preseason, opening week and the All-Star break all land here.
+
+        Zero has to switch the measure off rather than drive it to its floor,
+        or every player alive is benched on the first morning of a season.
+        """
+        self.assertEqual(projections.window_games({1: self._splits(None)}), 0.0)
+        self.assertEqual(projections.window_games({}), 0.0)
+
+    # -- the haircut -----------------------------------------------------
+
+    def test_an_empty_recent_window_is_evidence_not_silence(self):
+        note = projections.p_play_for(
+            self._entry(), projected_season_games=69.0,
+            recent_games=0.0, window=8.0,
+        )
+        # Not merely lowered: it has to land near the floor, because the
+        # ranking this protects is against players priced in the twenties.
+        self.assertLessEqual(note.p_play, 0.20)
+
+    def test_a_player_who_has_been_playing_is_left_alone(self):
+        """Six of eight is a rest day, not a problem.
+
+        The haircut has to be invisible in the ordinary case or it is just a
+        tax on everybody, and the ordinary case is the overwhelming majority
+        of the pool.
+        """
+        full = projections.p_play_for(
+            self._entry(), projected_season_games=70.0,
+            recent_games=6.0, window=8.0,
+        )
+        untouched = projections.p_play_for(
+            self._entry(), projected_season_games=70.0,
+        )
+        self.assertAlmostEqual(full.p_play, untouched.p_play, places=6)
+
+    def test_a_soft_designation_does_not_shelter_a_two_month_absence(self):
+        """The first version of this gated on ACTIVE and let Ivey through.
+
+        Skipping designated players to avoid double-counting excluded exactly
+        the ones a soft designation covers: DAY_TO_DAY priced one night off
+        and nothing priced the two months behind it.
+        """
+        note = projections.p_play_for(
+            self._entry(status="DAY_TO_DAY"), recent_games=0.0, window=8.0,
+        )
+        self.assertLessEqual(note.p_play, 0.20)
+
+    def test_a_designation_and_a_full_window_are_not_compounded(self):
+        """``min``, not a product. One absence described twice is one absence.
+
+        A player carrying a knock who has still played six of the last eight
+        keeps the probability his designation implies -- multiplying the two
+        reads would bury a man on his way back.
+        """
+        with_window = projections.p_play_for(
+            self._entry(status="DAY_TO_DAY"), recent_games=6.0, window=8.0,
+        )
+        designation_only = projections.p_play_for(
+            self._entry(status="DAY_TO_DAY"),
+        )
+        self.assertAlmostEqual(
+            with_window.p_play, designation_only.p_play, places=6)
+
+    def test_no_window_leaves_every_player_as_he_was(self):
+        off = projections.p_play_for(
+            self._entry(), projected_season_games=70.0,
+            recent_games=0.0, window=0.0,
+        )
+        untouched = projections.p_play_for(
+            self._entry(), projected_season_games=70.0,
+        )
+        self.assertAlmostEqual(off.p_play, untouched.p_play, places=6)
+
+    # -- end to end ------------------------------------------------------
+
+    def test_the_pool_prefers_the_player_who_has_been_playing(self):
+        """Whitmore against McCain, reduced to its two numbers.
+
+        The ghost is given the *better* projection, which is the whole shape
+        of the bug: his is the one nobody has revised.
+        """
+        ghost, regular = self._entry(1), self._entry(2)
+        splits = {
+            1: {ids.SPLIT_SEASON_PROJECTED: {ids.PTS: 30.0, ids.GP_STAT: 69.0}},
+            2: {
+                ids.SPLIT_SEASON_PROJECTED: {ids.PTS: 24.0, ids.GP_STAT: 71.0},
+                ids.SPLIT_LAST_15: {ids.PTS: 24.0, ids.GP_STAT: 8.0},
+            },
+        }
+        built, notes, skipped = projections.build_projections(
+            [ghost, regular], splits,
+            as_of=datetime.datetime(2026, 11, 16, tzinfo=datetime.timezone.utc),
+        )
+        self.assertEqual(skipped, [])
+        model = build_value_model(settings(scoring_items={ids.PTS: 1.0}))
+        # Conditional value still favours the ghost -- the mean is untouched,
+        # and it is not the mean that was wrong.
+        self.assertGreater(
+            model.conditional_value(built[1]), model.conditional_value(built[2]))
+        # Expected value, which is what add/drop ranks on, does not.
+        self.assertLess(
+            model.conditional_value(built[1]) * built[1].p_play,
+            model.conditional_value(built[2]) * built[2].p_play,
+        )
+        self.assertIn("played 0 of the last 8", notes[1].describe())

@@ -506,6 +506,12 @@ class Autopilot:
             "count; a player priced below lambda is benched even when BE is "
             "nominally full, so a games-played cap can always be respected"
         )
+        log.info(
+            "solve: p_play now reads realized availability -- games actually "
+            "played in the last fifteen days against a full slate -- and takes "
+            "the worse of that and the injury designation, so a player who has "
+            "not played is no longer priced on his preseason projection"
+        )
 
         for lg in self.leagues:
             try:

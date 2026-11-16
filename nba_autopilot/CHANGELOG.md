@@ -8,6 +8,30 @@ All notable changes to this app are documented here. The format follows
 
 ### Fixed
 
+- **A player with no recent games was priced on his preseason projection
+  alone, which put men who had not played all season at the top of the
+  add/drop board.** `per_game_mean` anchors on ESPN's season projection and
+  blends recent form in at `games / (games + 2.5)`. For a player with an empty
+  last-15 split that weight is zero, so the projection passed through
+  untouched -- and `p_play_for` then read the *same* projection's GP estimate
+  as its durability signal, so nothing in the chain ever consulted whether he
+  had actually played.
+
+  On 2026-11-16 the Chairman's free-agent pool ranked Cam Thomas, Kevin Porter
+  Jr., D'Angelo Russell and Cam Whitmore as its four best available players.
+  Between them they had appeared in two NBA games all season. Whitmore had
+  been assigned to the G League three days earlier and was priced at 0.90 to
+  suit up; the app offered him for Jared McCain, who had played 14 games.
+
+  `p_play_for` now also reads realized availability -- how many of the last
+  fifteen days' games the player actually appeared in, against what a
+  fully-available player managed over the same window -- and takes the worse
+  of that and the status read rather than compounding them. Whitmore falls
+  from 4th in the pool to 162nd. Players with an ordinary recent window are
+  untouched, and the measure switches itself off when nobody has recent games,
+  so it does not fire in the preseason, in opening week or over the All-Star
+  break.
+
 - **ESPN's `BE` count was read as a cap on the bench, which forced starts over
   the games-played cap.** `lineupSlotCounts` reports `BE` as roster size minus
   starting slots -- 10 + 3 for a 13-man roster -- and not as a limit on how
